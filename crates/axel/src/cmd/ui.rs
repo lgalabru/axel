@@ -18,12 +18,21 @@ const PROMPT_RATIO: f64 = 0.15;
 const PROMPT_RATIO_EXPANDED: f64 = 0.88;
 /// Where an agent pane grows to after launch, and the standalone dashboard size.
 const DASHBOARD_BOUNDS: [f64; 4] = [0.10, 0.08, 0.80, 0.84];
-/// `usage`: a small square HUD, ~300×300 px, computed from the real cell size.
-const USAGE_PX: f64 = 300.0;
-const USAGE_FALLBACK: [f64; 4] = [0.76, 0.64, 0.22, 0.34];
+/// A thread docked into the window: what's already there keeps this share of
+/// the width, and the conversation gets this share of the dock's height (the
+/// composer below it fits itself to its text).
+const DOCK_KEEP: f64 = 0.4;
+const DOCK_STREAM: f64 = 0.85;
+/// The pane the launcher was opened from, handed to the floating panes.
+const ORIGIN_BLOCK_ENV: &str = "AXEL_ORIGIN_BLOCK";
+/// Programs that sit at a prompt when nothing runs in them.
+const SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh"];
+/// The composer pane's label; a split with it below is a docked thread.
+const COMPOSE_LABEL: &str = "compose";
 /// The prompt pane's label, which Rex shows as its title.
 pub const PROMPT_LABEL: &str = "why not today?";
-pub const USAGE_LABEL: &str = "usage";
+/// The usage HUD older versions opened beside the launcher; still closed by the toggle.
+const USAGE_LABEL: &str = "usage";
 pub const THREADS_LABEL: &str = "threads";
 
 /// Harness names the new-agent form cycles through: the builtin kinds, in order.
@@ -57,20 +66,16 @@ pub fn open_launcher() -> Result<()> {
     if let Some(name) = cwd.as_deref().and_then(project_label) {
         name_own_window(&rex, &name, &[]);
     }
-    let env: Vec<(String, String)> = passthrough_env();
+    let mut env: Vec<(String, String)> = passthrough_env();
+    // The pane `axel` was typed in: a thread docked from the launcher takes its place.
+    env.push((ORIGIN_BLOCK_ENV.into(), rex.env().block.clone()));
 
-    // 1. `usage`: the agents HUD, behind the prompt, unfocused.
-    let usage_bounds = usage_bounds(&rex).unwrap_or(USAGE_FALLBACK);
-    let usage_cmd = vec![exe.clone(), "ui".into(), "--screen".into(), "dashboard".into()];
-    if let Err(e) = rex.new_floating_terminal_with_focus(USAGE_LABEL, usage_bounds, &usage_cmd, cwd.as_deref(), &env, false) {
-        eprintln!("axel: could not open the usage pane: {e}");
-    }
-    // 2. `prompt`: what are we building. Focused, in front.
+    // 1. `prompt`: what are we building. Focused, in front.
     let prompt_cmd = vec![exe.clone(), "ui".into(), "--screen".into(), "launch".into()];
     let layer = rex
         .new_floating_terminal_with_focus(PROMPT_LABEL, PROMPT_BOUNDS, &prompt_cmd, cwd.as_deref(), &env, true)
         .context("opening the prompt pane in Rex")?;
-    // 3. `threads`: recent threads, split in under the prompt, unfocused.
+    // 2. `threads`: recent threads, split in under the prompt, unfocused.
     if let Some(prompt) = layer.block_ids.first() {
         let threads_cmd = vec![exe, "ui".into(), "--screen".into(), "threads".into()];
         if let Err(e) = rex.split_below(prompt, THREADS_LABEL, &threads_cmd, PROMPT_RATIO, cwd.as_deref(), &env, false) {
@@ -78,29 +83,6 @@ pub fn open_launcher() -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// ~300×300 px as window fractions, from our own block's cell size. Anchored
-/// to the bottom-right corner of the window with a small margin.
-fn usage_bounds(rex: &axel_rex::Rex) -> Option<[f64; 4]> {
-    let size = rex.terminal_size(&rex.env().block).ok()?;
-    let (cw, ch) = (size.cell_width_px? as f64, size.cell_height_px? as f64);
-    if size.columns == 0 || size.rows == 0 {
-        return None;
-    }
-    // Cell sizes come in device pixels; on a Retina display (tall cells) the
-    // 300 px the user sees is 600 device pixels.
-    let scale = if ch > 20.0 { 2.0 } else { 1.0 };
-    let target = USAGE_PX * scale;
-    // Our block may be a split, not the whole window; the window is at least this big.
-    let win_w = size.columns as f64 * cw;
-    let win_h = size.rows as f64 * ch;
-    let w = (target / win_w).clamp(0.14, 0.60);
-    let h = (target / win_h).clamp(0.14, 0.70);
-    const MARGIN: f64 = 0.02;
-    let x = (1.0 - w - MARGIN).max(0.0);
-    let y = (1.0 - h - MARGIN).max(0.0);
-    Some([x, y, w, h])
 }
 
 /// Floating layers in the current window whose first block is one of ours.
@@ -154,10 +136,15 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |thread_id: &str, agent: &str, text: &str, files: &[std::path::PathBuf]| -> Result<String> { summon(&ctx, thread_id, agent, text, files) };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
-    // Inside Rex a thread opens as its own tab: the conversation streaming
-    // natively above, the composer below.  The dashboard stays where it is
-    // (a floating dashboard closes, as when focusing a session).
+    // From the floating launcher, a thread docks into the window under it:
+    // the conversation above, the composer below, and the launcher closes.
+    // Elsewhere it opens as its own tab.
     let open_thread = |tid: &str| -> Result<()> {
+        if let Some(rex) = &ctx.rex
+            && layer_of_block(rex, &rex.env().block)?.is_some()
+        {
+            return dock_thread(&ctx, rex, tid);
+        }
         open_split_tab(&ctx, tid)?;
         close_own_layer(&ctx);
         Ok(())
@@ -273,13 +260,14 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     }
 }
 
-/// The launcher pane becomes `thread_id`'s view: inside Rex, the stream
-/// with the composer split in below; elsewhere, the thread screen.
+/// After a launch, `thread_id`'s view: from the floating launcher, docked into
+/// the window under it; in a plain pane, the stream here with the composer
+/// split in below; outside Rex, the thread screen.
 fn open_thread_here(ctx: &Ctx, thread_id: &str) -> Result<()> {
     if let Some(rex) = &ctx.rex {
         let block = rex.env().block.clone();
-        if let Ok(Some(layer)) = layer_of_block(rex, &block) {
-            rex.resize_layer(&layer, DASHBOARD_BOUNDS).ok();
+        if let Ok(Some(_)) = layer_of_block(rex, &block) {
+            return dock_thread(ctx, rex, thread_id);
         }
         label_block_with_thread(ctx, rex, &block, thread_id);
         name_window_after_thread(ctx, rex, thread_id);
@@ -423,9 +411,120 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread_id.to_string()];
     let mut env = passthrough_env();
     env.push(("AXEL_STREAM_BLOCK".into(), me.clone()));
-    rex.split_below(&me, "compose", &compose, 0.85, None, &env, true)?;
+    rex.split_below(&me, COMPOSE_LABEL, &compose, DOCK_STREAM, None, &env, true)?;
     let owner_pk = ctx.owner()?.public().to_string();
     axel_tui::run_stream(&ctx.store, &owner_pk, thread_id)
+}
+
+/// Dock `thread_id` into the window this floating launcher sits over, the
+/// conversation above and the composer below.  It goes where the shell `axel`
+/// was typed in is, so nothing else moves: that shell is taken out of the
+/// window, still running, and comes back when the composer closes.  When the
+/// shell is busy (or unknown), the thread docks as a column on the right.
+/// Then Axel's floating panes close, this one last (which ends this process).
+fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
+    let me = rex.env().block.clone();
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+    let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
+    let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
+    let title = axel_tui::util::ellipsize(&thread.title, 48);
+    let cwd = std::env::current_dir().ok();
+    let mut env = passthrough_env();
+    let ids = if let Some(origin) = reusable_origin(rex, &me) {
+        env.push((ORIGIN_BLOCK_ENV.into(), origin.clone()));
+        let ids = rex.split_right_stacked(&origin, (&title, &stream), (COMPOSE_LABEL, &compose), 0.5, DOCK_STREAM, cwd.as_deref(), &env, true)?;
+        let _ = rex.api_call("session.detach_block", serde_json::json!({ "block_id": origin }));
+        ids
+    } else if let Some(anchor) = rex.view().ok().and_then(|v| tiled_root(&v, &me)) {
+        rex.split_right_stacked(&anchor, (&title, &stream), (COMPOSE_LABEL, &compose), DOCK_KEEP, DOCK_STREAM, cwd.as_deref(), &env, true)?
+    } else {
+        // A window with nothing tiled in it: open the thread in its own tab.
+        open_split_tab(ctx, thread_id)?;
+        close_axel_layers(ctx, rex);
+        return Ok(());
+    };
+    let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": ids[1] }));
+    name_window_after_thread(ctx, rex, thread_id);
+    close_axel_layers(ctx, rex);
+    Ok(())
+}
+
+/// The pane `axel` was typed in, when the thread can take its place: in the
+/// launcher's window, and a shell back at its prompt.
+fn reusable_origin(rex: &axel_rex::Rex, me: &str) -> Option<String> {
+    let origin = std::env::var(ORIGIN_BLOCK_ENV).ok().filter(|o| !o.is_empty() && o != me)?;
+    let window = window_of_block(rex, me).ok().flatten()?;
+    (window_of_block(rex, &origin).ok().flatten()? == window && rex.process(&origin).is_ok_and(|p| is_idle_shell(&p))).then_some(origin)
+}
+
+/// From `com.superlogical.terminal.process`: the terminal's foreground
+/// program is a shell, so it's at its prompt with nothing running.
+fn is_idle_shell(process: &serde_json::Value) -> bool {
+    let Some(fg) = process.get("foreground") else { return false };
+    let name = ["argv0", "name"].iter().find_map(|k| fg.get(*k).and_then(|v| v.as_str())).unwrap_or("");
+    let name = name.trim_start_matches('-').rsplit('/').next().unwrap_or("");
+    SHELLS.contains(&name)
+}
+
+/// Put the shell a docked thread replaced back in its place: beside the
+/// stream (or the composer), so when those two close it fills their space.
+fn restore_origin(rex: &axel_rex::Rex, origin: &str, stream: Option<&str>) {
+    let anchor = stream.map(String::from).unwrap_or_else(|| rex.env().block.clone());
+    let moved = rex.api_call(
+        "session.move_block",
+        serde_json::json!({ "block_id": origin, "anchor_block_id": anchor, "direction": "horizontal", "side": "before" }),
+    );
+    if moved.is_ok() {
+        let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": origin }));
+    }
+}
+
+/// Close every Axel floating pane in this window, this process's own last.
+fn close_axel_layers(ctx: &Ctx, rex: &axel_rex::Rex) {
+    let own = layer_of_block(rex, &rex.env().block).ok().flatten();
+    for layer in axel_layers(rex).unwrap_or_default() {
+        if Some(&layer) != own.as_ref() {
+            rex.close_layer(&layer).ok();
+        }
+    }
+    close_own_layer(ctx);
+}
+
+/// The window holding `block` and its tiled layer, from `session.view`.
+fn tiled_layer_of<'a>(view: &'a serde_json::Value, block: &str) -> Option<&'a serde_json::Value> {
+    let has = |l: &serde_json::Value| l.get("blocks").and_then(|b| b.as_array()).is_some_and(|bs| bs.iter().any(|b| b.get("block_id").and_then(|i| i.as_str()) == Some(block)));
+    view.get("windows")?.as_array()?.iter().find_map(|w| {
+        let layers = w.get("layers")?.as_array()?;
+        layers.iter().any(has).then(|| layers.iter().find(|l| l.get("kind").and_then(|k| k.as_str()) == Some("tiled"))).flatten()
+    })
+}
+
+/// The id at the root of the tiled layout of `block`'s window: its one block,
+/// or the split that holds everything.
+fn tiled_root(view: &serde_json::Value, block: &str) -> Option<String> {
+    let root = tiled_layer_of(view, block)?.get("layout")?;
+    root.get("block_id").or_else(|| root.pointer("/split/split_id")).and_then(|i| i.as_str()).map(String::from)
+}
+
+/// The block above `block` in a top/bottom split: the stream a composer serves.
+fn block_above(view: &serde_json::Value, block: &str) -> Option<String> {
+    let layout = tiled_layer_of(view, block)?.get("layout")?;
+    find_split(layout, &|_, after| after == block).map(|(before, _)| before)
+}
+
+/// The first vertical split, depth first, whose halves are two blocks
+/// `(before, after)` that `want` accepts.
+fn find_split(node: &serde_json::Value, want: &dyn Fn(&str, &str) -> bool) -> Option<(String, String)> {
+    let split = node.get("split")?;
+    let id = |n: &serde_json::Value| n.get("block_id").and_then(|i| i.as_str()).map(String::from);
+    if split.get("direction").and_then(|d| d.as_str()) == Some("vertical")
+        && let (Some(before), Some(after)) = (split.get("before").and_then(id), split.get("after").and_then(id))
+        && want(&before, &after)
+    {
+        return Some((before, after));
+    }
+    ["before", "after"].iter().find_map(|side| find_split(split.get(*side)?, want))
 }
 
 /// A new Rex tab with the stream above and the composer below; the composer gets focus.
@@ -436,7 +535,7 @@ fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
     let label = axel_tui::util::ellipsize(&thread.title, 40);
-    let w = rex.new_window_stacked(&label, ("thread", &stream), ("compose", &compose), 0.8, None, &passthrough_env(), true)?;
+    let w = rex.new_window_stacked(&label, ("thread", &stream), (COMPOSE_LABEL, &compose), 0.8, None, &passthrough_env(), true)?;
     if let Some(b) = w.block_ids.get(1) {
         let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": b }));
     }
@@ -465,17 +564,73 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
             fit_compose_pane(rex, stream, want, now);
         }
     };
+    // A docked thread stands in for a shell: leaving brings that shell back.
+    let origin = std::env::var(ORIGIN_BLOCK_ENV).ok().filter(|o| !o.is_empty());
+    let leave = move |rex: &axel_rex::Rex, stream: Option<&str>| {
+        if let Some(origin) = &origin {
+            restore_origin(rex, origin, stream);
+        }
+        // The stream above goes too; this pane closes as its program exits.
+        // Only those two blocks: the window may hold the user's other panes.
+        if let Some(stream) = stream {
+            let _ = rex.api_call("block.close", serde_json::json!({ "block_id": stream }));
+        }
+    };
+    // Closing the pane (its × in Rex) hangs us up, about a second before we're
+    // killed: leave right away, from a thread of our own.
+    if ctx.rex.is_some() {
+        let (leave, stream) = (leave.clone(), stream.clone());
+        on_hangup(move || {
+            if let Some(env) = axel_rex::detect() {
+                leave(&axel_rex::Rex::new(env), stream.as_deref());
+            }
+        });
+    }
     let res = axel_tui::run_compose(deps, thread_id, &fit);
-    // Leaving closes the stream above; this pane closes as its program exits.
-    // Only those two blocks: the window may hold the user's other panes.
-    if let (Some(rex), Some(stream)) = (&ctx.rex, &stream) {
-        let _ = rex.api_call("block.close", serde_json::json!({ "block_id": stream }));
+    if let Some(rex) = &ctx.rex {
+        leave(rex, stream.as_deref());
     }
     res
 }
 
+/// Run `f` and exit when this process is hung up (SIGHUP).  The handler only
+/// writes a byte to a pipe, whichever thread the signal lands on; a thread of
+/// our own reads it and does the work.
+fn on_hangup(f: impl FnOnce() + Send + 'static) {
+    static WAKE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+    extern "C" fn wake(_: libc::c_int) {
+        let fd = WAKE.load(std::sync::atomic::Ordering::Relaxed);
+        if fd >= 0 {
+            // SAFETY: write(2) is async-signal-safe; one byte from a static buffer.
+            unsafe { libc::write(fd, b"h".as_ptr().cast(), 1) };
+        }
+    }
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe(2) fills two descriptors we own from here on.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return;
+    }
+    WAKE.store(fds[1], std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: installs a handler that only calls write(2).
+    unsafe { libc::signal(libc::SIGHUP, wake as *const () as libc::sighandler_t) };
+    let read_fd = fds[0];
+    std::thread::spawn(move || {
+        let mut byte = 0u8;
+        // SAFETY: a blocking one-byte read from our own pipe.
+        if unsafe { libc::read(read_fd, (&mut byte as *mut u8).cast(), 1) } == 1 {
+            // The hangup reaches the `rex` calls `f` makes too: they inherit
+            // an ignored SIGHUP and live to finish.
+            // SAFETY: setting a signal's disposition to SIG_IGN.
+            unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) };
+            f();
+            std::process::exit(129);
+        }
+    });
+}
+
 /// The stream pane paired with this composer: `$AXEL_STREAM_BLOCK` when the
-/// composer was split off it, else the block labelled `thread` in this window.
+/// composer was split off it, else the pane right above it, else the block
+/// labelled `thread` in this window.
 fn stream_block(rex: &axel_rex::Rex) -> Option<String> {
     if let Ok(b) = std::env::var("AXEL_STREAM_BLOCK")
         && !b.trim().is_empty()
@@ -483,6 +638,10 @@ fn stream_block(rex: &axel_rex::Rex) -> Option<String> {
         return Some(b);
     }
     let me = rex.env().block.clone();
+    // Docked or in its own tab, the stream is the pane right above.
+    if let Some(above) = rex.view().ok().and_then(|v| block_above(&v, &me)) {
+        return Some(above);
+    }
     let d = rex.api_call("session.describe_block", serde_json::json!({ "block_id": me })).ok()?;
     let window = d.pointer("/block/window_id").and_then(|w| w.as_str())?.to_string();
     let list = rex.api_call("session.list_blocks", serde_json::json!({})).ok()?;
@@ -649,6 +808,51 @@ fn label_block_with_thread(ctx: &Ctx, rex: &axel_rex::Rex, block: &str, thread_i
     if let Ok(Some(t)) = ctx.store.get_thread(thread_id) {
         let title: String = if t.title.chars().count() > 48 { format!("{}…", t.title.chars().take(47).collect::<String>()) } else { t.title.clone() };
         rex.set_block_label(block, &title).ok();
+    }
+}
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A window: the user's shell on the left, a docked thread on the right.
+    fn view() -> serde_json::Value {
+        json!({"windows": [
+            {"window_id": "window:other", "layers": [{"kind": "tiled", "layout": {"block_id": "block:x"}, "blocks": [{"block_id": "block:x", "label": "compose"}]}]},
+            {"window_id": "window:1", "layers": [
+                {"kind": "tiled", "layer_id": "layer:t",
+                 "layout": {"split": {"split_id": "split:root", "direction": "horizontal", "ratio": 0.4,
+                    "before": {"block_id": "block:shell"},
+                    "after": {"split": {"split_id": "split:dock", "direction": "vertical", "ratio": 0.85,
+                        "before": {"block_id": "block:stream"}, "after": {"block_id": "block:compose"}}}}},
+                 "blocks": [{"block_id": "block:shell", "label": "shell"}, {"block_id": "block:stream", "label": "Ship it"}, {"block_id": "block:compose", "label": "compose"}]},
+                {"kind": "floating", "layer_id": "layer:f", "blocks": [{"block_id": "block:launcher", "label": "why not today?"}]}
+            ]}
+        ]})
+    }
+
+    #[test]
+    fn the_dock_anchors_on_the_root_of_the_launchers_window() {
+        assert_eq!(tiled_root(&view(), "block:launcher").as_deref(), Some("split:root"));
+        assert_eq!(tiled_root(&view(), "block:x").as_deref(), Some("block:x"), "a window with one pane anchors on it");
+        assert_eq!(tiled_root(&view(), "block:nowhere"), None);
+    }
+
+    #[test]
+    fn only_a_shell_at_its_prompt_is_idle() {
+        let fg = |argv0: &str, name: &str| json!({"foreground": {"argv0": argv0, "name": name}});
+        assert!(is_idle_shell(&fg("-zsh", "zsh")), "a login shell at its prompt");
+        assert!(is_idle_shell(&fg("/bin/bash", "bash")));
+        assert!(!is_idle_shell(&fg("vim", "vim")), "something running");
+        assert!(!is_idle_shell(&fg("claude", "claude")));
+        assert!(!is_idle_shell(&json!({"foreground": null})));
+    }
+
+    #[test]
+    fn a_docked_composer_finds_its_stream() {
+        assert_eq!(block_above(&view(), "block:compose").as_deref(), Some("block:stream"));
+        assert_eq!(block_above(&view(), "block:shell"), None, "side by side is not above");
     }
 }
 

@@ -72,7 +72,9 @@ the history.
 
 - **The thread view**: the conversation with tool calls folded, and a composer. Inside Rex
   it's two panes: the conversation streaming as plain terminal output (native scrollback)
-  above, the composer below.
+  above, the composer below. Opened from the launcher, they take the place of the shell you
+  typed `axel` in, so nothing else in the window moves; closing the composer (Esc, or the
+  pane's ×) brings that shell back, scrollback and all.
 - **The dashboard**: every open thread and agent with live state, tokens and a sparkline.
   It adapts to its size, from a small corner HUD to a full grid.
 - **`axel thread show <id>`**: projects, participants, sessions and recent messages, as text.

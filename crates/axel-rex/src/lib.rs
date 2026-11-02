@@ -367,6 +367,33 @@ impl Rex {
         })
     }
 
+    /// Split `anchor` (a block or a split) with a column on its right holding
+    /// two terminals, `top` above `bottom`, each `(label, command)`.  The
+    /// anchor keeps `keep` of the width; `top` gets `stack` of the column's
+    /// height.  Block ids come back top first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_right_stacked(
+        &self,
+        anchor: &str,
+        top: (&str, &[String]),
+        bottom: (&str, &[String]),
+        keep: f64,
+        stack: f64,
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+        focus: bool,
+    ) -> Result<Vec<String>, Error> {
+        let t = payload::terminal_block(top.0, top.1, cwd, env)?;
+        let b = payload::terminal_block(bottom.0, bottom.1, cwd, env)?;
+        let args = payload::new_split_right_stacked(anchor, t, b, keep, stack, focus)?;
+        let result = self.api_call("session.new_split", args)?;
+        let ids = ids_field(&result, "block_ids");
+        if ids.len() != 2 {
+            return Err(Error::Invalid(format!("session.new_split returned {} blocks, wanted 2", ids.len())));
+        }
+        Ok(ids)
+    }
+
     /// Split `anchor` and run `command` in a new terminal below it; the anchor
     /// keeps `ratio` of the height.  Returns the new block's id.
     #[allow(clippy::too_many_arguments)]
@@ -416,6 +443,12 @@ impl Rex {
     /// `session.view`: windows, layers and blocks of this session.
     pub fn view(&self) -> Result<Value, Error> {
         self.api_call("session.view", serde_json::json!({}))
+    }
+
+    /// The terminal's processes (`com.superlogical.terminal.process`): its
+    /// `child`, the `foreground` process and that one's `ancestors`.
+    pub fn process(&self, block_id: &str) -> Result<Value, Error> {
+        self.api_call("com.superlogical.terminal.process", serde_json::json!({"block_id": block_id, "args": {}}))
     }
 
     /// OSC 7501 records a terminal block holds (`com.superlogical.terminal.program_status`).
@@ -679,6 +712,34 @@ mod tests {
                     "label": "atlas · Ship it",
                     "options": {"shell": "none", "command": ["claude"], "exit": {"on_completion": true}}
                 }}
+            })
+        );
+    }
+
+    #[test]
+    fn split_right_stacked_payload_and_result() {
+        let (rex, fake) = client(vec![Ok(r#"{"anchor_id":"split:1","block_ids":["block:a","block:b"],"revision":3}"#.into())]);
+        let ids = rex
+            .split_right_stacked("split:1", ("Ship it", &["s".into()]), ("compose", &["c".into()]), 0.4, 0.85, None, &[], true)
+            .unwrap();
+        assert_eq!(ids, vec!["block:a".to_string(), "block:b".to_string()]);
+        let calls = fake.calls.borrow();
+        assert_eq!(calls[0][4], "session.new_split");
+        let sent: Value = serde_json::from_str(&calls[0][5]).unwrap();
+        let block = |label: &str, cmd: &str| json!({"block": {
+            "flavor": "com.superlogical.terminal.shell",
+            "label": label,
+            "options": {"shell": "none", "command": [cmd], "exit": {"on_completion": true}}
+        }});
+        assert_eq!(
+            sent,
+            json!({
+                "anchor_id": "split:1",
+                "direction": "horizontal",
+                "side": "after",
+                "ratio": 0.4,
+                "focus": true,
+                "layout": {"split": {"direction": "vertical", "before": block("Ship it", "s"), "after": block("compose", "c"), "ratio": 0.85}}
             })
         );
     }

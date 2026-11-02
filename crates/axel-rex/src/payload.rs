@@ -152,6 +152,25 @@ pub fn new_window_stacked(
     Ok(Value::Object(body))
 }
 
+/// `session.new_split`: a column to the right of `anchor` (a block or a split),
+/// which keeps `keep` of the width, holding `top` above `bottom`; `top` gets
+/// `stack` of the column's height.
+pub fn new_split_right_stacked(anchor: &str, top: Value, bottom: Value, keep: f64, stack: f64, focus: bool) -> Result<Value, Error> {
+    for r in [keep, stack] {
+        if !(r > 0.0 && r < 1.0) {
+            return Err(Error::Invalid("ratio must be between 0 and 1".into()));
+        }
+    }
+    Ok(json!({
+        "anchor_id": anchor,
+        "direction": "horizontal",
+        "side": "after",
+        "ratio": keep,
+        "focus": focus,
+        "layout": {"split": {"direction": "vertical", "before": top, "after": bottom, "ratio": stack}},
+    }))
+}
+
 /// `session.new_split`: one terminal below `anchor`, which keeps `ratio` of the height.
 pub fn new_split_below(anchor: &str, block: Value, ratio: f64, focus: bool) -> Result<Value, Error> {
     if !(ratio > 0.0 && ratio < 1.0) {

@@ -168,7 +168,7 @@ $ axel                               # in any Rex terminal
    from the prompt), working in place in the current directory. The prompt becomes
    the thread title and the first prompt. With no agent yet, Enter asks who.
    - **↓** moves to the recent threads: open ones first, then the settled ones
-     (dimmed, ✓). Type to filter, Enter opens one in a new tab, ↑ on the first row
+     (dimmed, ✓). Type to filter, Enter opens one (docked, see 3), ↑ on the first row
      goes back to the prompt. Esc in either pane closes both.
    - In that pane, like t3code's sidebar: **Ctrl+S** settles a thread (finished,
      still listed) or reopens a settled one; **Ctrl+X** archives it (hidden; `axel
@@ -194,8 +194,18 @@ $ axel                               # in any Rex terminal
      `AXEL.md` as `CLAUDE.md` / `AGENTS.md` (relative; when the project has its own,
      `AXEL.md` goes into the appended system prompt instead),
    - writes harness hook config so events flow back (see *Signals*),
-   - opens a **new Rex window** labelled `agent · title` running the harness with
-     `AXEL_THREAD`, `AXEL_SESSION`, `AXEL_AGENT`, `AXEL_DB` in its environment,
+   - starts the session: a managed one is hosted by `axel session host`; a pane one
+     runs the harness with `AXEL_THREAD`, `AXEL_SESSION`, `AXEL_AGENT`, `AXEL_DB` in
+     its environment,
+   - **docks the thread view** in the window: the stream above, the composer below,
+     in the place of the shell `axel` was typed in (`$AXEL_ORIGIN_BLOCK`). That shell
+     is split, then taken out of the window with `session.detach_block`, still running;
+     nothing else moves. When the composer closes, by Esc or by its pane's ×, it moves
+     the shell back with `session.move_block` and the shell fills the space again.
+     The × hangs the composer up about a second before it's killed, so a SIGHUP
+     handler does that work from its own thread, its `rex` calls ignoring the hangup.
+     A shell that's busy (its foreground program isn't the shell) keeps its place, and
+     the thread docks as a column on the right instead,
    - closes the floating layer.
 4. `axel` again toggles the floating pane. It opens on the **inbox** when anything is
    blocked or unread, otherwise on the launcher. A Rex `init.lua` action

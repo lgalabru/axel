@@ -12,7 +12,8 @@ concurrency:
 jobs:
   test:
     name: Clippy and tests
-    runs-on: macos-latest
+    # Intel: GitHub's arm64 macOS runners are often out of capacity.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v5
       - name: Install the pinned toolchain (rust-toolchain.toml)

@@ -42,17 +42,17 @@ jobs:
           base=$(sed -n -E '/^\[workspace\.package\]/,/^\[/ s/^version = "([0-9]+\.[0-9]+)\..*"/\1/p' Cargo.toml)
           echo "version=$base.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
 
+  # One Intel runner builds both binaries (Apple silicon cross-compiled):
+  # GitHub's arm64 macOS runners are often out of capacity, and one job
+  # means one runner to wait for, not two.
   build:
-    name: Build ${{ matrix.target }}
+    name: Build
     needs: [ci, version]
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     permissions:
       contents: read
       id-token: write
       attestations: write
-    strategy:
-      matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     env:
       VERSION: ${{ needs.version.outputs.version }}
       MACOSX_DEPLOYMENT_TARGET: '13.0'
@@ -61,21 +61,23 @@ jobs:
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
       - name: Stamp the version
         run: sed -i '' -E "/^\[workspace\.package\]/,/^\[/ s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
       - name: Build
-        run: cargo build --release -p axel --bin axel --target ${{ matrix.target }}
+        run: |
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --release -p axel --bin axel --target "$target"
+          done
       - name: Package
         run: |
-          dir=target/${{ matrix.target }}/release
-          if [ "${{ matrix.target }}" = aarch64-apple-darwin ]; then
-            "$dir/axel" --version | grep -q "$VERSION"
-          fi
-          name=axel-$VERSION-${{ matrix.target }}.tar.gz
-          tar -C "$dir" -czf "$name" axel
-          shasum -a 256 "$name" > "$name.sha256"
+          # The Intel binary runs here; the Apple silicon one is checked for its architecture.
+          target/x86_64-apple-darwin/release/axel --version | grep -q "$VERSION"
+          lipo -archs target/aarch64-apple-darwin/release/axel | grep -qx arm64
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            name=axel-$VERSION-$target.tar.gz
+            tar -C "target/$target/release" -czf "$name" axel
+            shasum -a 256 "$name" > "$name.sha256"
+          done
       # Signed build provenance: `gh attestation verify <tarball> --repo scarce/axel`.
       # The install script checks it when gh is logged in.
       - uses: actions/attest-build-provenance@v2
@@ -83,7 +85,7 @@ jobs:
           subject-path: axel-*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: axel-${{ matrix.target }}
+          name: axel-macos
           path: axel-*.tar.gz*
 
   release:
