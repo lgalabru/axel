@@ -39,6 +39,11 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Skills this project can use: directories, and remote skills pinned in AXEL.lock.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
     /// Threads: units of work (project + agent + workspace + intent).
     Thread {
         #[command(subcommand)]
@@ -381,4 +386,19 @@ impl From<AgentColorArg> for AgentColor {
             AgentColorArg::Orange => AgentColor::Orange,
         }
     }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillsCommand {
+    /// List the skills available here and where each comes from.
+    #[command(alias = "list")]
+    Ls,
+    /// Fetch remote skills' latest commits, show what changed, and move the pins.
+    Update {
+        /// Only this source (as written in AXEL.md, or its `owner/repo[/skill]` key).
+        source: Option<String>,
+        /// Apply without asking.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }

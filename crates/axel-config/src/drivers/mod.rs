@@ -29,8 +29,17 @@ pub trait SkillDriver {
     /// Remove the symlinks a previous [`SkillDriver::install`] / [`SkillDriver::install_context`] created.
     fn cleanup(&self, project: &Path) -> Result<(), Error>;
     /// Link `axel_md` as the harness's context file (`CLAUDE.md`, `AGENTS.md`, ...).
-    fn install_context(&self, project: &Path, axel_md: &Path) -> Result<(), Error> {
-        place_symlink(axel_md, &project.join(self.context_filename())).map(|_| ())
+    ///
+    /// The link is relative when `axel_md` sits in `project` (`CLAUDE.md -> AXEL.md`),
+    /// so it still works in a clone. `Ok(false)` when the project already has its own
+    /// context file, which is left alone: the harness then won't read `AXEL.md`.
+    fn install_context(&self, project: &Path, axel_md: &Path) -> Result<bool, Error> {
+        let link = project.join(self.context_filename());
+        let beside = canonical(axel_md).parent() == Some(canonical(project).as_path());
+        match axel_md.file_name() {
+            Some(name) if beside => place_link(Path::new(name), &link),
+            _ => place_symlink(axel_md, &link),
+        }
     }
 
     /// Harness name (`claude`, `codex`, `opencode`).
@@ -84,7 +93,12 @@ fn symlink(_target: &Path, _link: &Path) -> Result<(), Error> {
 /// Make `link` a symlink to `target`. Replaces an existing symlink; returns `Ok(false)`
 /// without touching anything when a regular file or directory is already there.
 pub(crate) fn place_symlink(target: &Path, link: &Path) -> Result<bool, Error> {
-    let target = canonical(target);
+    place_link(&canonical(target), link)
+}
+
+/// [`place_symlink`] with `target` used as written (it may be relative to `link`).
+fn place_link(target: &Path, link: &Path) -> Result<bool, Error> {
+    let target = target.to_path_buf();
     if is_symlink(link) {
         if fs::read_link(link).is_ok_and(|current| current == target) {
             return Ok(true);
@@ -109,24 +123,43 @@ pub(crate) fn remove_symlink(path: &Path) -> Result<bool, Error> {
     Ok(true)
 }
 
-/// Install skills as `<dir>/<name>/SKILL.md` symlinks (Claude Code and Codex layout).
+/// Install skills in the Claude Code and Codex layout, `<dir>/<name>/SKILL.md`. A
+/// directory skill is linked whole (`<dir>/<name> -> its directory`), so the scripts
+/// and references beside its `SKILL.md` come along; a flat `<name>.md` skill gets a
+/// `<dir>/<name>/SKILL.md` link to the file.
 pub(crate) fn install_nested(dir: &Path, skills: &[Skill]) -> Result<(), Error> {
     for skill in skills {
-        place_symlink(
-            &skill.path,
-            &dir.join(&skill.name).join(crate::skills::SKILL_FILE),
-        )?;
+        let slot = dir.join(&skill.name);
+        let is_dir_skill = skill.path.file_name().is_some_and(|n| n == crate::skills::SKILL_FILE);
+        match skill.path.parent().filter(|_| is_dir_skill) {
+            Some(skill_dir) => {
+                // An earlier install linked only the file: replace that with the dir link.
+                if !is_symlink(&slot) && remove_symlink(&slot.join(crate::skills::SKILL_FILE))? {
+                    let _ = fs::remove_dir(&slot);
+                }
+                if let Some(parent) = slot.parent() {
+                    fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+                }
+                place_symlink(skill_dir, &slot)?;
+            }
+            None => {
+                place_symlink(&skill.path, &slot.join(crate::skills::SKILL_FILE))?;
+            }
+        }
     }
     Ok(())
 }
 
-/// Undo [`install_nested`]: remove `SKILL.md` symlinks and the directories they leave empty.
+/// Undo [`install_nested`]: remove its links and the directories they leave empty.
 pub(crate) fn cleanup_nested(dir: &Path) -> Result<(), Error> {
     if !dir.is_dir() {
         return Ok(());
     }
     for entry in fs::read_dir(dir).map_err(|e| Error::io(dir, e))? {
         let path = entry.map_err(|e| Error::io(dir, e))?.path();
+        if remove_symlink(&path)? {
+            continue;
+        }
         if path.is_dir() && remove_symlink(&path.join(crate::skills::SKILL_FILE))? {
             let _ = fs::remove_dir(&path);
         }
@@ -177,6 +210,7 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(project.join(ctx)).unwrap(), "# ctx\n");
             assert!(is_symlink(&project.join(ctx)));
+            assert_eq!(fs::read_link(project.join(ctx)).unwrap(), PathBuf::from("AXEL.md"), "relative, so clones work");
 
             // idempotent
             driver.install(&project, &skills).unwrap();
@@ -187,6 +221,33 @@ mod tests {
             assert!(!project.join(ctx).exists());
             assert!(axel_md.is_file());
         }
+    }
+
+    #[test]
+    fn directory_skills_are_linked_whole_and_real_context_files_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("remote/review");
+        fs::create_dir_all(src.join("scripts")).unwrap();
+        fs::write(src.join(crate::skills::SKILL_FILE), "# review\n").unwrap();
+        fs::write(src.join("scripts/run.sh"), "echo\n").unwrap();
+        let review = Skill::from_file(&src.join(crate::skills::SKILL_FILE)).unwrap();
+        let project = root.path().join("project");
+        // An install from before linked only the file.
+        let slot = project.join(".claude/skills/review");
+        fs::create_dir_all(&slot).unwrap();
+        symlink(&src.join(crate::skills::SKILL_FILE), &slot.join(crate::skills::SKILL_FILE)).unwrap();
+
+        let driver = for_harness(HarnessKind::Claude).unwrap();
+        driver.install(&project, std::slice::from_ref(&review)).unwrap();
+        assert!(is_symlink(&slot));
+        assert!(slot.join("scripts/run.sh").is_file(), "the skill's files come along");
+        driver.cleanup(&project).unwrap();
+        assert!(!slot.exists() && src.join("scripts/run.sh").is_file());
+
+        fs::write(project.join("CLAUDE.md"), "# mine\n").unwrap();
+        fs::write(project.join("AXEL.md"), "# axel\n").unwrap();
+        assert!(!driver.install_context(&project, &project.join("AXEL.md")).unwrap());
+        assert_eq!(fs::read_to_string(project.join("CLAUDE.md")).unwrap(), "# mine\n");
     }
 
     #[test]

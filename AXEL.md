@@ -1,19 +1,8 @@
 ---
 workspace: axel-next
 skills:
-  - path: ./skills
-  - path: ~/.config/axel/skills
-agents:
-  - id: builder
-    name: Builder
-    harness: claude
-    model: opus
-    skills: ["*"]
-    prompt: "You work on Axel v2, a Rust TUI on Rex. Read docs/DESIGN.md first."
-  - id: reviewer
-    name: Reviewer
-    harness: codex
-    skills: ["*"]
+  - ./skills
+  - ~/.config/axel/skills
 ---
 
 # Axel v2

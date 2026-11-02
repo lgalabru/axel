@@ -1,10 +1,9 @@
 //! `axel session …` — hosting and controlling managed (ACP) sessions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use axel_acp::HostConfig;
-use axel_config::WorkspaceConfig;
 use axel_store::{SessionFilter, SessionRuntime, SessionState};
 
 use super::Ctx;
@@ -92,11 +91,11 @@ fn claude_executable_env() -> Option<(String, String)> {
     Some(("CLAUDE_CODE_EXECUTABLE".into(), exe.to_string_lossy().into_owned()))
 }
 
-fn session_meta(agent: &axel_store::Agent) -> Option<serde_json::Map<String, serde_json::Value>> {
+fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
     // Codex gets who it is as developer instructions (the built-in adapter
     // reads `systemPrompt.append`); the Claude extras below don't apply.
     if agent.harness == axel_store::Harness::Codex {
-        let meta = serde_json::json!({ "systemPrompt": { "append": super::launch::identity_prompt(agent) } });
+        let meta = serde_json::json!({ "systemPrompt": { "append": super::launch::system_prompt(agent, cwd) } });
         return meta.as_object().cloned();
     }
     if agent.harness != axel_store::Harness::Claude {
@@ -115,7 +114,7 @@ fn session_meta(agent: &axel_store::Agent) -> Option<serde_json::Map<String, ser
         Err(e) => eprintln!("axel: could not write the axel skill plugin: {e}"),
     }
     let meta = serde_json::json!({
-        "systemPrompt": { "append": super::launch::identity_prompt(agent) },
+        "systemPrompt": { "append": super::launch::system_prompt(agent, cwd) },
         "claudeCode": { "options": { "extraArgs": extra_args } }
     });
     meta.as_object().cloned()
@@ -137,9 +136,7 @@ fn host(session_id: &str) -> Result<()> {
         .ok()
         .map(|v| v.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect())
         .unwrap_or_default();
-    let config = WorkspaceConfig::load(&cwd).ok().flatten();
-    let profile = config.as_ref().and_then(|c| c.agent(&agent.name).cloned());
-    let disallowed = profile.as_ref().map(|p| p.disallowed_tools.clone()).unwrap_or_default();
+    let disallowed: Vec<String> = Vec::new();
 
     // The adapter and the harness under it must not look like they run inside
     // Rex: user-level hooks (e.g. the Rex skill's SessionStart hook) would fire
@@ -158,6 +155,7 @@ fn host(session_id: &str) -> Result<()> {
         env.extend(claude_executable_env());
     }
 
+    let meta = session_meta(&agent, &cwd);
     let mcp_servers = vec![super::launch::axel_mcp_server(&env)];
     let cfg = HostConfig {
         session_id: session.id.clone(),
@@ -178,9 +176,9 @@ fn host(session_id: &str) -> Result<()> {
             Some(axel_acp::socket::Sender { pubkey: pk, name })
         }),
         resume_native_id: session.harness_session_id.clone(),
-        session_meta: session_meta(&agent),
+        session_meta: meta,
         // The workspace profile's model wins over the agent's, as for pane sessions.
-        model: profile.as_ref().and_then(|p| p.model.clone()).or_else(|| agent.model.clone()),
+        model: agent.model.clone(),
         // Axel's own tools (send, set_status, read_inbox), acting as this agent.
         mcp_servers,
     };

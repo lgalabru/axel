@@ -204,15 +204,13 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         }
     };
 
-    // 3. Profile: store row overlaid by a matching `agents:` entry in AXEL.md.
+    // 3. Profile, from the agent's row in the store.
     let config = WorkspaceConfig::load(&work_dir).context("reading AXEL.md")?;
-    let profile = build_profile(&agent, config.as_ref());
+    let profile = build_profile(&agent);
 
-    // 4. Skills.
+    // 4. Skills (remote ones fetched and pinned in AXEL.lock) and the project context.
     if let Some(driver) = drivers::for_harness(profile.harness.kind) {
-        let sources = config.as_ref().map(|c| c.skills.clone()).unwrap_or_default();
-        let global = paths::global_skills_dir();
-        let all = axel_config::find_all_skills(&sources, Some(global.as_path()))?;
+        let all = project_skills(config.as_ref())?;
         let skills = axel_config::resolve_skills(&profile.skills, &all);
         driver.install(&work_dir, &skills).context("installing skills")?;
         if let Some(axel_md) = config.as_ref().and_then(|c| c.path.clone()) {
@@ -277,7 +275,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     if profile.harness.kind == HarnessKind::Claude {
         // The axel skill and who-you-are, for pane sessions; managed sessions
         // get the same through the adapter (`session_meta`).
-        let mut args = vec!["--append-system-prompt".to_string(), identity_prompt(&agent)];
+        let mut args = vec!["--append-system-prompt".to_string(), system_prompt(&agent, &work_dir)];
         match write_axel_plugin() {
             Ok(dir) => args.extend(["--plugin-dir".to_string(), dir.to_string_lossy().into_owned()]),
             Err(e) => eprintln!("axel: could not write the axel skill plugin: {e}"),
@@ -504,39 +502,63 @@ pub fn which(program: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
 }
 
-fn build_profile(agent: &axel_store::Agent, config: Option<&WorkspaceConfig>) -> AgentProfile {
-    let from_md = config.and_then(|c| {
-        c.agents.iter().find(|a| {
-            a.pubkey.as_deref() == Some(agent.pubkey.as_str())
-                || a.id.eq_ignore_ascii_case(&agent.name)
-                || a.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&agent.name))
-        })
-    });
-    let kind = convert::harness_kind(&agent.harness);
-    let mut profile = from_md.cloned().unwrap_or_else(|| AgentProfile {
+fn build_profile(agent: &axel_store::Agent) -> AgentProfile {
+    let mut profile = AgentProfile {
         id: agent.name.clone(),
         name: Some(agent.name.clone()),
         harness: Harness {
-            kind,
+            kind: convert::harness_kind(&agent.harness),
             command: match &agent.harness {
                 axel_store::Harness::Custom(cmd) => Some(cmd.clone()),
                 _ => None,
             },
             args: vec![],
         },
+        model: agent.model.clone(),
+        skills: agent.skills.clone(),
+        prompt: agent.prompt.clone(),
         ..Default::default()
-    });
-    if agent.model.is_some() {
-        profile.model = agent.model.clone();
-    }
-    if !agent.skills.is_empty() {
-        profile.skills = agent.skills.clone();
-    }
-    if agent.prompt.is_some() {
-        profile.prompt = agent.prompt.clone();
-    }
+    };
     profile.pubkey = Some(agent.pubkey.clone());
     profile
+}
+
+/// Every skill a launch in this project can use: the project's sources (remote ones
+/// resolved to their pinned checkout, fetched and pinned on first use), then the
+/// global directory. A source that can't be used is reported and skipped.
+pub fn project_skills(config: Option<&WorkspaceConfig>) -> Result<axel_config::IndexMap<String, axel_config::Skill>> {
+    let global = paths::global_skills_dir();
+    let Some(config) = config else {
+        return Ok(axel_config::find_skills(&[], Some(global.as_path()))?);
+    };
+    let resolved = axel_config::remote::resolve(config, &paths::skills_cache_dir());
+    for w in &resolved.warnings {
+        eprintln!("axel: skills: {w}");
+    }
+    Ok(axel_config::find_skills(&resolved.roots, Some(global.as_path()))?)
+}
+
+/// `AXEL.md`'s body, when this harness won't read it on its own: the project already
+/// has its own `CLAUDE.md` / `AGENTS.md`, so Axel couldn't link `AXEL.md` there.
+fn unlinked_context(harness: &axel_store::Harness, dir: &Path) -> Option<String> {
+    let driver = drivers::for_harness(convert::harness_kind(harness))?;
+    let config = WorkspaceConfig::load(dir).ok().flatten()?;
+    let axel_md = config.path.as_ref()?.canonicalize().ok()?;
+    let ctx = dir.join(driver.context_filename());
+    if ctx.canonicalize().ok().as_ref() == Some(&axel_md) || config.body.trim().is_empty() {
+        return None;
+    }
+    Some(config.body)
+}
+
+/// [`identity_prompt`], plus `AXEL.md` when the harness wouldn't otherwise see it.
+pub fn system_prompt(agent: &axel_store::Agent, dir: &Path) -> String {
+    let mut s = identity_prompt(agent);
+    if let Some(body) = unlinked_context(&agent.harness, dir) {
+        s.push_str("\n\n# This project's AXEL.md\n\n");
+        s.push_str(&body);
+    }
+    s
 }
 
 /// Autopilot and friends: harness-specific permission flags, inserted before the

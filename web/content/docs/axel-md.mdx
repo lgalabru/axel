@@ -1,0 +1,82 @@
+---
+title: The AXEL.md file
+description: "One file at the root of a repo, for every harness: the project's context and the skills its agents use."
+---
+
+`AXEL.md` sits at the root of a project. Its body is the project's context, the
+instructions any agent should read before working on the repo. Its frontmatter lists
+where the project's skills come from. Commit it, and everyone who clones the repo gets
+the same context and the same skills, whatever harness they run.
+
+```markdown
+---
+skills:
+  - ./skills                                        # a directory in the repo
+  - https://skills.sh/mattpocock/skills/grill-me    # one skill, as listed on skills.sh
+  - vercel-labs/skills/find-skills                  # the same kind of link, short
+  - github:acme/agent-skills@v2                     # every skill in a repo, at a tag
+---
+# How to work on this repo
+
+- `docs/DESIGN.md` is the source of truth.
+- Run `cargo test --offline` before saying you're done.
+```
+
+## The context
+
+At launch, Axel links `AXEL.md` as the harness's own context file: `CLAUDE.md` for Claude
+Code, `AGENTS.md` for Codex and OpenCode. The link is relative (`CLAUDE.md -> AXEL.md`),
+so you can commit it and it still works in a clone.
+
+If the project already has its own `CLAUDE.md` or `AGENTS.md`, Axel leaves that file
+alone. It appends `AXEL.md` to the agent's system prompt instead, so the agent reads both.
+
+## Skills
+
+Each entry under `skills:` is one source:
+
+| Written as | Means |
+|---|---|
+| `./skills`, `~/skills`, `/abs/path` | A directory of skills: `<name>.md` or `<name>/SKILL.md`. |
+| `https://skills.sh/owner/repo/skill` | One skill from the GitHub repo behind that skills.sh page. |
+| `owner/repo/skill` | The same, short. It's read as a path instead when that path exists. |
+| `github:owner/repo[/skill][@ref]` | A whole repo's skills, or one, at a branch, tag or commit. |
+| `https://github.com/owner/repo[/tree/ref]` | A whole repo's skills, at an optional ref. |
+
+Which skills an agent gets is up to the agent: `axel agent new atlas --skills grill-me,rust`.
+When two sources define the same name, directories on disk win over remote skills, so
+copying a skill into `./skills` overrides it. The first source listed wins otherwise.
+
+### Pinned, never silently updated
+
+A remote skill is instructions an agent follows with your permissions, so Axel treats an
+upstream change to it like a code change. The first launch that uses a remote source
+fetches it and pins the exact commit in `AXEL.lock`, next to `AXEL.md`:
+
+```yaml
+# Remote skills pinned by axel, one commit per source. Commit this file.
+skills:
+  mattpocock/skills/grill-me: 4ae2317ddb22b046e26455e4f9c9b3aaaf62212d
+```
+
+After that, every launch uses that commit, on every machine that has the lock. Commit
+`AXEL.lock` with `AXEL.md`. Fetched skills are cached under `~/.axel/skills/cache` by
+commit, so launches work offline once a skill has been fetched.
+
+To move the pins:
+
+```bash
+axel skills update               # fetch, show each diff, ask before moving each pin
+axel skills update grill-me      # just one source
+axel skills update --yes         # apply without asking
+```
+
+`axel skills ls` lists every skill available in the project and where each comes from.
+
+A source that can't be fetched, or a skill name the repo doesn't have, is reported and
+skipped. The launch goes on without it.
+
+## Agents aren't declared here
+
+Agents are keyed identities in your own store: [Agents and identity](/agents). A repo
+can't ship them, and doesn't name them. A legacy `agents:` block in `AXEL.md` is ignored.

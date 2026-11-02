@@ -188,7 +188,11 @@ $ axel                               # in any Rex terminal
 3. On confirm, Axel:
    - creates the thread, attaches the projects, and creates the first session,
    - prepares the workspace (worktree if asked),
-   - installs the agent's skills into the harness's expected location,
+   - installs the agent's skills into the harness's expected location (sources from
+     `AXEL.md`: directories, and skills.sh / GitHub skills pinned to a commit in
+     `AXEL.lock`; a directory skill is linked whole, scripts and all), and links
+     `AXEL.md` as `CLAUDE.md` / `AGENTS.md` (relative; when the project has its own,
+     `AXEL.md` goes into the appended system prompt instead),
    - writes harness hook config so events flow back (see *Signals*),
    - opens a **new Rex window** labelled `agent · title` running the harness with
      `AXEL_THREAD`, `AXEL_SESSION`, `AXEL_AGENT`, `AXEL_DB` in its environment,
@@ -411,7 +415,7 @@ read_frontiers(pubkey, scope, through_created_at, through_id, PRIMARY KEY(pubkey
 ```
 axel-next/
   Cargo.toml              workspace, edition 2024
-  AXEL.md                 dogfood config for this repo
+  AXEL.md                 dogfood config for this repo (CLAUDE.md links to it)
   docs/DESIGN.md          this file
   docs/RESEARCH.md        what we learned from Rex, t3code, Buzz, Axel v1
   docs/IMPORTS.md         provenance of every imported module

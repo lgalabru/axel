@@ -24,7 +24,7 @@ terminal:
   fixes all of it: durable sessions, the Program Status Protocol (`OSC 7501`), Tailscale
   built in, real scrollback, and a server API programs can drive. A thread streams into its
   pane as plain output, so it scrolls like anything else. Axel is just a program in a Rex pane, and your Mac mini on the tailnet is a host
-  (`@atlas@mini`). See [Why Rex](https://docs.axel.md/why-rex).
+  (`@atlas@mini`). See [Why Rex](https://axel.md/docs/why-rex).
 
 ```
 $ axel            # inside Rex: the launcher floats over the window.
@@ -55,6 +55,7 @@ See `docs/DESIGN.md`. Install: `just install` (release build, symlinked into `~/
 | `axel ui [--screen launch\|inbox]` | what the floating pane runs |
 | `axel agent new NAME [--harness claude\|codex\|opencode] [--model M] [--skills a,b\|*]` | create an agent (key, attestation, record) |
 | `axel agent ls\|show\|archive` | |
+| `axel skills ls`, `axel skills update [SOURCE] [--yes]` | the project's skills; move remote skills' pins (shows the diff first) |
 | `axel thread new "intent" --agent NAME [--project DIR]... [--scratch] [--worktree [BRANCH]]` | thread + first session |
 | `axel thread spawn THREAD --agent NAME` | another agent on the same thread |
 | `axel thread resume THREAD [--agent NAME]` | new session continuing the last harness conversation |

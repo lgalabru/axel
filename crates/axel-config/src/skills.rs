@@ -10,7 +10,7 @@ use std::{
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, SkillSource, config::expand_tilde, config::split_frontmatter};
+use crate::{Error, SkillSource, config::expand_tilde, config::split_frontmatter, remote::SkillRoot};
 
 /// File name for the directory form of a skill.
 pub const SKILL_FILE: &str = "SKILL.md";
@@ -104,29 +104,45 @@ pub fn default_global_skills_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("axel").join("skills"))
 }
 
-/// Discover every skill under `sources` (in order) and then `global`.
-///
-/// The first directory that defines a name wins; later duplicates are ignored. Keys are
-/// [`Skill::name`]. Directories that do not exist are skipped. Within a directory,
-/// `index.md` and `README.md` are not skills, nor is a bare `SKILL.md`.
+/// Discover every skill in the directory sources (in order), then `global`. Remote
+/// sources are skipped: resolve them with [`crate::remote::resolve`] and use
+/// [`find_skills`].
 pub fn find_all_skills(
     sources: &[SkillSource],
     global: Option<&Path>,
 ) -> Result<IndexMap<String, Skill>, Error> {
-    let mut dirs: Vec<PathBuf> = sources.iter().map(|s| s.resolve(None)).collect();
-    if let Some(global) = global {
-        dirs.push(expand_tilde(global));
-    }
+    let roots: Vec<SkillRoot> = sources.iter().filter_map(|s| s.resolve(None)).map(SkillRoot::Dir).collect();
+    find_skills(&roots, global)
+}
 
+/// Discover every skill under `roots` and `global`.
+///
+/// Directories on disk come first (in order), then remote skills, then `global`: the
+/// first to define a name wins and later duplicates are ignored, so a local copy of a
+/// remote skill overrides it. Keys are [`Skill::name`]. Directories that do not exist
+/// are skipped. Within a directory, `index.md` and `README.md` are not skills, nor is
+/// a bare `SKILL.md`.
+pub fn find_skills(roots: &[SkillRoot], global: Option<&Path>) -> Result<IndexMap<String, Skill>, Error> {
+    let mut files = Vec::new();
+    for root in roots {
+        if let SkillRoot::Dir(dir) = root
+            && dir.is_dir()
+        {
+            files.extend(skill_files_in(dir)?);
+        }
+    }
+    for root in roots {
+        if let SkillRoot::Files(f) = root {
+            files.extend(f.iter().cloned());
+        }
+    }
+    if let Some(global) = global.map(expand_tilde).filter(|g| g.is_dir()) {
+        files.extend(skill_files_in(&global)?);
+    }
     let mut skills = IndexMap::new();
-    for dir in dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-        for path in skill_files_in(&dir)? {
-            let skill = Skill::from_file(&path)?;
-            skills.entry(skill.name.clone()).or_insert(skill);
-        }
+    for path in files {
+        let skill = Skill::from_file(&path)?;
+        skills.entry(skill.name.clone()).or_insert(skill);
     }
     Ok(skills)
 }

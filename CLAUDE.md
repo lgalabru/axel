@@ -1,1 +1,1 @@
-/Users/ludo/Coding/axel-next/AXEL.md
+AXEL.md

@@ -80,19 +80,27 @@ pub struct AgentProfile { pub id: String, pub name: Option<String>, pub harness:
     pub skills: Vec<String>, pub prompt: Option<String>, pub allowed_tools: Vec<String>, pub disallowed_tools: Vec<String>,
     pub args: Vec<String>, pub color: Option<String>, pub pubkey: Option<String>, pub api: Option<ApiConfig> }
 pub struct ApiConfig { pub protocol: Option<String>, pub provider: Option<String>, pub base_url: Option<String>, pub api_key_env: Option<String> }
-pub struct SkillSource { pub path: PathBuf }
-pub struct WorkspaceConfig { pub workspace: Option<String>, pub agents: Vec<AgentProfile>, pub skills: Vec<SkillSource>,
-    pub body: String /* markdown after frontmatter */, pub path: Option<PathBuf> }
+pub enum SkillSource { Dir(PathBuf), GitHub(GitHubSkills) }   // skills.sh links, owner/repo/skill, github:owner/repo[@ref]
+pub struct GitHubSkills { pub owner: String, pub repo: String, pub skill: Option<String>, pub git_ref: Option<String> }
+pub struct WorkspaceConfig { pub workspace: Option<String>, pub skills: Vec<SkillSource>,
+    pub body: String /* markdown after frontmatter */, pub path: Option<PathBuf> }   // no agents: they live in the store
 impl WorkspaceConfig {
     pub fn load(dir: &Path) -> Result<Option<WorkspaceConfig>, Error>;   // reads dir/AXEL.md, None if absent
     pub fn parse(text: &str) -> Result<WorkspaceConfig, Error>;
     pub fn template(workspace_name: &str) -> String;
 }
 pub struct Skill { pub name: String, pub path: PathBuf, pub description: Option<String> }
-pub fn find_all_skills(sources: &[SkillSource], global: Option<&Path>) -> Result<indexmap::IndexMap<String, Skill>, Error>;
+pub fn find_all_skills(sources: &[SkillSource], global: Option<&Path>) -> Result<indexmap::IndexMap<String, Skill>, Error>;  // directories only
+pub fn find_skills(roots: &[remote::SkillRoot], global: Option<&Path>) -> Result<indexmap::IndexMap<String, Skill>, Error>;  // dirs, then remote, then global
+pub mod remote {   // AXEL.lock pins each remote source to a commit; cache <cache>/github/<owner>/<repo>/<commit>/
+    pub struct Lock { pub skills: BTreeMap<String, String> }   // GitHubSkills::key() → commit
+    pub enum SkillRoot { Dir(PathBuf), Files(Vec<PathBuf>) }
+    pub fn resolve(config: &WorkspaceConfig, cache: &Path) -> Resolved;   // pins new sources, never moves a pin
+    pub fn check_updates(config: &WorkspaceConfig, cache: &Path) -> (Lock, Vec<Update>, Vec<String>);
+}
 pub fn resolve_skills(requested: &[String], all: &IndexMap<String, Skill>) -> Vec<Skill>;  // "*" = all
 pub mod drivers {
-    pub trait SkillDriver { fn install(&self, project: &Path, skills: &[Skill]) -> Result<(), Error>; fn cleanup(&self, project: &Path) -> Result<(), Error>; fn install_context(&self, project: &Path, axel_md: &Path) -> Result<(), Error>; }
+    pub trait SkillDriver { fn install(&self, project: &Path, skills: &[Skill]) -> Result<(), Error>; fn cleanup(&self, project: &Path) -> Result<(), Error>; fn install_context(&self, project: &Path, axel_md: &Path) -> Result<bool, Error> /* false: the project has its own context file */; }
     pub fn for_harness(kind: HarnessKind) -> Option<Box<dyn SkillDriver>>;
 }
 pub mod launch {
@@ -250,8 +258,8 @@ Inbox screen: list pending requests + recent messages for the owner and all agen
 ## axel-acp (managed runtime: ACP client, session host, policy)
 
 ```rust
-// Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>, or AXEL.md agents[].acp_command)
-pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → ["claude-code-acp"], codex → ["codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
+// Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
+pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
 
 pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String> }
 pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_identity::Keypair, out: impl std::io::Write + Send) -> anyhow::Result<()>;

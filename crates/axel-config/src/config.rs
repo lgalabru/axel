@@ -1,12 +1,14 @@
-//! `AXEL.md`: YAML frontmatter (workspace, agents, skill directories) followed by a
-//! markdown body that becomes the project context for agents.
+//! `AXEL.md`: YAML frontmatter (workspace, skill sources) followed by a markdown body
+//! that becomes the project context for agents.
+//!
+//! Agents are not declared here: they are keyed identities in the user's own store, so
+//! a repo can't ship them. A legacy `agents:` block is ignored.
 //!
 //! Ported from Axel v1 `config.rs` with one flat [`AgentProfile`] instead of the
 //! per-harness enum, and without the tmux `layouts`/`grids` section (Rex owns layout).
 //! Unknown top-level keys such as a legacy `layouts:` block are ignored.
 
 use std::{
-    collections::HashSet,
     convert::Infallible,
     fmt, fs,
     path::{Path, PathBuf},
@@ -438,41 +440,165 @@ pub fn is_base58_pubkey(value: &str) -> bool {
 // Skill sources + workspace config
 // =============================================================================
 
-/// A directory to search for skills. Written as `- path: ./skills` (or a bare string).
-/// Earlier entries win over later ones for duplicate skill names.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct SkillSource {
-    pub path: PathBuf,
+/// Where skills come from. Earlier entries win over later ones for duplicate names, and
+/// directories on disk win over remote skills.
+///
+/// Written in `skills:` as a bare string or `- path: ...`:
+///
+/// - `./skills`, `~/skills`, `/abs/skills`: a directory of skills ([`SkillSource::Dir`]).
+/// - `https://skills.sh/owner/repo/skill`, or the short form `owner/repo/skill`: one
+///   skill from a GitHub repository, as listed on skills.sh.
+/// - `github:owner/repo`, `github:owner/repo/skill`, either with `@ref`; or
+///   `https://github.com/owner/repo[/tree/ref]`: a whole repo's skills, or one.
+///
+/// The short form is a path when that path exists next to `AXEL.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkillSource {
+    Dir(PathBuf),
+    GitHub(GitHubSkills),
+}
+
+/// Skills in a GitHub repository, fetched with `git` and pinned in `AXEL.lock`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GitHubSkills {
+    pub owner: String,
+    pub repo: String,
+    /// One skill by name; every skill in the repo when `None`.
+    pub skill: Option<String>,
+    /// Branch, tag or commit to follow; the default branch when `None`.
+    pub git_ref: Option<String>,
+}
+
+impl GitHubSkills {
+    /// The canonical spelling, used as the key in `AXEL.lock`: `owner/repo[/skill][@ref]`.
+    pub fn key(&self) -> String {
+        let mut k = format!("{}/{}", self.owner, self.repo);
+        if let Some(skill) = &self.skill {
+            k.push('/');
+            k.push_str(skill);
+        }
+        if let Some(r) = &self.git_ref {
+            k.push('@');
+            k.push_str(r);
+        }
+        k
+    }
+}
+
+impl fmt::Display for GitHubSkills {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.key())
+    }
+}
+
+/// `name` is a plausible GitHub owner, repo or skill name.
+fn is_slug(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `owner/repo[/skill]` with an optional `@ref` at the end.
+fn github_path(path: &str, allow_whole_repo: bool) -> Option<GitHubSkills> {
+    let (path, git_ref) = match path.rsplit_once('@') {
+        Some((p, r)) if !r.is_empty() && !r.contains('/') => (p, Some(r.to_string())),
+        Some(_) => return None,
+        None => (path, None),
+    };
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    let (owner, repo, skill) = match parts.as_slice() {
+        [o, r] if allow_whole_repo => (*o, *r, None),
+        [o, r, s] => (*o, *r, Some(s.to_string())),
+        _ => return None,
+    };
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    (is_slug(owner) && is_slug(repo) && skill.as_deref().is_none_or(is_slug)).then(|| GitHubSkills {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        skill,
+        git_ref,
+    })
 }
 
 impl SkillSource {
+    /// A directory source.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        SkillSource { path: path.into() }
+        SkillSource::Dir(path.into())
     }
 
-    /// Expand a leading `~` and resolve a relative path against `base`.
-    pub fn resolve(&self, base: Option<&Path>) -> PathBuf {
-        let expanded = expand_tilde(&self.path);
-        match base {
+    /// Read one `skills:` entry. `base` is the manifest's directory: the short form
+    /// `owner/repo/skill` stays a path when it exists there.
+    pub fn parse(text: &str, base: Option<&Path>) -> Result<SkillSource, Error> {
+        let text = text.trim();
+        let bad = || Error::Invalid(format!("unrecognised skill source `{text}`"));
+        for prefix in ["https://skills.sh/", "http://skills.sh/", "skills.sh/"] {
+            if let Some(rest) = text.strip_prefix(prefix) {
+                return github_path(rest, true).map(SkillSource::GitHub).ok_or_else(bad);
+            }
+        }
+        if let Some(rest) = text.strip_prefix("github:") {
+            return github_path(rest, true).map(SkillSource::GitHub).ok_or_else(bad);
+        }
+        for prefix in ["https://github.com/", "http://github.com/", "github.com/"] {
+            if let Some(rest) = text.strip_prefix(prefix) {
+                // owner/repo, owner/repo/tree/<ref>[/...]: the ref, never a sub-path.
+                let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+                let (owner, repo) = match parts.as_slice() {
+                    [o, r, ..] => (*o, *r),
+                    _ => return Err(bad()),
+                };
+                let git_ref = match parts.get(2..) {
+                    Some([kind, r, ..]) if *kind == "tree" || *kind == "commit" => Some(r.to_string()),
+                    Some([]) | None => None,
+                    _ => return Err(bad()),
+                };
+                let mut gh = github_path(&format!("{owner}/{repo}"), true).ok_or_else(bad)?;
+                gh.git_ref = git_ref;
+                return Ok(SkillSource::GitHub(gh));
+            }
+        }
+        if text.contains("://") {
+            return Err(bad());
+        }
+        let looks_local = text.starts_with(['.', '/', '~']);
+        if !looks_local
+            && let Some(gh) = github_path(text, false)
+        {
+            let exists = base.map(|b| b.join(text)).unwrap_or_else(|| PathBuf::from(text)).exists();
+            if !exists {
+                return Ok(SkillSource::GitHub(gh));
+            }
+        }
+        Ok(SkillSource::Dir(PathBuf::from(text)))
+    }
+
+    /// A directory source's path with a leading `~` expanded and a relative path joined
+    /// to `base`. `None` for remote sources.
+    pub fn resolve(&self, base: Option<&Path>) -> Option<PathBuf> {
+        let SkillSource::Dir(path) = self else { return None };
+        let expanded = expand_tilde(path);
+        Some(match base {
             Some(base) if expanded.is_relative() => base.join(expanded),
             _ => expanded,
+        })
+    }
+}
+
+impl fmt::Display for SkillSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SkillSource::Dir(p) => write!(f, "{}", p.display()),
+            SkillSource::GitHub(g) => write!(f, "github:{g}"),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for SkillSource {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Path(String),
-            Object { path: String },
-        }
-        let path = match Raw::deserialize(deserializer)? {
-            Raw::Path(p) | Raw::Object { path: p } => p,
-        };
-        Ok(SkillSource::new(path))
-    }
+/// A `skills:` entry as written, before it is classified.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawSkillSource {
+    Text(String),
+    Path { path: String },
 }
 
 /// Expand a leading `~` or `~/` to the home directory. Other paths are returned as-is.
@@ -494,9 +620,8 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 pub struct WorkspaceConfig {
     /// `workspace:` (alias `name:`) from the frontmatter.
     pub workspace: Option<String>,
-    pub agents: Vec<AgentProfile>,
-    /// Skill directories in priority order. After [`WorkspaceConfig::load`] relative
-    /// paths are already resolved against the manifest's directory.
+    /// Skill sources in priority order. After [`WorkspaceConfig::load`] relative
+    /// directories are already resolved against the manifest's directory.
     pub skills: Vec<SkillSource>,
     /// Markdown after the frontmatter (the project context), trimmed.
     pub body: String,
@@ -509,9 +634,7 @@ struct Frontmatter {
     #[serde(default, alias = "name")]
     workspace: Option<String>,
     #[serde(default)]
-    agents: Vec<AgentProfile>,
-    #[serde(default)]
-    skills: Vec<SkillSource>,
+    skills: Vec<RawSkillSource>,
 }
 
 impl WorkspaceConfig {
@@ -528,37 +651,43 @@ impl WorkspaceConfig {
     /// its directory.
     pub fn load_file(path: &Path) -> Result<WorkspaceConfig, Error> {
         let text = fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
-        let mut config = Self::parse(&text).map_err(|e| e.at(path))?;
-        config.path = Some(path.to_path_buf());
         let base = path.parent().filter(|p| !p.as_os_str().is_empty());
+        let mut config = Self::parse_in(&text, base).map_err(|e| e.at(path))?;
+        config.path = Some(path.to_path_buf());
         for source in &mut config.skills {
-            if source.path.is_relative() && !source.path.starts_with("~") {
-                source.path = source.resolve(base);
+            if let SkillSource::Dir(dir) = source
+                && dir.is_relative()
+                && !dir.starts_with("~")
+            {
+                *dir = base.map(|b| b.join(&*dir)).unwrap_or_else(|| dir.clone());
             }
         }
         Ok(config)
     }
 
     /// Parse manifest text. Frontmatter is optional: text without a leading `---` line
-    /// is all body, which makes a plain markdown `AXEL.md` a valid, agent-less manifest.
+    /// is all body, which makes a plain markdown `AXEL.md` a valid manifest.
     pub fn parse(text: &str) -> Result<WorkspaceConfig, Error> {
+        Self::parse_in(text, None)
+    }
+
+    fn parse_in(text: &str, base: Option<&Path>) -> Result<WorkspaceConfig, Error> {
         let (yaml, body) = split_frontmatter(text)?;
         let frontmatter: Frontmatter = match yaml {
             Some(yaml) if !yaml.trim().is_empty() => serde_norway::from_str(yaml)?,
             _ => Frontmatter::default(),
         };
-
-        let mut seen = HashSet::new();
-        for agent in &frontmatter.agents {
-            if !seen.insert(agent.id.as_str()) {
-                return Err(Error::Invalid(format!("duplicate agent id `{}`", agent.id)));
-            }
-        }
-
+        let skills = frontmatter
+            .skills
+            .into_iter()
+            .map(|raw| match raw {
+                RawSkillSource::Text(t) => SkillSource::parse(&t, base),
+                RawSkillSource::Path { path } => Ok(SkillSource::Dir(PathBuf::from(path))),
+            })
+            .collect::<Result<_, _>>()?;
         Ok(WorkspaceConfig {
             workspace: frontmatter.workspace.filter(|w| !w.trim().is_empty()),
-            agents: frontmatter.agents,
-            skills: frontmatter.skills,
+            skills,
             body: body.trim().to_string(),
             path: None,
         })
@@ -578,21 +707,23 @@ impl WorkspaceConfig {
         })
     }
 
-    /// Find an agent by `id`, then by `name` (case-insensitive).
-    pub fn agent(&self, id_or_name: &str) -> Option<&AgentProfile> {
-        self.agents.iter().find(|a| a.id == id_or_name).or_else(|| {
-            self.agents
-                .iter()
-                .find(|a| a.display_name().eq_ignore_ascii_case(id_or_name))
-        })
-    }
-
     /// Skill directories that exist on disk, resolved and in priority order.
     pub fn skills_dirs(&self) -> Vec<PathBuf> {
         self.skills
             .iter()
-            .map(|s| s.resolve(self.dir()))
+            .filter_map(|s| s.resolve(self.dir()))
             .filter(|p| p.is_dir())
+            .collect()
+    }
+
+    /// The remote sources, in order.
+    pub fn remote_skills(&self) -> Vec<&GitHubSkills> {
+        self.skills
+            .iter()
+            .filter_map(|s| match s {
+                SkillSource::GitHub(g) => Some(g),
+                SkillSource::Dir(_) => None,
+            })
             .collect()
     }
 
@@ -602,69 +733,15 @@ impl WorkspaceConfig {
             r#"---
 workspace: {workspace}
 
-# =============================================================================
-# Skill directories
-# =============================================================================
-# Search paths for skill files (first match wins for duplicate names).
-# A skill is `<name>.md` or `<name>/SKILL.md` with optional YAML frontmatter.
-# Supports: ./relative, ~/home, /absolute paths.
-
+# Where skills come from (first match wins for duplicate names; directories on disk
+# win over remote skills). A skill is `<name>.md` or `<name>/SKILL.md`.
+#   ./skills                              a directory next to this file
+#   https://skills.sh/owner/repo/skill    one skill listed on skills.sh
+#   owner/repo/skill                      the same, short
+#   github:owner/repo@v1                  every skill in a repo, at a tag
+# Remote skills are pinned to a commit in AXEL.lock; `axel skills update` moves them.
 skills:
-  - path: ./skills
-  - path: ~/.config/axel/skills
-
-# =============================================================================
-# Agents
-# =============================================================================
-# An agent combines identity + harness + model API + model.
-# The stable `id` is what you reference from the CLI; `name` can change freely.
-
-agents:
-  # Claude Code - Anthropic
-  - id: claude
-    name: Claude
-    harness: claude
-    color: gray
-    skills:
-      - "*"                    # Load all skills, or list specific: ["skill1", "skill2"]
-    # model: sonnet            # Model: sonnet, opus, haiku
-    # prompt: "Your task..."   # Default first prompt
-    # allowed_tools: []        # Restrict to specific tools
-    # disallowed_tools: []     # Block specific tools
-    # args: []                 # Additional CLI arguments
-    # pubkey: 11111111111111111111111111111111 # base58 Ed25519 public key
-    # api:
-    #   protocol: openai        # OpenAI-compatible by default
-    #   provider: openrouter
-    #   base_url: https://openrouter.ai/api/v1
-    #   api_key_env: OPENROUTER_API_KEY   # name of the env var, never the key itself
-
-  # Codex - OpenAI
-  - id: codex
-    name: Codex
-    harness: codex
-    color: green
-    skills:
-      - "*"
-    # model: gpt-5-codex       # Model to use
-    # prompt: "Your task..."
-    # args: []
-
-  # OpenCode - open source
-  # - id: opencode
-  #   name: OpenCode
-  #   harness: opencode
-  #   color: blue
-  #   skills: ["*"]
-
-  # Custom harness: any executable, with optional arguments
-  # - id: goose
-  #   name: Goose
-  #   harness:
-  #     type: custom
-  #     command: goose
-  #     args: ["session"]
-  #   color: red
+  - ./skills
 ---
 
 # {workspace}
@@ -734,138 +811,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn string_harness_form() {
-        let config = WorkspaceConfig::parse(
-            r#"---
-workspace: demo
-agents:
-  - id: reviewer
-    name: Atlas
-    harness: claude
-    model: opus
-    skills: ["code-review", "docs"]
-    allowed_tools: [Read, Grep]
-    disallowed_tools: Bash
-    color: purple
----
-# Demo
-"#,
+    fn agent_profiles_still_deserialize() {
+        let agent: AgentProfile = serde_norway::from_str(
+            "id: reviewer\nname: Atlas\nharness: claude\nmodel: opus\ndisallowed_tools: Bash\n",
         )
         .unwrap();
-
-        assert_eq!(config.workspace.as_deref(), Some("demo"));
-        assert_eq!(config.body, "# Demo");
-        assert_eq!(config.agents.len(), 1);
-        let agent = &config.agents[0];
-        assert_eq!(agent.id, "reviewer");
         assert_eq!(agent.display_name(), "Atlas");
         assert_eq!(agent.harness, Harness::builtin(HarnessKind::Claude));
-        assert_eq!(agent.model.as_deref(), Some("opus"));
-        assert_eq!(agent.skills, ["code-review", "docs"]);
-        assert_eq!(agent.allowed_tools, ["Read", "Grep"]);
         assert_eq!(agent.disallowed_tools, ["Bash"]);
-        assert_eq!(agent.color.as_deref(), Some("purple"));
-        assert!(agent.api.is_none());
-    }
-
-    #[test]
-    fn object_harness_form_and_api() {
-        let config = WorkspaceConfig::parse(
-            r#"---
-name: demo
-agents:
-  - id: backend
-    harness:
-      type: custom
-      command: "npm run dev"
-      args: ["--port", "3000"]
-    path: ./backend
-  - id: fast
-    harness:
-      type: codex
-      args: [--full-auto]
-    model: openai/gpt-5
-    pubkey: 11111111111111111111111111111111
-    api:
-      provider: openrouter
-      base_url: https://openrouter.ai/api/v1
-      api_key_env: OPENROUTER_API_KEY
----
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(config.workspace.as_deref(), Some("demo"));
-        let backend = &config.agents[0];
-        assert_eq!(backend.harness.kind, HarnessKind::Custom);
-        assert_eq!(backend.harness.command.as_deref(), Some("npm run dev"));
-        assert_eq!(backend.harness.args, ["--port", "3000"]);
-        assert_eq!(backend.path.as_deref(), Some("./backend"));
-
-        let fast = &config.agents[1];
-        assert_eq!(fast.harness.kind, HarnessKind::Codex);
-        assert!(fast.harness.command.is_none());
-        assert_eq!(fast.harness.args, ["--full-auto"]);
-        assert_eq!(
-            fast.pubkey.as_deref(),
-            Some("11111111111111111111111111111111")
-        );
-        let api = fast.api.as_ref().unwrap();
-        assert_eq!(api.provider.as_deref(), Some("openrouter"));
-        assert_eq!(api.protocol_or_default(), "openai");
-        assert_eq!(api.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
-    }
-
-    #[test]
-    fn bare_unknown_harness_name_is_a_custom_command() {
-        let config =
-            WorkspaceConfig::parse("---\nagents:\n  - harness: goose\n  - harness: shell\n---\n")
-                .unwrap();
-        assert_eq!(config.agents[0].id, "goose");
-        assert_eq!(config.agents[0].harness, Harness::custom("goose", vec![]));
-        assert_eq!(config.agents[1].id, "custom");
-        assert_eq!(config.agents[1].harness.kind, HarnessKind::Custom);
-        assert!(config.agents[1].harness.command.is_none());
-    }
-
-    #[test]
-    fn id_defaults_to_name_then_harness() {
-        let config = WorkspaceConfig::parse(
-            "---\nagents:\n  - name: Atlas\n    harness: claude\n  - harness: codex\n---\n",
-        )
-        .unwrap();
-        assert_eq!(config.agents[0].id, "Atlas");
-        assert_eq!(config.agents[1].id, "codex");
-        assert_eq!(config.agent("atlas").map(|a| a.id.as_str()), Some("Atlas"));
-    }
-
-    #[test]
-    fn agent_requires_harness() {
-        let err =
-            WorkspaceConfig::parse("---\nagents:\n  - id: x\n    model: opus\n---\n").unwrap_err();
-        assert!(err.to_string().contains("requires a `harness`"), "{err}");
-    }
-
-    #[test]
-    fn rejects_bad_pubkey_and_duplicate_ids() {
-        let err = WorkspaceConfig::parse(
-            "---\nagents:\n  - id: x\n    harness: claude\n    pubkey: nope\n---\n",
-        )
-        .unwrap_err();
+        let err = serde_norway::from_str::<AgentProfile>("id: x\nharness: claude\npubkey: nope\n").unwrap_err();
         assert!(err.to_string().contains("base58"), "{err}");
+    }
 
-        let err = WorkspaceConfig::parse(
-            "---\nagents:\n  - id: x\n    harness: claude\n  - id: x\n    harness: codex\n---\n",
-        )
-        .unwrap_err();
-        assert!(matches!(err, Error::Invalid(_)), "{err}");
+    fn gh(owner: &str, repo: &str, skill: Option<&str>, git_ref: Option<&str>) -> SkillSource {
+        SkillSource::GitHub(GitHubSkills {
+            owner: owner.into(),
+            repo: repo.into(),
+            skill: skill.map(Into::into),
+            git_ref: git_ref.map(Into::into),
+        })
+    }
+
+    #[test]
+    fn skill_sources_parse() {
+        let p = |t: &str| SkillSource::parse(t, None).unwrap();
+        assert_eq!(p("https://skills.sh/mattpocock/skills/grill-me"), gh("mattpocock", "skills", Some("grill-me"), None));
+        assert_eq!(p("skills.sh/vercel-labs/skills"), gh("vercel-labs", "skills", None, None));
+        assert_eq!(p("mattpocock/skills/grill-me"), gh("mattpocock", "skills", Some("grill-me"), None));
+        assert_eq!(p("mattpocock/skills/grill-me@v2"), gh("mattpocock", "skills", Some("grill-me"), Some("v2")));
+        assert_eq!(p("github:acme/agent-skills@v2"), gh("acme", "agent-skills", None, Some("v2")));
+        assert_eq!(p("github:acme/agent-skills/review"), gh("acme", "agent-skills", Some("review"), None));
+        assert_eq!(p("https://github.com/acme/agent-skills.git"), gh("acme", "agent-skills", None, None));
+        assert_eq!(p("https://github.com/acme/agent-skills/tree/main"), gh("acme", "agent-skills", None, Some("main")));
+        assert_eq!(p("./skills"), SkillSource::new("./skills"));
+        assert_eq!(p("~/.config/axel/skills"), SkillSource::new("~/.config/axel/skills"));
+        assert_eq!(p("skills"), SkillSource::new("skills"), "one segment is a path");
+        assert_eq!(p("my/skills"), SkillSource::new("my/skills"), "two segments are a path");
+        assert!(SkillSource::parse("https://example.com/x", None).is_err());
+        assert!(SkillSource::parse("github:just-owner", None).is_err());
+        assert_eq!(gh("a", "b", Some("c"), Some("v1")).to_string(), "github:a/b/c@v1");
+
+        // The short form is a path when it exists next to the manifest.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("team/shared/skills")).unwrap();
+        assert_eq!(
+            SkillSource::parse("team/shared/skills", Some(dir.path())).unwrap(),
+            SkillSource::new("team/shared/skills")
+        );
     }
 
     #[test]
     fn missing_frontmatter_is_all_body() {
         let config = WorkspaceConfig::parse("# Just notes\n\nNo config here.\n").unwrap();
         assert!(config.workspace.is_none());
-        assert!(config.agents.is_empty());
+        assert!(config.skills.is_empty());
         assert_eq!(config.body, "# Just notes\n\nNo config here.");
 
         let config = WorkspaceConfig::parse("").unwrap();
@@ -887,7 +886,7 @@ agents:
             "---\nworkspace: old\nlayouts:\n  grids:\n    default:\n      type: tmux\nagents:\n  - id: a\n    harness: claude\n---\n",
         )
         .unwrap();
-        assert_eq!(config.agents.len(), 1);
+        assert_eq!(config.workspace.as_deref(), Some("old"), "agents: and layouts: are ignored");
     }
 
     #[test]
@@ -895,17 +894,7 @@ agents:
         let text = WorkspaceConfig::template("myproj");
         let config = WorkspaceConfig::parse(&text).unwrap();
         assert_eq!(config.workspace.as_deref(), Some("myproj"));
-        assert_eq!(config.skills.len(), 2);
-        assert_eq!(config.skills[0].path, PathBuf::from("./skills"));
-        assert_eq!(
-            config.skills[1].path,
-            PathBuf::from("~/.config/axel/skills")
-        );
-        let ids: Vec<&str> = config.agents.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["claude", "codex"]);
-        assert!(config.agents.iter().all(AgentProfile::wants_all_skills));
-        assert_eq!(config.agents[0].harness.kind, HarnessKind::Claude);
-        assert_eq!(config.agents[1].harness.kind, HarnessKind::Codex);
+        assert_eq!(config.skills, [SkillSource::new("./skills")]);
         assert!(config.body.starts_with("# myproj"));
         assert!(config.body.contains("## Key Files"));
     }
@@ -925,12 +914,9 @@ agents:
             config.path.as_deref(),
             Some(dir.path().join(AXEL_MD).as_path())
         );
-        assert_eq!(config.skills[0].path, dir.path().join("skills"));
-        assert_eq!(
-            config.skills[1].path,
-            PathBuf::from("~/.config/axel/skills")
-        );
-        assert_eq!(config.skills[2].path, PathBuf::from("/abs"));
+        assert_eq!(config.skills[0], SkillSource::new(dir.path().join("skills")));
+        assert_eq!(config.skills[1], SkillSource::new("~/.config/axel/skills"));
+        assert_eq!(config.skills[2], SkillSource::new("/abs"));
         assert_eq!(config.skills_dirs(), vec![dir.path().join("skills")]);
         assert_eq!(
             config.name().as_deref(),
