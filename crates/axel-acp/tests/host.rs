@@ -794,7 +794,7 @@ fn prompts_from_another_agent_are_framed_for_the_agent_and_tagged_on_the_item() 
     wait_until("idle after setup", Duration::from_secs(10), || {
         f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
     });
-    let from = axel_acp::socket::Sender { pubkey: "PKjude".into(), name: "jude".into() };
+    let from = axel_acp::socket::Sender { pubkey: "PKnova".into(), name: "nova".into() };
     send_ok(
         &sock,
         Command::Prompt { text: "can you check auth.rs?".into(), attachments: vec![], steer: false, from: Some(from) },
@@ -809,11 +809,11 @@ fn prompts_from_another_agent_are_framed_for_the_agent_and_tagged_on_the_item() 
         .find(|it| it.kind == ItemKind::UserMessage)
         .unwrap();
     assert_eq!(item.content["text"], "can you check auth.rs?");
-    assert_eq!(item.content["from"], "PKjude");
+    assert_eq!(item.content["from"], "PKnova");
     // The agent reads who wrote it and how to answer.
     let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
-    assert!(log.contains("Message from jude, another Axel agent"), "{log}");
-    assert!(log.contains(r#"axel send \"@jude <your reply>\""#), "{log}");
+    assert!(log.contains("Message from nova, another Axel agent"), "{log}");
+    assert!(log.contains(r#"axel send \"@nova <your reply>\""#), "{log}");
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }

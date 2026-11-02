@@ -12,7 +12,7 @@ use crate::context::CallScope;
 pub struct Params {
     /// Agent name or base58 public key.
     #[schemars(
-        description = "Agent name (e.g. \"aaron\") or base58-encoded Ed25519 public key."
+        description = "Agent name (e.g. \"atlas\") or base58-encoded Ed25519 public key."
     )]
     pub agent: String,
 }
@@ -144,8 +144,8 @@ mod tests {
 
     #[test]
     fn params_deserializes() {
-        let json = r#"{"agent": "aaron"}"#;
+        let json = r#"{"agent": "atlas"}"#;
         let params: Params = serde_json::from_str(json).unwrap();
-        assert_eq!(params.agent, "aaron");
+        assert_eq!(params.agent, "atlas");
     }
 }

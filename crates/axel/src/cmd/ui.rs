@@ -558,7 +558,7 @@ fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<Send
 
 /// Start another agent on a thread with `text` as its first message.
 pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, files: &[std::path::PathBuf]) -> Result<String> {
-    // `aaron@mini` runs it on that host, `aaron@local` here; plain `aaron`
+    // `atlas@mini` runs it on that host, `atlas@local` here; plain `atlas`
     // wherever it runs by default.
     let (name, asked) = match agent_name.split_once('@') {
         Some((a, h)) => (a, Some(h)),

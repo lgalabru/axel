@@ -325,13 +325,13 @@ mod tests {
 
     #[test]
     fn name_at_host_mentions_pick_the_host() {
-        let agents = [agent("aaron"), agent("jude")];
+        let agents = [agent("atlas"), agent("nova")];
         assert_eq!(
-            host_hints("@aaron@mini fix the test, and @jude review it", &agents),
-            vec![("pk-aaron".to_string(), "mini".to_string())]
+            host_hints("@atlas@mini fix the test, and @nova review it", &agents),
+            vec![("pk-atlas".to_string(), "mini".to_string())]
         );
         assert!(host_hints("mail me at ludo@mini.local", &agents).is_empty(), "not a mention");
         assert!(host_hints("@nobody@mini hi", &agents).is_empty(), "unknown agent");
-        assert_eq!(host_hints("(@Jude@studio.lan)", &agents), vec![("pk-jude".to_string(), "studio.lan".to_string())]);
+        assert_eq!(host_hints("(@Nova@studio.lan)", &agents), vec![("pk-nova".to_string(), "studio.lan".to_string())]);
     }
 }

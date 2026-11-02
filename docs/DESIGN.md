@@ -1,6 +1,6 @@
 # Axel v2 — Design
 
-Axel is a terminal-first workbench for working with coding agents. It runs inside
+Axel is agent orchestration designed for Rex: threads and named agents, back in the terminal. It runs inside
 [Rex](https://www.superlogical.com/rex) and treats Rex as the window manager:
 Axel never draws windows, it asks Rex for panes.
 
@@ -290,10 +290,10 @@ home, say), so you can ask, close the laptop, and find the results when you're b
 Axel owner key). Claude Code must be logged in once on the host, from a pane of its own
 Rex (`rex -S mini run -- claude`): the keychain isn't reachable from SSH.
 
-**Asking.** `@aaron@mini …` in the composer, `axel send`, or the MCP `send` tool
-(`to: ["aaron@mini"]`) summons aaron on the host. An agent can have a **default host**
-(`axel agent edit aaron --host mini`, local-only like its policy): then plain `@aaron`,
-the launcher, `axel thread new` and `axel thread spawn` run it there, and `@aaron@local`
+**Asking.** `@atlas@mini …` in the composer, `axel send`, or the MCP `send` tool
+(`to: ["atlas@mini"]`) summons atlas on the host. An agent can have a **default host**
+(`axel agent edit atlas --host mini`, local-only like its policy): then plain `@atlas`,
+the launcher, `axel thread new` and `axel thread spawn` run it there, and `@atlas@local`
 or `--host local` runs it here. Attachments travel with the job or the relayed prompt
 (base64, 32 MB per prompt). Everything goes over SSH (one
 ControlMaster connection), each call being `axel host rpc` with one JSON request:
@@ -301,7 +301,7 @@ ControlMaster connection), each call being `axel host rpc` with one JSON request
 1. The thread's envelopes are pushed, and the thread is shared with the host from then on.
 2. The code: a snapshot commit of the working tree (tracked + untracked, not ignored;
    index and branches untouched) is pushed into `~/.axel/repos/<repo>.git` on the host.
-3. The host makes a **job key** (kept in its keystore) and aaron signs a **delegation**
+3. The host makes a **job key** (kept in its keystore) and atlas signs a **delegation**
    to it for this thread, valid 7 days. The job (agent profile + attestation, its reach
    and budget, the agents it may reach so `@name` resolves there, delegation, prompt,
    branch, attachments) is started: a worktree

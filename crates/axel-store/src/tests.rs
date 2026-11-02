@@ -2207,48 +2207,48 @@ fn sync_all(from: &Store, to: &Store) {
     }
 }
 
-/// The laptop (owner + attested aaron) and the mini (its own host key, no
-/// agent keys).  aaron delegates to the mini's key for one thread.
+/// The laptop (owner + attested atlas) and the mini (its own host key, no
+/// agent keys).  atlas delegates to the mini's key for one thread.
 #[test]
 fn a_host_works_for_a_delegating_agent_and_the_laptop_sees_the_agent() {
     let laptop = store();
     let mini = store();
     let owner = Keypair::generate();
-    let aaron = Keypair::generate();
+    let atlas = Keypair::generate();
     let host = Keypair::generate();
-    laptop.insert_agent(&agent_spec("aaron", &aaron, Some(&owner))).unwrap();
+    laptop.insert_agent(&agent_spec("atlas", &atlas, Some(&owner))).unwrap();
     let t = laptop.create_thread(&owner, "t", "fix the flaky test", None).unwrap();
     let other = laptop.create_thread(&owner, "other", "x", None).unwrap();
     sync_all(&laptop, &mini);
 
     let now = chrono::Utc::now().timestamp() as u64;
-    let grant = axel_identity::delegate(&aaron, &host.public(), &t.id, now - 60, now + 3600).unwrap();
-    let auth = attest(&owner, &aaron.public(), "").unwrap().to_tag();
+    let grant = axel_identity::delegate(&atlas, &host.public(), &t.id, now - 60, now + 3600).unwrap();
+    let auth = attest(&owner, &atlas.public(), "").unwrap().to_tag();
     mini.put_delegation(&pk(&host), &grant.to_tag(), Some(&auth)).unwrap();
-    assert_eq!(mini.delegator(&pk(&host), &t.id).unwrap(), Some(pk(&aaron)));
+    assert_eq!(mini.delegator(&pk(&host), &t.id).unwrap(), Some(pk(&atlas)));
     assert_eq!(mini.delegator(&pk(&host), &other.id).unwrap(), None);
 
-    // The mini runs aaron's session, signing with its own key.
-    let mut ns = new_session(&t.id, &aaron, "mini");
+    // The mini runs atlas's session, signing with its own key.
+    let mut ns = new_session(&t.id, &atlas, "mini");
     ns.runtime = SessionRuntime::Managed;
     let s = mini.start_session(&host, &ns).unwrap();
-    assert_eq!(s.agent_pubkey, pk(&aaron));
+    assert_eq!(s.agent_pubkey, pk(&atlas));
     mini.record_status(&host, &s.id, &StatusReport { state: StatusState::Done, ..Default::default() }).unwrap();
     let msg = mini
         .sign_with_attestation(&host, EnvelopeBuilder::new(kind::NOTE, "done: see branch").mention(&pk(&owner)).thread(&t.id), Some(&t.id))
         .unwrap();
     mini.post(&msg).unwrap();
-    assert_eq!(author(&msg), pk(&aaron));
+    assert_eq!(author(&msg), pk(&atlas));
     assert_eq!(msg.from, pk(&host));
 
-    // Back on the laptop it is aaron's work.
+    // Back on the laptop it is atlas's work.
     sync_all(&mini, &laptop);
     let back = laptop.get_session(&s.id).unwrap().expect("session replicated");
-    assert_eq!(back.agent_pubkey, pk(&aaron));
+    assert_eq!(back.agent_pubkey, pk(&atlas));
     assert_eq!(laptop.status(&s.id).unwrap().unwrap().state, StatusState::Done);
     let inbox = laptop.inbox(&pk(&owner), 10).unwrap();
     assert_eq!(inbox.len(), 1);
-    assert_eq!(author(&inbox[0]), pk(&aaron));
+    assert_eq!(author(&inbox[0]), pk(&atlas));
 
     // The grant doesn't reach another thread.
     let stray = mini
@@ -2271,10 +2271,10 @@ fn a_host_works_for_a_delegating_agent_and_the_laptop_sees_the_agent() {
     laptop.append(&sneaky).unwrap();
     assert_eq!(laptop.participants(&t.id).unwrap().iter().filter(|p| p.pubkey == pk(&host)).count(), 0);
 
-    // A forged grant (another key "delegating" for aaron) is rejected.
+    // A forged grant (another key "delegating" for atlas) is rejected.
     let mallory = Keypair::generate();
     let mut forged = axel_identity::delegate(&mallory, &host.public(), &t.id, now - 60, now + 3600).unwrap();
-    forged.delegator = aaron.public();
+    forged.delegator = atlas.public();
     let fake = EnvelopeBuilder::new(kind::NOTE, "fake").thread(&t.id).tag(forged.to_tag()).sign(&host).unwrap();
     assert!(laptop.append(&fake).unwrap().rejected_reason.unwrap().contains("delegation"));
 }
@@ -2317,16 +2317,16 @@ fn items_of_a_hosts_sessions_replicate_with_updates_and_deletes() {
 #[test]
 fn an_agent_can_have_a_default_host_until_the_host_goes() {
     let s = store();
-    let aaron = Keypair::generate();
-    assert!(s.agent_host(&pk(&aaron)).unwrap().is_none());
+    let atlas = Keypair::generate();
+    assert!(s.agent_host(&pk(&atlas)).unwrap().is_none());
     s.put_host("env-mini", "mini", "mini", "hostpk", Some("mini")).unwrap();
-    s.set_agent_host(&pk(&aaron), Some("env-mini")).unwrap();
-    assert_eq!(s.agent_host(&pk(&aaron)).unwrap().map(|e| e.label), Some("mini".to_string()));
-    s.set_agent_host(&pk(&aaron), None).unwrap();
-    assert!(s.agent_host(&pk(&aaron)).unwrap().is_none());
-    s.set_agent_host(&pk(&aaron), Some("env-mini")).unwrap();
+    s.set_agent_host(&pk(&atlas), Some("env-mini")).unwrap();
+    assert_eq!(s.agent_host(&pk(&atlas)).unwrap().map(|e| e.label), Some("mini".to_string()));
+    s.set_agent_host(&pk(&atlas), None).unwrap();
+    assert!(s.agent_host(&pk(&atlas)).unwrap().is_none());
+    s.set_agent_host(&pk(&atlas), Some("env-mini")).unwrap();
     assert!(s.remove_host("mini").unwrap());
-    assert!(s.agent_host(&pk(&aaron)).unwrap().is_none(), "a removed host is nobody's default");
+    assert!(s.agent_host(&pk(&atlas)).unwrap().is_none(), "a removed host is nobody's default");
 }
 
 /// Two agents working on one thread on the same host: each job has its own
@@ -2336,23 +2336,23 @@ fn two_agents_on_one_host_and_thread_sign_as_themselves() {
     let laptop = store();
     let mini = store();
     let owner = Keypair::generate();
-    let (remy, lara) = (Keypair::generate(), Keypair::generate());
-    let (k_remy, k_lara) = (Keypair::generate(), Keypair::generate());
-    laptop.insert_agent(&agent_spec("remy", &remy, Some(&owner))).unwrap();
-    laptop.insert_agent(&agent_spec("lara", &lara, Some(&owner))).unwrap();
+    let (orion, lyra) = (Keypair::generate(), Keypair::generate());
+    let (k_orion, k_lyra) = (Keypair::generate(), Keypair::generate());
+    laptop.insert_agent(&agent_spec("orion", &orion, Some(&owner))).unwrap();
+    laptop.insert_agent(&agent_spec("lyra", &lyra, Some(&owner))).unwrap();
     let t = laptop.create_thread(&owner, "t", "i", None).unwrap();
     sync_all(&laptop, &mini);
     let now = chrono::Utc::now().timestamp() as u64;
-    for (agent, key) in [(&remy, &k_remy), (&lara, &k_lara)] {
+    for (agent, key) in [(&orion, &k_orion), (&lyra, &k_lyra)] {
         let grant = axel_identity::delegate(agent, &key.public(), &t.id, now - 60, now + 3600).unwrap();
         let auth = attest(&owner, &agent.public(), "").unwrap().to_tag();
         mini.put_delegation(&pk(key), &grant.to_tag(), Some(&auth)).unwrap();
     }
-    assert_eq!(mini.delegate_signer(&pk(&remy), &t.id).unwrap(), Some(pk(&k_remy)));
-    assert_eq!(mini.delegate_signer(&pk(&lara), &t.id).unwrap(), Some(pk(&k_lara)));
-    let sr = mini.start_session(&k_remy, &new_session(&t.id, &remy, "mini")).unwrap();
-    let sl = mini.start_session(&k_lara, &new_session(&t.id, &lara, "mini")).unwrap();
+    assert_eq!(mini.delegate_signer(&pk(&orion), &t.id).unwrap(), Some(pk(&k_orion)));
+    assert_eq!(mini.delegate_signer(&pk(&lyra), &t.id).unwrap(), Some(pk(&k_lyra)));
+    let sr = mini.start_session(&k_orion, &new_session(&t.id, &orion, "mini")).unwrap();
+    let sl = mini.start_session(&k_lyra, &new_session(&t.id, &lyra, "mini")).unwrap();
     sync_all(&mini, &laptop);
-    assert_eq!(laptop.get_session(&sr.id).unwrap().unwrap().agent_pubkey, pk(&remy));
-    assert_eq!(laptop.get_session(&sl.id).unwrap().unwrap().agent_pubkey, pk(&lara));
+    assert_eq!(laptop.get_session(&sr.id).unwrap().unwrap().agent_pubkey, pk(&orion));
+    assert_eq!(laptop.get_session(&sl.id).unwrap().unwrap().agent_pubkey, pk(&lyra));
 }

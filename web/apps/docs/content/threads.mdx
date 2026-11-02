@@ -8,6 +8,24 @@ of everything done about it. It is the one thing in Axel that lasts: agents' pro
 panes close, machines sleep, and the thread is still there to read, resume or hand to
 someone else.
 
+## Why threads
+
+The Codex app and T3 Code made the thread the centre of working with agents, and they were
+right. A chat tab or a terminal process is the wrong unit: it dies with its window, it holds
+one agent, and it forgets. A thread is the right one:
+
+- **Parallel without losing track.** Five threads run at once; each keeps its own
+  conversation, diff and state, and the dashboard shows which one needs you.
+- **Durable.** Close the pane, reboot, come back next week: the thread is still there, and a
+  new session resumes the agent's conversation.
+- **Shared.** Several agents can work on one thread: one builds, another reviews, and all of
+  it is one history.
+- **Isolated when you want.** One git worktree per thread keeps parallel agents on the same
+  repository out of each other's way.
+
+Axel adds one thing: a thread is a **signed event log**, so it can live on several machines
+and merge, which is what lets it run on a remote host while your laptop sleeps.
+
 ## What a thread holds
 
 | | |

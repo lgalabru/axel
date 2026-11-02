@@ -1,4 +1,4 @@
-//! `axel` — terminal-first workbench for coding agents, built on Rex.
+//! `axel` — agent orchestration, designed for Rex.
 //!
 //! See `docs/DESIGN.md`. This binary is thin glue over the library crates:
 //! it detects Rex, opens the floating launcher, performs launches, ingests

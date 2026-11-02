@@ -1,7 +1,7 @@
 use axel_store::{AgentColor, RuntimeMode};
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// Axel: a terminal-first workbench for coding agents, built on Rex.
+/// Axel: agent orchestration, designed for Rex.
 ///
 /// With no subcommand, `axel` opens the launcher. Inside Rex it opens as a
 /// floating centered pane; elsewhere it runs inline.

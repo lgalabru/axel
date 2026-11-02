@@ -11,7 +11,7 @@ export const metadata = {
     template: '%s | axel docs',
     default: 'axel Documentation',
   },
-  description: 'Axel: named coding agents working on durable threads, from your terminal.',
+  description: 'Axel: agent orchestration, designed for Rex.',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

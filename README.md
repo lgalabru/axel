@@ -6,8 +6,24 @@
 
 # Axel
 
-A terminal-first workbench for coding agents, built on [Rex](https://www.superlogical.com/rex).
+**Agent orchestration, designed for [Rex](https://www.superlogical.com/rex).**
 Website: [axel.md](https://axel.md) · docs: [docs.axel.md](https://docs.axel.md).
+
+A year of agent apps taught us what works. Axel keeps those ideas and brings them back to the
+terminal:
+
+- **Threads**, from the Codex app and T3 Code. The unit of work is a thread, not a chat tab:
+  an intent and everything done about it, outliving the agent's process, the pane and the
+  machine. Run several at once, resume tomorrow, settle when done.
+- **Named agents**, from Buzz and skills.sh. A team of specialists instead of one assistant
+  that knows everything: `atlas` builds with a few skills for your stack, `nova` reviews with
+  another model and a review skill. Each has its own Ed25519 key, permissions and budget, and
+  loads only its own skills.
+- **The terminal**, from Rex. Agent apps rebuilt the terminal because it couldn't keep work
+  alive, show who's waiting on you, or reach your other machines. Rex can: durable sessions,
+  the Program Status Protocol (`OSC 7501`), Tailscale built in, and a server API programs can
+  drive. Axel is just a program in a Rex pane, and your Mac mini on the tailnet is a host
+  (`@atlas@mini`). See [Why Rex](https://docs.axel.md/why-rex).
 
 ```
 $ axel            # inside Rex: the launcher floats over the window.

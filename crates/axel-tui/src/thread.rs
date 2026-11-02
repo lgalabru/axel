@@ -150,7 +150,7 @@ pub fn dispatch(text: &str, data: &ThreadData) -> Dispatch {
             None => (rest, ""),
         };
         if !name.is_empty() {
-            // `@aaron@mini …` asks for aaron on host mini; a live aaron takes it either way.
+            // `@atlas@mini …` asks for atlas on host mini; a live atlas takes it either way.
             let agent = name.split_once('@').map_or(name, |(a, _)| a);
             if let Some(s) = data.live_sessions.iter().find(|s| s.managed && s.agent_name.eq_ignore_ascii_case(agent)) {
                 return Dispatch::Prompt { session_id: s.id.clone(), text: text.to_string() };

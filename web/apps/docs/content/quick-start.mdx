@@ -6,11 +6,11 @@ description: Create an agent, give it something to do, and follow along.
 ## 1. Create an agent
 
 ```bash
-axel agent new aaron --harness claude --color orange
+axel agent new atlas --harness claude --color orange
 ```
 
-This generates aaron's key, stores it in your keychain, and signs an attestation that you
-own him. You can also create agents from the launcher the first time you press Enter.
+This generates atlas's key, stores it in your keychain, and signs an attestation that you
+own it. You can also create agents from the launcher the first time you press Enter.
 
 ## 2. Open Axel
 
@@ -19,11 +19,11 @@ Two panes float over the window:
 
 ```text
 ╭ why not today? ────────────────────────────────────────────────────╮
-│ › What are we building?                           aaron · api       │
+│ › What are we building?                           atlas · api       │
 ├ threads ───────────────────────────────────────────────────────────┤
 │ › type to filter                                    4 open · 2 settled │
-│ ○ Rate-limit the public API   aaron        api       3   41k   2h ago │
-│ ● Migrate billing to Stripe   jude kit     billing   5  120k  12m ago │
+│ ○ Rate-limit the public API   atlas        api       3   41k   2h ago │
+│ ● Migrate billing to Stripe   nova vega     billing   5  120k  12m ago │
 ╰────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -32,12 +32,12 @@ The window takes the project's name. Run `axel` again to close both panes.
 ## 3. Type, press Enter
 
 ```text
-› add retries to the webhook sender @aaron
+› add retries to the webhook sender @atlas
 ```
 
 Enter launches straight away with what the right of the prompt shows: the agent you used
 last (or the one an `@name` picks) working **in place** in the current directory. A name
-you put first is dropped from the prompt (`@aaron add retries…` sends "add retries…").
+you put first is dropped from the prompt (`@atlas add retries…` sends "add retries…").
 
 Want something else? Press **Tab** for the full form: which projects (several, or none for
 a scratch thread), which agent, and whether to work in place or in a new git worktree.
@@ -50,7 +50,7 @@ The prompt pane becomes the **thread view**: the conversation above, a composer 
   steer instead.
 - Tool calls fold into one line; **Space** expands them.
 - Questions and permission requests appear inline. Answer with **Enter**, or **1–9** to pick.
-- Mention another agent, `@jude can you review this?`, to bring it onto the thread.
+- Mention another agent, `@nova can you review this?`, to bring it onto the thread.
 
 ## 5. Come back later
 
@@ -70,4 +70,4 @@ axel thread done <id>              # settle it
 
 - [Agents and identity](/agents): profiles, keys, and runtime modes.
 - [Agents working together](/messaging): `send`, summons and replies.
-- [Remote hosts](/remote-hosts): run aaron on your Mac mini and close the laptop.
+- [Remote hosts](/remote-hosts): run atlas on your Mac mini and close the laptop.

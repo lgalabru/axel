@@ -1,0 +1,90 @@
+---
+title: Why Rex
+description: The foundation. What Rex changes about the terminal, and what Axel builds on it.
+---
+
+Axel is agent orchestration designed for [Rex](https://www.superlogical.com/rex), the
+terminal multiplexer by Superlogical. That isn't a detail of how it's packaged. It's the
+thesis.
+
+## The detour through apps
+
+The agent tools of the past year found the ideas that matter: **threads** as the unit of
+work, **named agents** with their own skills, agents that keep going on another machine.
+To deliver them, they each rebuilt the terminal around the agent: their own windows and
+tabs, their own status lights, their own "keep it running when my laptop is closed".
+
+They had to. The terminal they started from couldn't:
+
+- keep work alive when you disconnect, close the window or switch devices;
+- tell you, reliably, that a program is waiting on *you*;
+- reach your other machines without opening them up to the internet;
+- be arranged by a program, so a tool could lay out the panes it needs.
+
+So the agent ended up in an app, and you ended up with one more window that isn't your
+terminal.
+
+## What Rex changes
+
+Superlogical's starting point is that the missing layer is "a durable session around the
+work itself", one that can "be driven by software while remaining visible and controllable
+by people". Rex is that session layer, built from scratch, starting with the terminal.
+
+### Sessions that outlive you
+
+A Rex session keeps every block (pane) and window alive across disconnects. The Rex
+server runs on each machine; the Mac app is a client, and you can connect to any of your
+servers from it. Agents run in a session, not in a window you might close.
+
+**Axel builds on it:** every managed agent runs in a Rex block, so its raw log, its
+environment and its process survive your laptop going to sleep. On a remote host, agents
+run in that host's own `axel` Rex session.
+
+### Status the terminal understands
+
+Rex's [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status.md)
+is an escape sequence, `OSC 7501`, that lets the program which knows its state report it:
+`idle`, `working` (with progress), `done`, `blocked` (on a `permission`, a `question` or
+`auth`) or `error`. Rex shows it on unfocused tabs and in the session picker, and lets Lua
+scripts react to it. Desktop notifications fire once and forget; window titles are
+unstructured. This keeps a current picture of every program.
+
+**Axel builds on it:** every hook, every ACP frame, every `axel status` is mirrored to
+`OSC 7501`. Rex's tab indicators and Axel's dashboard always agree, and you see which agent
+is blocked on you without opening Axel.
+
+### Tailscale, built in
+
+A Rex server can join your tailnet as its own device, reachable at
+`https://<name>.<tailnet>.ts.net`, and by default only the Tailscale user who owns it gets
+in. Rex trusts a caller by how they connect, and Tailscale supplies the identity. Nothing is
+exposed to the internet, and the machine doesn't even need Tailscale installed.
+
+**Axel builds on it:** your Mac mini at home is a Rex host your laptop already knows
+(`rex -S mini`). `@aaron@mini` starts aaron in the mini's Rex session, and you can watch his
+pane from anywhere on your tailnet. See [Remote hosts](/remote-hosts).
+
+### A terminal programs can drive
+
+Everything Rex does is a [server API](https://www.superlogical.com/rex/docs/automate/server-api.md)
+that documents itself: sessions, windows, blocks, floating layers, splits, labels, events.
+The CLI and Lua are generated from it, and Rex ships a skill so agents like Claude Code and
+Codex can open tabs, split panes and read a terminal's screen.
+
+**Axel builds on it:** Axel is just a program in a Rex block. The launcher is two floating
+panes it opens over your window; a thread is the conversation streaming in one pane with the
+composer split in below. No custom window toolkit, no Electron: the terminal is the UI.
+
+## Back to the terminal
+
+With that foundation, the good ideas don't need an app anymore:
+
+| Idea | Where it came from | In Axel, on Rex |
+|---|---|---|
+| **Threads** | The Codex app, T3 Code | Durable, signed threads; each session lives in a Rex block. See [Threads](/threads). |
+| **Named agents** | Buzz, skills.sh | Agents with keys, their own skills, permissions and budgets. See [Agents and identity](/agents). |
+| **Agents elsewhere** | Remote agent apps | Rex hosts on your tailnet. See [Remote hosts](/remote-hosts). |
+| **Knowing who needs you** | Per-app status lights | `OSC 7501`, shown by Rex everywhere. |
+
+You keep your terminal, your shell, your keys, and the agents' native CLIs. Axel adds the
+layer around them.

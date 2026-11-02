@@ -24,7 +24,7 @@ function Footer() {
     <footer className="relative z-10 border-t border-line bg-ink">
       <div className="mx-auto max-w-5xl px-6 py-8">
         <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
-          <p className="text-sm text-dim">&copy; 2026 Txtx, Inc.</p>
+          <p className="text-sm text-dim">&copy; 2026 Axel</p>
           <div className="flex items-center gap-6">
             <a
               href={REPO}

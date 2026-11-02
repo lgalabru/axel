@@ -15,14 +15,14 @@ import {
 } from "lucide-react";
 import { DOCS, REPO } from "@/lib/site";
 
-const PROMPT = "add retries to the webhook sender @aaron";
+const PROMPT = "add retries to the webhook sender @atlas";
 
 /* ---------------------------------------------------------------- terminal */
 
 type Agent = { name: string; color: string };
-const AARON: Agent = { name: "aaron", color: "text-tangerine" };
-const JUDE: Agent = { name: "jude", color: "text-sky" };
-const KIT: Agent = { name: "kit", color: "text-sun" };
+const ATLAS: Agent = { name: "atlas", color: "text-tangerine" };
+const NOVA: Agent = { name: "nova", color: "text-sky" };
+const VEGA: Agent = { name: "vega", color: "text-sun" };
 
 /** The prompt text, with `@name`s of known agents in their colours. */
 function Mentions({ text }: { text: string }) {
@@ -30,7 +30,7 @@ function Mentions({ text }: { text: string }) {
   return (
     <>
       {parts.map((p, i) => {
-        const agent = [AARON, JUDE, KIT].find((a) => p === `@${a.name}`);
+        const agent = [ATLAS, NOVA, VEGA].find((a) => p === `@${a.name}`);
         return agent ? (
           <span key={i} className={`${agent.color} font-semibold`}>
             {p}
@@ -73,10 +73,10 @@ const THREADS: {
   age: string;
   settled?: boolean;
 }[] = [
-  { glyph: "●", glyphClass: "text-amber-400", title: "Migrate billing to Stripe", agents: [JUDE, KIT], project: "billing", tokens: "120k", age: "12m ago" },
-  { glyph: "○", glyphClass: "text-white/40", title: "Rate-limit the public API", agents: [AARON], project: "api", tokens: "41k", age: "2h ago" },
-  { glyph: "◐", glyphClass: "text-rose-400", title: "Flaky auth test on CI", agents: [AARON, JUDE], project: "api", tokens: "18k", age: "yesterday" },
-  { glyph: "✓", glyphClass: "text-white/30", title: "Dark mode for the dashboard", agents: [KIT], project: "web", tokens: "64k", age: "3d ago", settled: true },
+  { glyph: "●", glyphClass: "text-amber-400", title: "Migrate billing to Stripe", agents: [NOVA, VEGA], project: "billing", tokens: "120k", age: "12m ago" },
+  { glyph: "○", glyphClass: "text-white/40", title: "Rate-limit the public API", agents: [ATLAS], project: "api", tokens: "41k", age: "2h ago" },
+  { glyph: "◐", glyphClass: "text-rose-400", title: "Flaky auth test on CI", agents: [ATLAS, NOVA], project: "api", tokens: "18k", age: "yesterday" },
+  { glyph: "✓", glyphClass: "text-white/30", title: "Dark mode for the dashboard", agents: [VEGA], project: "web", tokens: "64k", age: "3d ago", settled: true },
 ];
 
 /** The two floating panes `axel` opens in Rex: the prompt, recent threads below. */
@@ -96,7 +96,7 @@ function Launcher() {
           <span className="ml-px inline-block h-[1.1em] w-[2px] translate-y-[3px] bg-pink animate-[blink_1s_step-end_infinite]" />
         </div>
         <div className="hidden shrink-0 sm:block">
-          <span className="text-tangerine">aaron</span>
+          <span className="text-tangerine">atlas</span>
           <span className="text-white/40"> · api</span>
         </div>
       </div>
@@ -129,7 +129,7 @@ function Launcher() {
         </div>
       </div>
       <div className={`border-t border-line px-5 py-2 text-white/40 transition-opacity duration-500 ${done ? "opacity-100" : "opacity-0"}`}>
-        <span className="text-violet">Enter</span> starts aaron on it, in place. <span className="text-violet">↓</span> picks up a thread instead.
+        <span className="text-violet">Enter</span> starts atlas on it, in place. <span className="text-violet">↓</span> picks up a thread instead.
       </div>
     </div>
   );
@@ -138,18 +138,20 @@ function Launcher() {
 /* ---------------------------------------------------------------- sections */
 
 function Section({
+  id,
   eyebrow,
   title,
   children,
   aside,
 }: {
+  id?: string;
   eyebrow: string;
   title: React.ReactNode;
   children: React.ReactNode;
   aside: React.ReactNode;
 }) {
   return (
-    <section className="relative mx-auto grid max-w-5xl items-center gap-12 px-6 py-24 md:grid-cols-2">
+    <section id={id} className="relative mx-auto grid max-w-5xl scroll-mt-16 items-center gap-12 px-6 py-24 md:grid-cols-2">
       <div>
         <p className="text-spectrum mb-3 inline-block text-sm font-semibold uppercase tracking-widest">{eyebrow}</p>
         <h2 className="mb-5 text-4xl font-semibold tracking-tight text-fg">
@@ -188,13 +190,13 @@ function Lifecycle() {
       <div className="mb-4 text-muted">thread · Add retries to the webhook sender</div>
       <div className="space-y-1 text-muted">
         <div>
-          <span className="text-tangerine">aaron</span> · session 1 · laptop · <span className="text-dim">ended</span>
+          <span className="text-tangerine">atlas</span> · session 1 · laptop · <span className="text-dim">ended</span>
         </div>
         <div>
-          <span className="text-sky">jude</span> · session 2 · laptop · <span className="text-dim">ended</span>
+          <span className="text-sky">nova</span> · session 2 · laptop · <span className="text-dim">ended</span>
         </div>
         <div>
-          <span className="text-tangerine">aaron</span> · session 3 · mini · <span className="text-pink">working</span>
+          <span className="text-tangerine">atlas</span> · session 3 · mini · <span className="text-pink">working</span>
         </div>
       </div>
       <div className="mt-6 flex flex-wrap items-center gap-2">
@@ -215,40 +217,6 @@ function Lifecycle() {
   );
 }
 
-function Identity() {
-  return (
-    <Card className="space-y-4">
-      <div>
-        <div className="flex items-center gap-2 text-base font-semibold text-fg">
-          <span className="h-2.5 w-2.5 rounded-full bg-orange-500" /> aaron
-          <BadgeCheck className="h-4 w-4 text-pink" />
-        </div>
-        <div className="text-muted">ed25519 · 7Hq3…vK2p · attested by you</div>
-      </div>
-      <div className="grid grid-cols-[6rem_1fr] gap-y-1">
-        <span className="text-dim">harness</span>
-        <span>claude · opus</span>
-        <span className="text-dim">mode</span>
-        <span>autopilot</span>
-        <span className="text-dim">may reach</span>
-        <span>
-          <span className="text-sky">jude</span>, <span className="text-sun">kit</span>
-        </span>
-        <span className="text-dim">budget</span>
-        <span>$20 / day</span>
-        <span className="text-dim">runs on</span>
-        <span>mini</span>
-      </div>
-      <div className="rounded-lg border border-line bg-ink p-3">
-        <div className="text-xs text-dim">Message from aaron, another Axel agent on this thread:</div>
-        <div className="mt-1">
-          <span className="font-semibold text-sky">@jude</span> can you review the retry backoff in src/webhooks.rs? Reply to aaron when done.
-        </div>
-      </div>
-    </Card>
-  );
-}
-
 function Hosts() {
   return (
     <Card>
@@ -256,7 +224,7 @@ function Hosts() {
         <div className="flex-1 rounded-lg border border-line bg-ink p-4">
           <Laptop className="mb-2 h-6 w-6 text-fg" />
           <div className="font-semibold text-fg">laptop</div>
-          <div className="text-xs text-muted">aaron&apos;s key stays here</div>
+          <div className="text-xs text-muted">atlas&apos;s key stays here</div>
         </div>
         <div className="flex flex-col items-center justify-center gap-1 text-xs text-dim">
           <span>thread + code →</span>
@@ -266,12 +234,12 @@ function Hosts() {
         <div className="flex-1 rounded-lg border border-pink/50 bg-ink p-4">
           <Server className="mb-2 h-6 w-6 text-pink" />
           <div className="font-semibold text-fg">mini</div>
-          <div className="text-xs text-muted">signs for aaron: one thread, 7 days</div>
+          <div className="text-xs text-muted">signs for atlas: one thread, 7 days</div>
         </div>
       </div>
       <div className="mt-5 space-y-1 text-muted">
         <div>
-          <span className="text-dim">$</span> axel agent edit aaron --host mini
+          <span className="text-dim">$</span> axel agent edit atlas --host mini
         </div>
         <div>
           <span className="text-dim">$</span> axel session move 01j9… --to local
@@ -298,15 +266,108 @@ function Guardrails() {
       ))}
       <div className="mt-4 border-t border-line pt-4 text-muted">
         <div>
-          aaron · 41k tokens · <span className="text-fg">$0.62</span> today
+          atlas · 41k tokens · <span className="text-fg">$0.62</span> today
         </div>
-        <div className="text-dim">refused: jude has spent $20.00 today and reached its daily budget</div>
+        <div className="text-dim">refused: nova has spent $20.00 today and reached its daily budget</div>
       </div>
     </Card>
   );
 }
 
 const HARNESSES = "Claude Code, Codex, OpenCode and any ACP agent";
+const REX = "https://www.superlogical.com/rex";
+
+/** Two specialists instead of one agent that knows everything. */
+function Specialists() {
+  const agents = [
+    { name: "atlas", color: "text-tangerine", dot: "bg-tangerine", role: "builds", model: "claude", skills: ["rust", "axum", "sqlx"] },
+    { name: "nova", color: "text-sky", dot: "bg-sky", role: "reviews", model: "codex", skills: ["review", "security"] },
+  ];
+  return (
+    <Card className="space-y-4">
+      {agents.map((a) => (
+        <div key={a.name} className="rounded-lg border border-line bg-ink p-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 font-semibold text-fg">
+              <span className={`h-2.5 w-2.5 rounded-full ${a.dot}`} /> {a.name}
+              <BadgeCheck className="h-4 w-4 text-violet" />
+              <span className="font-normal text-dim">{a.role}</span>
+            </div>
+            <span className="text-dim">{a.model}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {a.skills.map((sk) => (
+              <span key={sk} className="rounded-md border border-line px-2 py-0.5 text-xs text-muted">
+                {sk}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="rounded-lg border border-line bg-ink p-3">
+        <div className="text-xs text-dim">Message from atlas, another Axel agent on this thread:</div>
+        <div className="mt-1">
+          <span className="font-semibold text-sky">@nova</span> the retry backoff is in src/webhooks.rs, tests pass. Review it and reply to atlas.
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/** What Rex gives Axel, one tile each. */
+function RexFoundation() {
+  const tiles = [
+    {
+      title: "Sessions that outlive you",
+      body: "A Rex session keeps every pane alive across disconnects, reboots of your laptop and switches of device. Agents run in it, not in a window you might close.",
+      code: "rex -S mini",
+    },
+    {
+      title: "Status the terminal understands",
+      body: "Rex's Program Status Protocol lets a program say it is working, done, or blocked on a permission, a question or a login. Axel reports every agent through it, so Rex's tabs and session picker show who needs you.",
+      code: "OSC 7501 ; state=blocked:kind=permission",
+    },
+    {
+      title: "Tailscale, built in",
+      body: "A Rex server joins your tailnet as its own device, and only its owner gets in. Your Mac mini at home is one host name away, from anywhere, with nothing exposed to the internet.",
+      code: "https://rex-mini.<tailnet>.ts.net",
+    },
+    {
+      title: "A terminal programs can drive",
+      body: "Everything Rex does is a server API: floating panes, splits, labels, events. Axel is just a program in a Rex pane using it, and your agents can use it too, through Rex's own skill.",
+      code: "session.new_layer · session.new_split",
+    },
+  ];
+  return (
+    <section id="rex" className="relative mx-auto max-w-5xl scroll-mt-16 px-6 py-24">
+      <p className="text-spectrum mb-3 inline-block text-sm font-semibold uppercase tracking-widest">The foundation</p>
+      <h2 className="mb-5 max-w-3xl text-4xl font-semibold tracking-tight text-fg">Rex fixed the terminal. So orchestration can live there again.</h2>
+      <div className="max-w-3xl space-y-4 text-lg leading-relaxed text-muted">
+        <p>
+          The agent apps of the past year found the right ideas, then rebuilt the terminal badly to deliver them: their own windows, their own status lights, their own way to
+          reach a remote machine. They had to, because the terminal couldn&apos;t keep work alive, couldn&apos;t tell you a program was waiting on you, and didn&apos;t know
+          your other machines.
+        </p>
+        <p>
+          <a href={REX} className="text-fg underline decoration-pink/60 underline-offset-4 hover:decoration-pink">
+            Rex
+          </a>
+          , by Superlogical, starts from scratch on what a terminal session is: a durable session around the work itself, driven by software while you can always see and take
+          control of it. Axel builds on exactly that.
+        </p>
+      </div>
+      <div className="mt-12 grid gap-4 md:grid-cols-2">
+        {tiles.map((t) => (
+          <div key={t.title} className="rounded-2xl border border-line bg-surface p-6">
+            <h3 className="text-lg font-semibold text-fg">{t.title}</h3>
+            <p className="mt-2 text-base leading-relaxed text-muted">{t.body}</p>
+            <div className="mt-4 truncate font-mono text-[13px] text-violet">{t.code}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 /* ---------------------------------------------------------------- page */
 
@@ -315,15 +376,16 @@ export default function Home() {
     <div className="relative">
       <section className="relative z-10 flex min-h-screen flex-col items-center justify-center px-6 pb-16 pt-24 text-center">
         {/* Axel the axolotl. */}
-        <img src="/mascot.webp" alt="Axel, a smiling axolotl in neon colours" width={984} height={827} className="mb-6 w-[min(20rem,70vw)] drop-shadow-[0_0_50px_rgba(247,69,198,0.45)]" />
-        <h1 className="text-spectrum pb-2 text-7xl font-bold leading-none tracking-tight sm:text-8xl" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
+        <img src="/mascot.webp" alt="Axel, a smiling axolotl in neon colours" width={984} height={827} className="mb-4 w-[min(16rem,60vw)] drop-shadow-[0_0_50px_rgba(247,69,198,0.45)]" />
+        <p className="text-spectrum text-2xl font-bold tracking-tight" style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
           axel
-        </h1>
-        <p className="mt-6 max-w-2xl text-2xl font-medium text-fg">
-          Named agents. Durable threads. <span className="text-spectrum">Your terminal.</span>
         </p>
-        <p className="mt-4 max-w-xl text-lg text-muted">
-          Type what you want done and press Enter. Your agents take it from there, on this machine or another, while you get on with your day.
+        <h1 className="mt-4 max-w-4xl text-5xl font-semibold leading-[1.05] tracking-tight text-fg sm:text-7xl">
+          Agent orchestration, <span className="text-spectrum">designed for Rex.</span>
+        </h1>
+        <p className="mt-6 max-w-2xl text-lg text-muted">
+          A year of agent apps taught us what works: threads, and named agents. Axel brings them back to the terminal, on Rex, where your work already lives, on this machine
+          or any other on your tailnet.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <a
@@ -345,13 +407,20 @@ export default function Home() {
             <Launcher />
           </div>
         </div>
-        <p className="mt-6 text-sm text-white/40">
-          Runs {HARNESSES}, inside{" "}
-          <a href="https://www.superlogical.com/rex" className="underline decoration-white/20 underline-offset-4 hover:text-white/70">
-            Rex
-          </a>
-          .
-        </p>
+        <div className="mt-8 flex flex-wrap justify-center gap-x-8 gap-y-2 text-sm text-white/45">
+          <span>
+            <span className="text-fg/80">Threads</span> from the Codex app and T3 Code
+          </span>
+          <span>
+            <span className="text-fg/80">Named agents</span> from Buzz and skills.sh
+          </span>
+          <span>
+            <span className="text-fg/80">The terminal</span> from{" "}
+            <a href={REX} className="underline decoration-white/20 underline-offset-4 hover:text-white/70">
+              Rex
+            </a>
+          </span>
+        </div>
       </section>
 
       <div className="relative z-10 bg-ink">
@@ -360,63 +429,73 @@ export default function Home() {
           <div className="absolute bottom-0 right-0 top-0 w-px border-r border-dashed border-line" />
         </div>
 
-        <Section eyebrow="Threads" title="Work that outlives the terminal" aside={<Lifecycle />}>
-          <p>A thread is what you asked for and everything done about it: the conversation, every tool call, the agents that joined, the projects it touches.</p>
+        <RexFoundation />
+
+        <Section id="threads" eyebrow="Threads" title="The unit of work is the thread, not the tab" aside={<Lifecycle />}>
           <p>
-            Agents come and go. Panes close, laptops sleep. The thread stays, ready to read or resume. When it&apos;s finished, settle it: it stays listed until you archive it.
+            The Codex app and T3 Code got this right. A thread is what you asked for and everything done about it: the conversation, every tool call, the diff, the agents that
+            joined. A chat tab dies with its window; a thread doesn&apos;t.
+          </p>
+          <p>
+            That changes how you work. You run five things at once without losing any of them, come back tomorrow and resume, hand a thread to another agent, and settle it when
+            it&apos;s done.
           </p>
           <div className="space-y-3 pt-2">
-            <Point icon={GitBranch} title="In place or in a worktree.">
-              Several projects at once, or none for a scratch idea.
+            <Point icon={GitBranch} title="One worktree per thread, if you want it.">
+              Parallel agents on one repository don&apos;t step on each other. Or work in place, across several projects, or none.
             </Point>
-            <Point icon={Terminal} title="Resume where it stopped.">
-              A new session continues the agent&apos;s last conversation.
+            <Point icon={Terminal} title="Signed, so it travels.">
+              In Axel a thread is a log of signed events. Copies on two machines merge, which is what lets a thread run on the mini while your laptop sleeps.
             </Point>
           </div>
         </Section>
 
-        <Section eyebrow="Agents" title="Agents with names, keys and limits" aside={<Identity />}>
+        <Section id="agents" eyebrow="Named agents" title="Specialists, not one agent that knows everything" aside={<Specialists />}>
           <p>
-            aaron is an Ed25519 identity you created and attested, with a harness, a model, skills, a colour, permissions and a budget. Everything he does is signed by him.
+            Buzz gave agents names and keys; skills.sh made skills a one-line install. Put together, you stop prompting a generic assistant and start working with a team:
+            atlas builds, nova reviews.
           </p>
           <div className="space-y-3 pt-2">
-            <Point icon={MessagesSquare} title="They work together.">
-              An agent can ask another on the same thread for a review or a hand, and get the answer as its next prompt. You see every message.
+            <Point icon={MessagesSquare} title="A second pair of eyes.">
+              The best review comes from someone who didn&apos;t write the code. atlas asks nova, a different agent with a different model and a review skill, and gets the
+              answer as its next prompt. You see every message.
             </Point>
-            <Point icon={KeyRound} title="Only who you allowed.">
-              Agents start with no reach. Loops, runaway chains and overspending are refused, with the command that would allow it.
+            <Point icon={Coins} title="No skill bloat.">
+              Install sixty skills into one agent and every session pays for their descriptions, and picks the wrong one. Each named agent carries only its own.
+            </Point>
+            <Point icon={KeyRound} title="Its own key, permissions and budget.">
+              Everything atlas does is signed by atlas. It reaches only the agents you allowed, can&apos;t loop, and stops at its daily budget.
             </Point>
           </div>
         </Section>
 
-        <Section eyebrow="Remote hosts" title="Ask, then close the laptop" aside={<Hosts />}>
+        <Section id="hosts" eyebrow="Remote hosts" title="Ask, then close the laptop" aside={<Hosts />}>
           <p>
-            Register a machine you reach over SSH, like a Mac mini at home. <code className="rounded bg-raised px-1.5 py-0.5 text-base">@aaron@mini</code> runs aaron there, or
-            make the mini his default.
+            Your Mac mini at home is on your tailnet, and Rex is on it. <code className="rounded bg-raised px-1.5 py-0.5 text-base">@atlas@mini</code> runs atlas there, in the
+            mini&apos;s own Rex session, or make the mini its default.
           </p>
           <p>
-            The thread view streams as if he ran locally. Close the lid on the subway; his branch and uncommitted work come home when you reconnect. A running session can even move
-            between machines and keep its conversation.
+            The thread streams to your laptop as if it ran locally. Close the lid on the subway; its branch and uncommitted work come home when you reconnect. A running session
+            can even move between machines and keep its conversation.
           </p>
           <div className="space-y-3 pt-2">
             <Point icon={ShieldCheck} title="Keys never leave home.">
-              The host gets a short-lived grant to sign for aaron, on one thread only.
+              The host gets a short-lived grant to sign for atlas, on one thread only.
             </Point>
           </div>
         </Section>
 
-        <Section eyebrow="Autopilot" title="No babysitting" aside={<Guardrails />}>
+        <Section id="autopilot" eyebrow="Autopilot" title="No babysitting" aside={<Guardrails />}>
           <p>
-            Each agent has a mode for routine permissions, a guard for the things that are never routine, and a daily budget. When an agent does need you, the question shows up in
-            the thread and in your inbox.
+            Each agent has a mode for routine permissions, a guard for the things that are never routine, and a daily budget. When an agent does need you, Rex shows it on the
+            tab, and the question waits in the thread and in your inbox.
           </p>
           <div className="space-y-3 pt-2">
             <Point icon={Coins} title="Every token counted.">
               Input, output and cache tokens, and the estimated cost, per thread and per agent.
             </Point>
             <Point icon={Terminal} title="No screen scraping.">
-              Status comes from hooks, the Agent Client Protocol or <code className="rounded bg-raised px-1 py-0.5 text-sm">axel status</code>, and Rex&apos;s tab indicators
-              agree.
+              Status comes from hooks, the Agent Client Protocol or <code className="rounded bg-raised px-1 py-0.5 text-sm">axel status</code>. It runs {HARNESSES}.
             </Point>
           </div>
         </Section>
@@ -431,7 +510,7 @@ export default function Home() {
               <span className="text-white/35">$</span> just install
             </div>
             <div>
-              <span className="text-white/35">$</span> axel agent new aaron --harness claude
+              <span className="text-white/35">$</span> axel agent new atlas --harness claude
             </div>
             <div>
               <span className="text-white/35">$</span> axel

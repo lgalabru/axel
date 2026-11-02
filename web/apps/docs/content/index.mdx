@@ -1,49 +1,55 @@
 ---
 title: Introduction
-description: Named coding agents working on durable threads, from your terminal.
+description: Agent orchestration, designed for Rex.
 ---
 
-Axel is a terminal workbench for coding agents, built on [Rex](https://www.superlogical.com/rex).
-You type what you want done and press Enter. A named agent picks it up, works on it in a
-thread, and reports back. You keep working, or close the laptop.
+Axel is agent orchestration designed for [Rex](https://www.superlogical.com/rex). You type
+what you want done and press Enter. A named agent picks it up and works on it in a thread,
+in your terminal, on this machine or another one on your tailnet.
 
 ```text
-› fix the flaky auth test @aaron                                 aaron · api
+› fix the flaky auth test @atlas                                 atlas · api
 ```
 
-It runs the agents you already use (Claude Code, Codex, OpenCode) and adds the layer
-around them: who each agent is, what it may do, what it's working on, what it costs, and
-where it runs.
+It runs the agents you already use (Claude Code, Codex, OpenCode) as their real CLIs, and
+adds the layer around them: who each agent is, what it may do, what it's working on, what it
+costs, and where it runs.
 
-## The ideas
+## What we learned, back in the terminal
 
-**Threads are the unit of work.** A thread is an intent ("fix the flaky auth test") and
-everything done in its name: the conversation, every tool call, the agents that joined,
-the projects it touches. It outlives the agent's process, the terminal pane and the
-machine. Come back tomorrow and resume it, settle it when it's finished.
+The past year of agent tools taught us what works. Axel keeps those ideas and brings them
+home to the terminal:
 
-**Agents are named, with their own keys.** `aaron` is an Ed25519 identity you created,
-with a harness (Claude Code, say), a model, skills, a colour, permissions and a budget.
-Everything aaron does is signed by aaron. Address him as `@aaron` from anywhere.
+**Threads, from the Codex app and T3 Code.** The unit of work is a thread, not a chat tab: an
+intent and everything done about it, outliving the agent's process, the pane and the machine.
+Run several at once, come back tomorrow, resume, settle. [More on threads](/threads).
 
-**Agents can work together, within limits you set.** An agent can message or summon
-another one on the same thread, but only the ones you allowed it to reach, and never in a
-loop. You see every message they exchange.
+**Named agents, from Buzz and skills.sh.** Instead of one assistant that knows everything,
+a team of specialists. `atlas` builds with a few skills for your stack; `nova` reviews with a
+different model and a review skill. Each has its own Ed25519 key, permissions and budget, and
+they can ask each other for help within limits you set. [More on agents](/agents).
 
-**Your agents can run elsewhere.** Register a machine you have SSH access to, such as a
-Mac mini at home, and `@aaron@mini` runs aaron there. His key never leaves your laptop:
-the machine signs for him, on that thread only, for a limited time. Close the lid; the work
-syncs back as a git branch when you reconnect.
+**The terminal, from Rex.** Those tools rebuilt the terminal inside an app because the old
+terminal couldn't keep work alive, show who's waiting on you, or reach your other machines.
+Rex can: durable sessions, a status protocol the terminal understands, Tailscale built in,
+and an API programs can drive. That's the foundation Axel is built on. [Why Rex](/why-rex).
 
-**Status comes from protocols, not screen scraping.** Agents report through Claude Code
-hooks, Codex notify, the Agent Client Protocol, or `axel status`. Rex's own tab
-indicators agree with Axel's dashboard.
+## And because it's built that way
+
+- **Your agents can run elsewhere.** `@atlas@mini` runs atlas on your Mac mini, in its Rex
+  session, over your tailnet. Its key never leaves your laptop. Close the lid; the work comes
+  home when you reconnect.
+- **No babysitting.** Routine permissions follow each agent's mode; a guard refuses
+  irreversible commands; budgets cap spend. When an agent does need you, Rex shows it on the
+  tab.
+- **No screen scraping.** Status comes from Claude Code hooks, Codex notify, the Agent
+  Client Protocol, or `axel status`, mirrored to Rex.
 
 ## Where to go next
 
 <Cards>
   <Card title="Installation" href="/installation" description="Rex, Axel and a harness." />
   <Card title="Quick start" href="/quick-start" description="Your first agent and thread." />
-  <Card title="Threads" href="/threads" description="The unit of work, and its life cycle." />
+  <Card title="Why Rex" href="/why-rex" description="The foundation, and what Axel builds on it." />
   <Card title="Remote hosts" href="/remote-hosts" description="Run agents on another machine." />
 </Cards>

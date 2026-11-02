@@ -61,7 +61,7 @@ impl AxelMcp {
         description = "Send a message to other Axel agents on this thread. Each recipient gets it in front of it: \
             as the next prompt of its live session (queued if it is mid-turn), by being summoned onto the thread \
             if it isn't on it, or in its inbox if it runs in a terminal pane. Returns one outcome per recipient. \
-            Write `name@host` (e.g. \"aaron@mini\") to summon the agent on a remote host when the owner asks for that. \
+            Write `name@host` (e.g. \"atlas@mini\") to summon the agent on a remote host when the owner asks for that. \
             Their normal answers go to the owner, not to you: to hear back, ask them to reply with this tool, then \
             end your turn; the reply arrives as your next prompt. Writing @name in your reply does nothing. \
             Send only when you have a request, a result or an answer: never just to say you got a message, \

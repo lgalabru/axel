@@ -11,7 +11,7 @@ use crate::context::AxelContext;
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Params {
     /// Agent names to send to, without the `@`.
-    #[schemars(description = "Names of the agents to send to, without '@' (e.g. [\"aaron\"]); \"aaron@mini\" runs aaron on host mini if it has to be summoned. See list_agents.")]
+    #[schemars(description = "Names of the agents to send to, without '@' (e.g. [\"atlas\"]); \"atlas@mini\" runs atlas on host mini if it has to be summoned. See list_agents.")]
     pub to: Vec<String>,
     /// The message. Self-contained: the recipient can't see your conversation.
     #[schemars(
@@ -54,7 +54,7 @@ mod tests {
         fn send(&self, to: &[String], text: &str) -> Result<SendReport, String> {
             self.0.lock().unwrap().push((to.to_vec(), text.to_string()));
             if to.iter().any(|t| t == "nobody") {
-                return Err("jude may not message nobody; allow it with `axel agent edit jude --allow nobody`".into());
+                return Err("nova may not message nobody; allow it with `axel agent edit nova --allow nobody`".into());
             }
             Ok(SendReport {
                 message_id: "abc".into(),
@@ -67,11 +67,11 @@ mod tests {
     #[test]
     fn names_lose_their_at_and_outcomes_come_back_as_json() {
         let fake = Fake(Mutex::new(Vec::new()));
-        let r = run(Params { to: vec!["@aaron".into(), " ".into()], text: "review src/auth.rs".into() }, &fake).unwrap();
-        assert_eq!(fake.0.lock().unwrap()[0].0, vec!["aaron".to_string()]);
+        let r = run(Params { to: vec!["@atlas".into(), " ".into()], text: "review src/auth.rs".into() }, &fake).unwrap();
+        assert_eq!(fake.0.lock().unwrap()[0].0, vec!["atlas".to_string()]);
         assert_ne!(r.is_error, Some(true));
         let text = &r.content[0].as_text().unwrap().text;
-        assert!(text.contains("\"outcome\": \"queued\"") && text.contains("\"to\": \"aaron\""), "{text}");
+        assert!(text.contains("\"outcome\": \"queued\"") && text.contains("\"to\": \"atlas\""), "{text}");
     }
 
     #[test]

@@ -11,10 +11,10 @@ piece of the work. You decide who may reach whom, and you see every message.
 From an agent, with the `send` tool of its `axel` MCP server, or the CLI:
 
 ```bash
-axel send "@jude can you review src/auth.rs for the token refresh bug? Reply to aaron when done."
+axel send "@nova can you review src/auth.rs for the token refresh bug? Reply to atlas when done."
 ```
 
-You can send the same way, from a terminal or by mentioning `@jude` in the composer. Each
+You can send the same way, from a terminal or by mentioning `@nova` in the composer. Each
 recipient gets the message in front of it, **on this thread**:
 
 | Recipient | What happens | Outcome |
@@ -27,15 +27,15 @@ recipient gets the message in front of it, **on this thread**:
 The receiving agent reads:
 
 ```text
-Message from aaron, another Axel agent on this thread:
+Message from atlas, another Axel agent on this thread:
 
 can you review src/auth.rs for the token refresh bug? …
 ```
 
 ## Replies
 
-An agent's normal answers go to **you**, not to the agent that asked. To answer aaron, jude
-has to `send` to him too, and that reply arrives as aaron's next prompt. So agents are told
+An agent's normal answers go to **you**, not to the agent that asked. To answer atlas, nova
+has to `send` to it too, and that reply arrives as atlas's next prompt. So agents are told
 to:
 
 - make each message self-contained, since the recipient can't see their conversation;
@@ -48,13 +48,13 @@ to:
 Agents start with **no reach**. You grant it per agent:
 
 ```bash
-axel agent edit aaron --allow jude,kit     # aaron may message and summon jude and kit
-axel agent edit aaron --reach anyone       # …or any agent
-axel agent edit aaron --disallow kit
+axel agent edit atlas --allow nova,vega     # atlas may message and summon nova and vega
+axel agent edit atlas --reach anyone       # …or any agent
+axel agent edit atlas --disallow vega
 ```
 
-An agent that may reach you may always be answered: if aaron may ask jude, jude may reply
-to aaron, but only while aaron is on the thread. Replying never starts a session.
+An agent that may reach you may always be answered: if atlas may ask nova, nova may reply
+to atlas, but only while atlas is on the thread. Replying never starts a session.
 
 Axel also refuses:
 

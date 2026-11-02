@@ -35,7 +35,7 @@ permission prompt.
 
 | Tool | CLI equivalent |
 |---|---|
-| `send` `{to: ["aaron"], text}` | `axel send "@aaron …"` |
+| `send` `{to: ["atlas"], text}` | `axel send "@atlas …"` |
 | `set_status` `{state, message, kind}` | `axel status STATE "MSG" --kind KIND` |
 | `read_inbox` `{limit}` | `axel inbox --agent "$AXEL_AGENT_NAME"` |
 | `list_agents`, `get_agent` | `axel agent ls`, `axel agent show NAME` |
@@ -47,7 +47,7 @@ CLI. It does exactly the same thing under the same rules.
 
 ```bash
 axel agent ls                                  # who exists, and who you may reach
-axel send "@aaron can you review src/auth.rs for the token refresh bug?"
+axel send "@atlas can you review src/auth.rs for the token refresh bug?"
 ```
 
 `send` (or `axel send`, which reads the `@name`s in the text) resolves each
@@ -69,13 +69,13 @@ owner, not to you. To answer you, it has to `send` to you (or run `axel send "@<
 and its reply then arrives as your next prompt, marked as a message from it.
 Messages from other agents are always framed like this:
 
-> Message from aaron, another Axel agent on this thread: …
+> Message from atlas, another Axel agent on this thread: …
 
 So:
 
 - **Make each message self-contained.** The recipient can't see your
   conversation. Give it paths, what you already tried, and what you want back.
-- **Ask for a reply explicitly** when you need one, for example "reply to jude
+- **Ask for a reply explicitly** when you need one, for example "reply to nova
   with the `send` tool when done". Then end your turn. Don't poll or sleep while
   you wait, because the reply arrives as a new prompt.
 - **Only send when you have something they need**: a request, a result, an
@@ -86,14 +86,14 @@ So:
   result; if you have nothing for them yet, send nothing.
 - **Write `@name` plainly.** Don't bold it or wrap it in backticks inside the
   text you send.
-- Writing `@aaron` in your normal reply does **nothing**. Only `send` /
+- Writing `@atlas` in your normal reply does **nothing**. Only `send` /
   `axel send` deliver.
 
 ## Working on a remote host
 
-The owner can run an agent on another machine: `@aaron@mini …`, or `send` with
-`to: ["aaron@mini"]`. Do that only when the owner asks for it. Some agents run on
-a host by default; plain `@aaron` then starts it there.
+The owner can run an agent on another machine: `@atlas@mini …`, or `send` with
+`to: ["atlas@mini"]`. Do that only when the owner asks for it. Some agents run on
+a host by default; plain `@atlas` then starts it there.
 
 If your first prompt says you run on a remote host, the owner is away:
 
@@ -110,13 +110,13 @@ If your first prompt says you run on a remote host, the owner is away:
 ## When Axel refuses
 
 Agents start with no reach. The owner grants it per agent. An agent that may
-reach you may always be answered: if jude may message you, you may reply to jude
-with `send`, but only while jude is working on the thread. Replying never
+reach you may always be answered: if nova may message you, you may reply to nova
+with `send`, but only while nova is working on the thread. Replying never
 starts a session. A refusal names the exact command that would allow it:
 
 | Refusal | Meaning | What to do |
 |---|---|---|
-| `jude may not message aaron; allow it with axel agent edit …` | You have no reach to that agent. | Tell the owner what you wanted and quote the command. Don't look for another way in. |
+| `nova may not message atlas; allow it with axel agent edit …` | You have no reach to that agent. | Tell the owner what you wanted and quote the command. Don't look for another way in. |
 | `… is already in this summon chain …` | Summoning it would form a loop. | Do the work yourself, or ask the owner. |
 | `the summon chain would reach depth N …` | Too many agents summoned in a row. | Do the work yourself, or ask the owner. |
 | `… reached its $X daily budget …` | That agent has spent its budget for today. | Tell the owner. |

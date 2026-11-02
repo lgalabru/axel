@@ -1507,8 +1507,8 @@ mod tests {
     #[test]
     fn claude_files_conversations_under_the_mangled_path() {
         assert_eq!(
-            claude_project_name(Path::new("/Users/ludo/.axel/worktrees/3c13d6a04d4e-remy")),
-            "-Users-ludo--axel-worktrees-3c13d6a04d4e-remy"
+            claude_project_name(Path::new("/Users/ludo/.axel/worktrees/3c13d6a04d4e-orion")),
+            "-Users-ludo--axel-worktrees-3c13d6a04d4e-orion"
         );
         let d = tempfile::tempdir().unwrap();
         let jsonl = format!(
@@ -1540,24 +1540,24 @@ mod tests {
     fn work_coming_back_lands_in_a_worktree_with_the_uncommitted_part_uncommitted() {
         let d = repo();
         let root = d.path();
-        git(root, &["checkout", "--quiet", "-b", "axel/fix-remy"]).unwrap();
+        git(root, &["checkout", "--quiet", "-b", "axel/fix-orion"]).unwrap();
         std::fs::write(root.join("done.rs"), "// committed on the host").unwrap();
         git(root, &["add", "."]).unwrap();
         git(root, &["commit", "--quiet", "-m", "host commit"]).unwrap();
         std::fs::write(root.join("wip.rs"), "// not committed yet").unwrap();
         let wip = snapshot_commit(root, "wip").unwrap();
-        git(root, &["update-ref", "refs/axel/mini/axel/fix-remy", &wip]).unwrap();
+        git(root, &["update-ref", "refs/axel/mini/axel/fix-orion", &wip]).unwrap();
         std::fs::remove_file(root.join("wip.rs")).unwrap();
         git(root, &["checkout", "--quiet", "-"]).unwrap();
 
         let trees = tempfile::tempdir().unwrap();
-        let wt = checkout_returned_in(root, "mini", "axel/fix-remy", trees.path()).unwrap();
+        let wt = checkout_returned_in(root, "mini", "axel/fix-orion", trees.path()).unwrap();
         assert!(wt.join("done.rs").exists() && wt.join("wip.rs").exists());
         let status = git(&wt, &["status", "--porcelain"]).unwrap();
         assert_eq!(status, "?? wip.rs", "the host's uncommitted work is uncommitted here");
         // Again, with local changes: nothing is clobbered.
         std::fs::write(wt.join("wip.rs"), "// edited here").unwrap();
-        let again = checkout_returned_in(root, "mini", "axel/fix-remy", trees.path()).unwrap();
+        let again = checkout_returned_in(root, "mini", "axel/fix-orion", trees.path()).unwrap();
         assert_eq!(std::fs::canonicalize(again).unwrap(), std::fs::canonicalize(&wt).unwrap());
         assert_eq!(std::fs::read_to_string(wt.join("wip.rs")).unwrap(), "// edited here");
     }

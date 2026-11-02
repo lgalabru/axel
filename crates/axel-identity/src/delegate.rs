@@ -138,9 +138,9 @@ mod tests {
 
     #[test]
     fn a_delegation_verifies_only_for_its_host_thread_and_window() {
-        let aaron = Keypair::generate();
+        let atlas = Keypair::generate();
         let host = Keypair::generate();
-        let d = delegate(&aaron, &host.public(), "t1", 100, 200).unwrap();
+        let d = delegate(&atlas, &host.public(), "t1", 100, 200).unwrap();
         let back = Delegation::from_tag(&d.to_tag()).unwrap();
         assert_eq!(back, d);
         back.verify_for(&host.public(), "t1", 1, 150).unwrap();

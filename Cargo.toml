@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/lgalabru/axel"
-description = "Axel: a terminal-first workbench for coding agents, built on Rex"
+description = "Axel: agent orchestration, designed for Rex"
 
 [workspace.dependencies]
 axel-identity = { path = "crates/axel-identity" }

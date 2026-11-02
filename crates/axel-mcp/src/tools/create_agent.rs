@@ -16,7 +16,7 @@ use crate::context::CallScope;
 pub struct Params {
     /// Agent name: must match `[A-Za-z0-9_-]+` so it works as an @mention handle.
     #[schemars(description = "Agent name. Must be alphanumeric with hyphens/underscores \
-        (e.g. \"aaron\", \"code-reviewer\"). Used as @mention handle.")]
+        (e.g. \"atlas\", \"code-reviewer\"). Used as @mention handle.")]
     pub name: String,
 
     /// Harness (coding CLI) this agent runs in: "claude", "codex", "opencode",
@@ -210,9 +210,9 @@ mod tests {
 
     #[test]
     fn params_deserializes_with_defaults() {
-        let json = r#"{"name": "aaron"}"#;
+        let json = r#"{"name": "atlas"}"#;
         let params: Params = serde_json::from_str(json).unwrap();
-        assert_eq!(params.name, "aaron");
+        assert_eq!(params.name, "atlas");
         assert_eq!(params.harness, "claude");
         assert_eq!(params.skills, "*");
         assert_eq!(params.runtime_mode, "autopilot");
