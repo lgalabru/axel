@@ -14,12 +14,23 @@ description: Rex, Axel, and the harness your agents run.
 ## Install Axel
 
 ```bash
-brew install scarce/axel/axel
+curl -fsSL https://axel.md/install | sh
 axel
 ```
 
-Every commit on `main` that passes CI is released, so `brew upgrade` always brings the
-newest build. Use the full name: Homebrew core has an unrelated `axel`.
+The script downloads the latest release for your Mac, checks its sha256 and puts `axel` in
+`~/.local/bin` (set `AXEL_INSTALL_DIR` to choose another place). Every commit on `main`
+that passes CI is released; run it again to update, or pass a version:
+`curl -fsSL https://axel.md/install | sh -s -- 0.3.80`.
+
+### With Homebrew
+
+```bash
+brew install scarce/axel/axel
+```
+
+`brew upgrade` then brings the newest build. Use the full name: Homebrew core has an
+unrelated `axel`.
 
 ### From source
 

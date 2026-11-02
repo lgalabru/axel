@@ -1,103 +1,137 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/axel-banner-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/axel-banner-light.png">
-  <img alt="Axel the axolotl. Featured on Product Hunt, #3 Product of the Day" src="docs/assets/axel-banner-dark.png" width="100%">
-</picture>
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/axel-banner-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/axel-banner-light.png">
+    <img alt="Axel the axolotl. Featured on Product Hunt, #3 Product of the Day" src="docs/assets/axel-banner-dark.png" width="100%">
+  </picture>
+</div>
 
-# Axel
+<p align="center">
+  <a href="https://github.com/scarce/axel/actions/workflows/release.yml"><img alt="Release" src="https://github.com/scarce/axel/actions/workflows/release.yml/badge.svg"></a>
+  <a href="https://github.com/scarce/axel/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/scarce/axel?color=a64dff"></a>
+  <a href="https://www.superlogical.com/rex"><img alt="Built for Rex" src="https://img.shields.io/badge/built%20for-Rex-f58a62"></a>
+  <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-black">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-green"></a>
+</p>
 
-**Agent orchestration, designed for [Rex](https://www.superlogical.com/rex).**
+<p align="center">
+  <b>Agent orchestration, designed for <a href="https://www.superlogical.com/rex">Rex</a>.<br>
+  Threads and named agents, back in the terminal.</b>
+</p>
 
-A year of agent apps taught us what works. Axel keeps those ideas and brings them back to the
-terminal:
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="https://axel.md/docs/quick-start">Quick start</a> ·
+  <a href="https://axel.md/docs">Docs</a> ·
+  <a href="https://axel.md">axel.md</a>
+</p>
 
-- **Threads**, from the Codex app and T3 Code. The unit of work is a thread, not a chat tab:
-  an intent and everything done about it, outliving the agent's process, the pane and the
-  machine. Run several at once, resume tomorrow, settle when done.
-- **Named agents**, from Buzz and skills.sh. A team of specialists instead of one assistant
-  that knows everything: `atlas` builds with a few skills for your stack, `nova` reviews with
-  another model and a review skill. Each has its own Ed25519 key, permissions and budget, and
-  loads only its own skills.
-- **The terminal**, from Rex. Agent apps rebuilt the terminal because it couldn't keep work
-  alive, show who's waiting on you, reach your other machines, or even scroll: a long agent
-  conversation in a full-screen TUI, or inside tmux, is junk the moment you scroll up. Rex
-  fixes all of it: durable sessions, the Program Status Protocol (`OSC 7501`), Tailscale
-  built in, real scrollback, and a server API programs can drive. A thread streams into its
-  pane as plain output, so it scrolls like anything else. Axel is just a program in a Rex pane, and your Mac mini on the tailnet is a host
-  (`@atlas@mini`). See [Why Rex](https://axel.md/docs/why-rex).
+---
 
-```
-$ axel            # inside Rex: the launcher floats over the window.
-                  #   why not today? — the prompt. Type what you want, Enter starts it
-                  #                    with the agent shown at the right (the last one
-                  #                    used, or the one an @name picks), in place, here.
-                  #                    Tab opens the full form (projects, agent, worktree).
-                  #   threads        — recent threads below it: ↓ to get there, Enter opens
-                  #                    one, Ctrl+S settles, Ctrl+X archives, Ctrl+D deletes.
-                  #   usage          — a small HUD of every agent: state, tokens, sparkline.
-$ axel            # again: closes them (toggle)
+```sh
+axel                                    # the launcher floats over your Rex window
+> @atlas add retries to the webhook sender, then ask @nova@mini to review it
 ```
 
-Threads are the primitive: an intent, attached to any number of projects, worked by many
-agent sessions over time on any machine, shared with other people. Every change is a signed
-event, so replicas merge. Agents are named Ed25519 identities with an inbox. Their status flows back through
-Claude Code hooks, Codex notify, ACP, or `axel status`, never by scraping a terminal,
-and is mirrored to Rex through OSC 7501 so Rex's tab indicators agree with Axel.
+Type what you want and press Enter. `atlas` takes the thread here, and `nova` picks up the
+review on your Mac mini. Close the laptop; it's all still running when you're back.
 
-Install: `brew install scarce/axel/axel`. Every commit on `main` that passes CI is
-released, so `brew upgrade` always brings the newest build. From source: `just install`
-(release build, symlinked into `~/.local/bin` and `~/.cargo/bin`). See `docs/DESIGN.md`.
+## Key features
 
-## Commands
+### 🧵 Threads, not chat tabs
 
-| | |
-|---|---|
-| `axel` | floating launcher / inbox (inline when not in Rex); the first time, runs `axel setup` |
-| `axel setup` | check this machine (Rex, harnesses, ACP adapters) and create an agent, interactively |
-| `axel ui [--screen launch\|inbox]` | what the floating pane runs |
-| `axel agent new NAME [--harness claude\|codex\|opencode] [--model M] [--skills a,b\|*]` | create an agent (key, attestation, record) |
-| `axel agent ls\|show\|archive` | |
-| `axel skills ls`, `axel skills update [SOURCE] [--yes]` | the project's skills; move remote skills' pins (shows the diff first) |
-| `axel thread new "intent" --agent NAME [--project DIR]... [--scratch] [--worktree [BRANCH]]` | thread + first session |
-| `axel thread spawn THREAD --agent NAME` | another agent on the same thread |
-| `axel thread resume THREAD [--agent NAME]` | new session continuing the last harness conversation |
-| `axel thread attach THREAD --project DIR` | |
-| `axel thread open THREAD` | the thread view: conversation, folded tool calls, composer |
-| `axel thread ls [--all]`, `show`, `stop`, `done`, `archive` | |
-| `axel session host SESSION` | hosts a managed (ACP) session; its pane is the raw log |
-| `axel session ls [--all]`, `axel session stop SESSION` | |
-| `axel log SESSION [-f]` | tail a managed session's raw frames |
-| `axel send "@atlas please review the diff"` | signed message into an agent's inbox |
-| `axel inbox [--agent NAME]` | |
-| `axel status working\|blocked\|done\|… "msg"` | status from scripts (reads `$AXEL_THREAD`) |
-| `axel hook claude\|codex` | hook sink, installed automatically at launch |
-| `axel doctor` | |
+A thread is an intent and everything done about it. It outlives the agent's process, the
+pane and the machine: run several at once, resume tomorrow, settle it when it's done. Every
+change is a signed event, so copies on other machines merge.
 
-## Runtimes
+### 🪪 Named agents
 
-- **managed** (default when the harness's ACP adapter is on PATH): Axel drives the agent over
-  the Agent Client Protocol. You work in the **thread view**: your messages, the agent's prose,
-  questions inline; tool bursts fold into one line (Space expands); `l` jumps to the host pane,
-  which prints the raw frames. Permissions are decided by Axel's policy, never by a dialog.
-  Claude's and Codex's adapters are built in (`axel claude-acp` drives the `claude` CLI,
-  `axel codex-acp` drives `codex app-server`: no Node). Others: `opencode acp`, `goose acp`.
-- **pane**: the harness's own CLI in a Rex pane; status via hooks.
+A team of specialists instead of one assistant that knows everything. `atlas` builds with a
+few skills for your stack; `nova` reviews with another model. Each has its own Ed25519 key,
+permissions, budget and inbox, and loads only its own skills.
 
-## Autopilot
-
-Agents default to `autopilot`: Claude Code runs with `--permission-mode bypassPermissions`
-(Codex with `--full-auto`) and Axel's guard hook still denies irreversible shell commands.
-Axel pre-accepts Claude Code's folder-trust dialog for the project you picked. Claude Code's
-*bypass permissions* warning is yours to accept once per machine: either press
-"Yes, I accept" the first time, or set it in `~/.claude/settings.json`:
-
-```json
-{ "skipDangerousModePermissionPrompt": true }
+```sh
+axel agent new nova --harness codex --skills review
+axel send "@nova please review the diff"
 ```
 
-(The older `bypassPermissionsModeAccepted` key in `~/.claude.json` is only read by a
-one-time migration into that setting.)
+### 🖥️ The terminal, fixed by Rex
 
-## Rex key binding
+Agent apps rebuilt the terminal because it couldn't keep work alive, show who's waiting on
+you, reach your other machines, or even scroll. Rex fixes all of that, so Axel is just a
+program in a pane: threads stream as plain output and scroll like anything else, and status
+shows up in Rex's tabs. [Why Rex →](https://axel.md/docs/why-rex)
 
-Append `docs/rex-init.lua` to `~/.config/rex/init.lua`, then `rex config reload`.
+### 🤖 Claude Code, Codex and OpenCode
+
+Bring the harness you already use. Axel drives Claude Code and Codex over the Agent Client
+Protocol with built-in adapters (no Node), or runs any harness in its own pane. Status comes
+from hooks and the protocol, never from scraping a screen.
+
+### 🌐 Your other machines
+
+Your Mac mini on the tailnet is a host. Agents run there, and their keys never leave home:
+the host gets a short-lived grant per thread. [Remote hosts →](https://axel.md/docs/remote-hosts)
+
+```sh
+axel host add mini
+```
+
+### 📜 One AXEL.md for every harness
+
+The project's context and the skills its agents use, in one file that `CLAUDE.md` and
+`AGENTS.md` point at. Skills can be local folders or links from skills.sh and GitHub, pinned
+in `AXEL.lock`. [The AXEL.md file →](https://axel.md/docs/axel-md)
+
+```yaml
+skills:
+  - ./skills
+  - https://skills.sh/vercel-labs/skills/find-skills
+```
+
+### 🛡️ Autopilot, with a guard
+
+Agents work without asking by default. Axel's guard still refuses irreversible commands,
+and a budget caps what each agent spends. Want a say? Give an agent a stricter mode.
+[Permissions and budgets →](https://axel.md/docs/policies)
+
+## Install
+
+```sh
+curl -fsSL https://axel.md/install | sh
+```
+
+or with Homebrew:
+
+```sh
+brew install scarce/axel/axel
+```
+
+Then run `axel` in a Rex terminal. The first run checks your machine and helps you create
+your first agent. Every commit on `main` that passes CI is a release, so run the script
+again or `brew upgrade` to update.
+
+You'll need [Rex](https://www.superlogical.com/rex) and a harness:
+[Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex) or
+[OpenCode](https://opencode.ai). Details in the [installation guide](https://axel.md/docs/installation).
+
+## Documentation
+
+- [Quick start](https://axel.md/docs/quick-start): your first agent and thread
+- [Threads](https://axel.md/docs/threads) and [agents](https://axel.md/docs/agents)
+- [Agents working together](https://axel.md/docs/messaging)
+- [Keyboard](https://axel.md/docs/keys) and [command line](https://axel.md/docs/cli)
+
+## Development
+
+```sh
+just install    # release build, linked into ~/.local/bin
+cargo test --workspace
+```
+
+The design lives in [`docs/DESIGN.md`](docs/DESIGN.md), the wire formats in
+[`docs/CONTRACTS.md`](docs/CONTRACTS.md), and the website in [`web/`](web).
+
+## License
+
+[Apache-2.0](LICENSE)

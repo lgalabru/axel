@@ -608,7 +608,7 @@ export default function Home() {
           <p className="mx-auto mt-4 max-w-xl text-lg text-muted">Two commands. The first time, Axel checks your machine and helps you create your first agent.</p>
           <div className="mx-auto mt-8 max-w-xl rounded-2xl bg-surface p-6 text-left font-mono text-sm leading-7 text-white/80">
             <div>
-              <span className="text-white/35">$</span> just install
+              <span className="text-white/35">$</span> curl -fsSL https://axel.md/install | sh
             </div>
             <div>
               <span className="text-white/35">$</span> axel

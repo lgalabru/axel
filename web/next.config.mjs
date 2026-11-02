@@ -5,6 +5,18 @@ const withMDX = createMDX();
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // `curl -fsSL https://axel.md/install | sh`
+  async rewrites() {
+    return [{ source: '/install', destination: '/install.sh' }];
+  },
+  async headers() {
+    return [
+      {
+        source: '/install(\\.sh)?',
+        headers: [{ key: 'Content-Type', value: 'text/plain; charset=utf-8' }],
+      },
+    ];
+  },
   async redirects() {
     return [
       // The docs used to live on their own subdomain.
