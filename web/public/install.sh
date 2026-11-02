@@ -44,16 +44,21 @@ main() {
     *) die "unsupported CPU: $(uname -m)" ;;
   esac
 
+  # /releases/latest redirects to /releases/tag/v<version>, under the
+  # repository's real name: builds are signed under that name, so that is
+  # the one their provenance is checked against.
+  latest=$(fetch -I -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") \
+    || die "could not reach github.com"
+  case "$latest" in
+    https://github.com/*/*/releases/tag/v*) ;;
+    *) die "no release published yet: https://github.com/$repo/releases" ;;
+  esac
+  signed_by=${latest#https://github.com/}
+  signed_by=${signed_by%%/releases/*}
   if [ $# -gt 0 ]; then
     version=${1#v}
   else
-    # /releases/latest redirects to /releases/tag/v<version>.
-    latest=$(fetch -I -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") \
-      || die "could not reach github.com"
-    case "$latest" in
-      */releases/tag/v*) version=${latest##*/tag/v} ;;
-      *) die "no release published yet: https://github.com/$repo/releases" ;;
-    esac
+    version=${latest##*/tag/v}
   fi
   case "$version" in
     '' | *[!0-9.]* | .* | *.) die "not a version: $version" ;;
@@ -75,9 +80,9 @@ main() {
   ok "Checksum verified"
 
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-    gh attestation verify "$tmp/$name" --repo "$repo" >/dev/null 2>&1 \
+    gh attestation verify "$tmp/$name" --repo "$signed_by" >/dev/null 2>&1 \
       || die "build provenance check failed for $name: refusing to install"
-    ok "Built by github.com/$repo, provenance verified"
+    ok "Built by github.com/$signed_by, provenance verified"
   fi
 
   # The archive holds one file, `axel`; anything else means it isn't ours.

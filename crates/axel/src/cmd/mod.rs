@@ -91,7 +91,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Thread { command }) => thread::run(command),
         Some(Command::Hook { harness, guard_only }) => hook::run(harness, guard_only),
         Some(Command::Status { state, msg, kind }) => status::run(&state, msg.as_deref(), kind.as_deref()),
-        Some(Command::Send { text }) => inbox::send(&text.join(" ")),
+        Some(Command::Send { text, fyi }) => inbox::send(&text.join(" "), if fyi { axel_mcp::MessageKind::Fyi } else { axel_mcp::MessageKind::Request }),
         Some(Command::Inbox { agent, json }) => inbox::show(agent.as_deref(), json),
         Some(Command::Doctor) => doctor::run(),
         Some(Command::Mcp) => mcp::run(),

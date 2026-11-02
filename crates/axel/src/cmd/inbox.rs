@@ -2,11 +2,11 @@
 
 use anyhow::{Context, Result, bail};
 use axel_inbox::{EnvelopeBuilder, Profile, kind, resolve_mentions};
-use axel_mcp::{Delivery, Outcome, SendReport};
+use axel_mcp::{Delivery, MessageKind, Outcome, SendReport};
 
 use super::Ctx;
 
-pub fn send(text: &str) -> Result<()> {
+pub fn send(text: &str, kind: MessageKind) -> Result<()> {
     let ctx = Ctx::open()?;
     let agents = ctx.store.list_agents()?;
     let profiles: Vec<Profile> = agents.iter().map(|a| Profile { pubkey: a.pubkey.clone(), name: a.name.clone() }).collect();
@@ -15,7 +15,7 @@ pub fn send(text: &str) -> Result<()> {
         bail!("no recipients: mention at least one agent with @name");
     }
     let hosts = host_hints(text, &agents);
-    let report = send_message(&ctx, &recipients, &hosts, text)?;
+    let report = send_message(&ctx, &recipients, &hosts, text, kind)?;
     let names: Vec<&str> = report.deliveries.iter().map(|d| d.to.as_str()).collect();
     println!("sent {} to {}", &report.message_id[..12.min(report.message_id.len())], names.join(", "));
     let mut failed = Vec::new();
@@ -83,7 +83,10 @@ fn host_hints(text: &str, agents: &[axel_store::Agent]) -> HostHints {
 /// message to `recipients` (pubkeys), then get it in front of each of them
 /// on the caller's thread.  A policy refusal is an error; a delivery that
 /// fails is reported per recipient (the message is in its inbox regardless).
-pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)], text: &str) -> Result<SendReport> {
+///
+/// A [`MessageKind::Fyi`] message is tagged so, and becomes a note: read with
+/// the recipient's next turn, never a turn of its own or a summons.
+pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)], text: &str, kind: MessageKind) -> Result<SendReport> {
     super::policy::check_message(ctx, recipients)?;
     let thread_id = std::env::var("AXEL_THREAD").ok().filter(|t| !t.trim().is_empty());
     let from_agent = super::policy::caller_agent();
@@ -105,6 +108,9 @@ pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)]
     if let Some(s) = super::policy::caller_session() {
         b = b.session(&s);
     }
+    if kind == MessageKind::Fyi {
+        b = b.tag(vec![MessageKind::FYI_TAG.to_string()]);
+    }
     let env = ctx.store.sign_with_attestation(&signer, b, thread_id.as_deref())?;
     ctx.store.post(&env)?;
     let sender = from_agent.as_ref().map(|pk| axel_acp::socket::Sender { pubkey: pk.clone(), name: super::policy::name_of(ctx, pk) });
@@ -118,7 +124,7 @@ pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)]
             let host = hosts.iter().find(|(pk, _)| pk == r).map(|(_, h)| h.as_str());
             let outcome = match &thread_id {
                 None => Outcome::InboxOnly,
-                Some(t) => deliver(ctx, t, r, host, on_remote_host, text, sender.clone())
+                Some(t) => deliver(ctx, t, r, host, on_remote_host, text, sender.clone(), kind)
                     .unwrap_or_else(|e| Outcome::Failed { error: format!("{e:#}") }),
             };
             Delivery { to: super::policy::name_of(ctx, r), outcome }
@@ -160,9 +166,12 @@ fn check_chatter(ctx: &Ctx, thread_id: &str) -> Result<()> {
 
 /// Get `text` in front of `recipient` on `thread_id`: into its live managed
 /// session (queued if it is mid-turn), or by summoning it onto the thread.
+/// A note ([`MessageKind::Fyi`]) never summons; from an agent it goes to the
+/// live session as a note, read with its next turn (the owner's is a prompt).
 ///
 /// `host` asks for the agent to be summoned on that host; `on_remote_host`
 /// means this machine only runs delegated work, so nothing is summoned here.
+#[allow(clippy::too_many_arguments)]
 fn deliver(
     ctx: &Ctx,
     thread_id: &str,
@@ -171,6 +180,7 @@ fn deliver(
     on_remote_host: bool,
     text: &str,
     from: Option<axel_acp::socket::Sender>,
+    kind: MessageKind,
 ) -> Result<Outcome> {
     let live = ctx.store.list_sessions(axel_store::SessionFilter {
         thread_id: Some(thread_id.to_string()),
@@ -178,14 +188,23 @@ fn deliver(
         ..Default::default()
     })?;
     let live: Vec<_> = live.into_iter().filter(|s| s.ended_at.is_none()).collect();
-    let prompt = axel_acp::socket::Command::Prompt { text: text.to_string(), attachments: vec![], steer: false, from: from.clone() };
+    // The owner's notes are prompts: only an agent's note waits for a turn.
+    let note = match (kind, &from) {
+        (MessageKind::Fyi, Some(f)) => Some(f.clone()),
+        _ => None,
+    };
+    let prompt = match &note {
+        Some(f) => axel_acp::socket::Command::Note { text: text.to_string(), from: f.clone() },
+        None => axel_acp::socket::Command::Prompt { text: text.to_string(), attachments: vec![], steer: false, from: from.clone() },
+    };
+    let landed = if note.is_some() { Outcome::Noted } else { Outcome::Delivered };
     if !on_remote_host
         && let Some(s) = live.iter().find(|s| s.runtime == axel_store::SessionRuntime::Managed && super::host::host_of(ctx, s).ok().flatten().is_some())
     {
         return match super::host::relay(ctx, s, &prompt)? {
             axel_acp::socket::Reply::Queued { .. } => Ok(Outcome::Queued),
             axel_acp::socket::Reply::Error { message } => bail!("{message}"),
-            _ => Ok(Outcome::Delivered),
+            _ => Ok(landed),
         };
     }
     if let Some(sock) = live.iter().filter(|s| s.runtime == axel_store::SessionRuntime::Managed).find_map(|s| s.socket_path.clone()) {
@@ -193,7 +212,7 @@ fn deliver(
         return match axel_acp::socket::send(&sock, &cmd) {
             Ok(axel_acp::socket::Reply::Queued { .. }) => Ok(Outcome::Queued),
             Ok(axel_acp::socket::Reply::Error { message }) => bail!("{message}"),
-            Ok(_) => Ok(Outcome::Delivered),
+            Ok(_) => Ok(landed),
             Err(e) => bail!("its session host is unreachable ({e})"),
         };
     }
@@ -204,6 +223,10 @@ fn deliver(
     if !live.is_empty() {
         // A pane session: Axel can't type into a harness it doesn't drive.
         return Ok(Outcome::InPane);
+    }
+    if kind == MessageKind::Fyi {
+        // Nothing to act on: not worth starting an agent for.
+        return Ok(Outcome::NotOnThread);
     }
     let name = super::policy::name_of(ctx, recipient);
     let target = match host {
@@ -245,7 +268,8 @@ pub fn deliver_from_host(ctx: &Ctx, host: &axel_store::Environment, env: &axel_i
         let name = super::policy::name_of(ctx, r);
         let outcome = super::policy::check_message(ctx, &[r.to_string()]).and_then(|()| {
             let from = axel_acp::socket::Sender { pubkey: author.clone(), name: sender_name.clone() };
-            deliver(ctx, thread_id, r, None, false, &env.content, Some(from))
+            let kind = if env.tags.iter().any(|t| t.first().map(String::as_str) == Some(MessageKind::FYI_TAG)) { MessageKind::Fyi } else { MessageKind::Request };
+            deliver(ctx, thread_id, r, None, false, &env.content, Some(from), kind)
         });
         out.push(match outcome {
             Ok(o) => format!("{sender_name} → {name}: {}", o.describe()),
@@ -264,18 +288,53 @@ fn ours(ctx: &Ctx, pubkey: &str) -> bool {
 pub fn inbox_messages(ctx: &Ctx, limit: usize) -> Result<Vec<axel_mcp::InboxMessage>> {
     let owner_pk = ctx.owner()?.public().to_string();
     let me = super::policy::caller_agent().unwrap_or_else(|| owner_pk.clone());
-    Ok(ctx
-        .store
-        .inbox(&me, limit)?
+    let msgs = ctx.store.inbox(&me, limit)?;
+    // What reached `me` on each thread: (sender, Unix ms) of the agent
+    // messages and notes in its sessions there.
+    let mut received: std::collections::HashMap<String, Vec<(String, i64)>> = std::collections::HashMap::new();
+    for t in msgs.iter().filter_map(|m| m.thread_id()) {
+        if received.contains_key(t) {
+            continue;
+        }
+        let mine: std::collections::HashSet<String> = ctx
+            .store
+            .list_sessions(axel_store::SessionFilter { thread_id: Some(t.to_string()), agent_pubkey: Some(me.clone()), ..Default::default() })?
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        let got = ctx
+            .store
+            .thread_items(t, 2000)?
+            .into_iter()
+            .filter(|it| it.kind == axel_store::ItemKind::UserMessage && mine.contains(&it.session_id))
+            .filter_map(|it| Some((it.content.get("from")?.as_str()?.to_string(), it.at)))
+            .collect();
+        received.insert(t.to_string(), got);
+    }
+    Ok(msgs
         .into_iter()
-        .map(|m| axel_mcp::InboxMessage {
-            from: if m.from == owner_pk { "owner".into() } else { super::policy::name_of(ctx, &m.from) },
-            thread: m.tags.iter().find(|t| t.first().map(String::as_str) == Some("t")).and_then(|t| t.get(1).cloned()),
-            at: m.created_at,
-            id: m.id,
-            text: m.content,
+        .map(|m| {
+            let thread = m.thread_id().map(String::from);
+            let got = thread.as_ref().and_then(|t| received.get(t)).map(Vec::as_slice).unwrap_or(&[]);
+            axel_mcp::InboxMessage {
+                from: if m.from == owner_pk { "owner".into() } else { super::policy::name_of(ctx, &m.from) },
+                handled: was_handled(&m.from, m.created_at, got),
+                thread,
+                at: m.created_at,
+                id: m.id,
+                text: m.content,
+            }
         })
         .collect())
+}
+
+/// A message `from` sent at `created_s` (Unix seconds) reached its recipient
+/// when one of the recipient's sessions on that thread took a prompt or note
+/// from that sender at or after it.  `got` is (sender, Unix ms) per such item.
+fn was_handled(from: &str, created_s: u64, got: &[(String, i64)]) -> bool {
+    // Envelopes are stamped in seconds, items in milliseconds.
+    let sent_ms = created_s as i64 * 1000;
+    got.iter().any(|(f, at)| f == from && *at >= sent_ms)
 }
 
 pub fn show(agent: Option<&str>, json: bool) -> Result<()> {
@@ -321,6 +380,15 @@ mod tests {
             last_seen_at: None,
             archived_at: None,
         }
+    }
+
+    #[test]
+    fn a_message_is_handled_once_its_sender_reached_the_recipients_session() {
+        let got = vec![("pk-atlas".to_string(), 1_700_000_005_000), ("pk-nova".to_string(), 1_700_000_100_000)];
+        assert!(was_handled("pk-atlas", 1_700_000_005, &got), "delivered the same second");
+        assert!(!was_handled("pk-atlas", 1_700_000_006, &got), "a newer message from atlas hasn't reached it");
+        assert!(!was_handled("pk-vega", 1_700_000_000, &got), "nothing from vega reached it");
+        assert!(!was_handled("pk-atlas", 0, &[]));
     }
 
     #[test]

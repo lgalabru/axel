@@ -35,6 +35,9 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<Sender>,
     },
+    /// A note from another agent that needs no reply: it shows on the thread
+    /// and the agent reads it with its next turn, but it starts no turn.
+    Note { text: String, from: Sender },
     /// Send a queued prompt now: move it first and cancel the running turn.
     Steer { item_id: String },
     /// Withdraw a queued prompt.
@@ -98,6 +101,14 @@ pub fn send(socket_path: &Path, cmd: &Command) -> std::io::Result<Reply> {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn notes_round_trip_with_their_sender() {
+        let note = Command::Note { text: "FYI: green".into(), from: Sender { pubkey: "PK".into(), name: "nova".into() } };
+        let v = serde_json::to_value(&note).unwrap();
+        assert_eq!(v, serde_json::json!({ "cmd": "note", "text": "FYI: green", "from": { "pubkey": "PK", "name": "nova" } }));
+        assert_eq!(serde_json::from_value::<Command>(v).unwrap(), note);
+    }
 
     #[test]
     fn commands_and_replies_are_tagged_json() {

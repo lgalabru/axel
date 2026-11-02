@@ -225,6 +225,14 @@ message to the DB, and writes **OSC 7501** to `/dev/tty` so Rex itself shows the
 blocked/working indicator in tab headers and the session picker. Axel's inbox and Rex's
 native indicators therefore always agree.
 
+A **managed** session's host does the same into its own pane, on every change, following
+the Program Status Protocol (revision 0.4): `working` with the head of the prompt when a
+turn starts or resumes after an answer, `blocked` + `kind=permission` with the tool's
+title while it waits for you, then `done` with the head of the reply when the turn ends
+(`idle` if it was cancelled, `error` if it failed), and `clear` when the session ends.
+Each report replaces the record whole, so every one carries `app=axel` and the agent's
+name as `title`.
+
 Replies (approve/deny, answer a question) are delivered through the protocol that asked:
 ACP gets a JSON-RPC response; Claude Code hooks get a hook response on stdout
 (`PermissionRequest` hooks can allow/deny); a harness with neither gets the reply
@@ -524,6 +532,35 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   *tools* altitude; `l` focuses the host pane (raw); Esc back. A composer at the bottom:
   text → `prompt`; `@name` → summon that agent onto the thread (new managed session) or
   hand the text to it if live; pick an option on a pending permission/question → `answer`.
+  The text goes as typed, mention included. Without a mention it goes to the live session
+  whose agent replied last; the footer shows the target (`→ nova`, `→ +vega` to summon).
+- **Catch-up**: agents can't see each other's turns, so the host starts each turn with
+  what its agent missed since its last one (`axel-acp/src/catchup.rs`): other sessions'
+  assistant replies, the owner's and other agents' messages to them, `fyi` notes left in
+  this session, and the live peers with their status. On the wire only; the stored user
+  message stays as written. The first turn of a session gets the recent thread instead.
+- **Questions**: Claude's `AskUserQuestion` is on. The Claude adapter asks each question
+  as a `session/request_permission` whose options are the choices (ids `answer:<n>`, plus
+  `answer:none` for "none of these"); the host never lets policy answer those, records a
+  `Question` item, and reports `blocked` + `kind=question`. The composer opens each new
+  question in a floating, centered pane (`axel thread answer THREAD ITEM`): ↑↓ and Enter,
+  or a digit, answers it; Esc leaves it to the composer. The labels picked go back to
+  Claude as the tool's `answers`. A multi-select question takes one pick.
+- **Asking for reach**: when `send` is refused only because the sender may not reach a
+  recipient, Axel's MCP server asks the owner by MCP elicitation (one choice: allow this
+  message, always allow, don't allow). The Claude adapter answers Claude's `elicitation`
+  control request like a question, so it floats in front of the owner. "Always" writes
+  the policy as `agent edit --allow` would; "this message" is a grant scoped to that one
+  `send` call (a guard), honoured by both the message and summon checks. A client that
+  can't elicit gets the refusal with the command, as before.
+- **Agent panes**: a managed session's host pane (`<agent> · <thread> · log`) opens in the
+  window of the pane that launched it (the launcher, the composer, or the agent that
+  summoned it): a column on the right, one pane per agent. A thread's agents share its
+  window, and Rex's Activity lists them together.
+- **Notes**: `send` with `fyi` (`axel send --fyi`) tags the signed message `fyi`. To a
+  live managed session it's `Command::Note`: a `UserMessage` item with `fyi: true`, no
+  turn started, read in the next catch-up. It never summons. Inbox entries that already
+  reached the recipient as a prompt or note are `handled`.
 - **What is shared**: per completed turn, one signed `turn` envelope (kind 40): user text,
   assistant text head, tool-call counts, duration, stop reason, usage if known. Remote
   participants see the conversation; raw logs and full items stay on the environment.

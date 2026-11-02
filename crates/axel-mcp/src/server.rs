@@ -65,11 +65,37 @@ impl AxelMcp {
             Their normal answers go to the owner, not to you: to hear back, ask them to reply with this tool, then \
             end your turn; the reply arrives as your next prompt. Writing @name in your reply does nothing. \
             Send only when you have a request, a result or an answer: never just to say you got a message, \
-            thanks or \"on it\" (each message costs the recipient a turn). A refusal names the command the owner can run to allow it; never retry \
+            thanks or \"on it\" (each message costs the recipient a turn). For news that needs no reply, set \
+            fyi: it waits for the recipient's next turn instead of starting one, and never summons. A refusal names the command the owner can run to allow it; never retry \
             a refusal another way."
     )]
-    fn send(&self, Parameters(params): Parameters<tools::send::Params>) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::send::run(params, self.context.get())
+    async fn send(
+        &self,
+        Parameters(params): Parameters<tools::send::Params>,
+        rq: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let (to, kind) = match tools::send::validate(&params) {
+            Ok(v) => v,
+            Err(e) => return Ok(tools::tool_error(e)),
+        };
+        let ctx = self.context.get();
+        let first = ctx.send(&to, &params.text, kind, crate::context::Grant::None);
+        // Not allowed to reach them: ask the owner, when the client can ask.
+        let Err(crate::context::SendError::NoReach { from, to: denied }) = &first else {
+            return Ok(tools::send::finish(first));
+        };
+        let question = tools::send::reach_question(from, denied);
+        match rq.peer.elicit::<tools::send::ReachAnswer>(question).await {
+            Ok(Some(a)) => match tools::send::grant_for(tools::send::ReachChoice::parse(&a.answer)) {
+                Some(grant) => Ok(tools::send::finish(ctx.send(&to, &params.text, kind, grant))),
+                None => Ok(tools::tool_error(format!("The owner didn't allow {from} to message {}. Don't try another way.", denied.join(", ")))),
+            },
+            Err(rmcp::service::ElicitationError::UserDeclined | rmcp::service::ElicitationError::UserCancelled) | Ok(None) => {
+                Ok(tools::tool_error(format!("The owner didn't allow {from} to message {}. Don't try another way.", denied.join(", "))))
+            }
+            // The client can't ask (or asking failed): the refusal, with the command to allow it.
+            Err(_) => Ok(tools::send::finish(first)),
+        }
     }
 
     #[tool(
@@ -82,7 +108,8 @@ impl AxelMcp {
 
     #[tool(
         description = "Read the newest messages addressed to you: notes other agents left while you ran in a pane \
-            or were offline. Messages delivered into your session already arrived as prompts."
+            or were offline. Messages marked handled: true already reached you as prompts or notes on their thread: \
+            they're history, not requests; don't act on them again."
     )]
     fn read_inbox(&self, Parameters(params): Parameters<tools::read_inbox::Params>) -> Result<CallToolResult, rmcp::ErrorData> {
         tools::read_inbox::run(params, self.context.get())
@@ -123,11 +150,13 @@ $AXEL_THREAD your thread.
 
 - `send`: message other agents on this thread (delivers, queues or summons them)
 - `set_status`: working / blocked / done, shown on the owner's dashboard
-- `read_inbox`: messages left for you
+- `read_inbox`: messages left for you; `handled: true` ones already reached you as prompts
 - `list_agents`, `get_agent`: who exists
 - `create_agent`: owner only; agents can't create agents
 
-Other agents only see what you `send` them, and only the owner sees your replies.";
+Other agents only see what you `send` them, and only the owner sees your replies. \
+Each turn starts with what you missed on the thread, if anything: other agents' replies \
+and who else is working there.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for AxelMcp {

@@ -546,8 +546,8 @@ mod tests {
     fn thread_view_empty_timeline_hints() {
         use super::thread_view::empty_hint;
         use crate::model::{LiveSession, ThreadData};
-        let managed = LiveSession { id: "S1".into(), agent_name: "Atlas".into(), managed: true, started_at: 1, mode: Default::default(), host: None };
-        let pane = LiveSession { id: "S2".into(), agent_name: "Nova".into(), managed: false, started_at: 1, mode: Default::default(), host: None };
+        let managed = LiveSession { id: "S1".into(), agent_name: "Atlas".into(), managed: true, started_at: 1, mode: Default::default(), host: None, last_reply_at: None };
+        let pane = LiveSession { id: "S2".into(), agent_name: "Nova".into(), managed: false, started_at: 1, mode: Default::default(), host: None, last_reply_at: None };
         let base = ThreadData { last_agent_name: Some("Atlas".into()), ..Default::default() };
         assert_eq!(empty_hint(&ThreadData { live_sessions: vec![managed.clone()], ..base.clone() }), "Waiting for the agent…");
         assert_eq!(
@@ -799,5 +799,48 @@ mod tests {
             assert_eq!(fg_at(plain).0, Color::Reset, "{plain} stays plain");
             assert_eq!(buf[(col(plain) + 2, row)].fg, Color::Reset, "{plain} stays plain");
         }
+    }
+
+    /// Plain text of rendered lines.
+    fn plain(lines: &[ratatui::text::Line]) -> Vec<String> {
+        lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+    }
+
+    #[test]
+    fn a_mention_in_your_message_takes_the_agents_colour_even_before_punctuation() {
+        use crate::thread::{Row, ThreadView, fixtures};
+        let mut d = fixtures::data();
+        d.known_agents = vec![("aaron".into(), Some(AgentColor::Yellow))];
+        let mut msg = fixtures::item("u9", ItemKind::UserMessage, ItemBody::Text("would love to hear more about @aaron's take".into()), 9_000);
+        msg.agent = None;
+        d.items.push(msg);
+        let v = ThreadView::new("T1", d);
+        let i = v.data.items.len() - 1;
+        let lines = super::thread_view::row_lines(&v, &Row::Prose(i), 80, false);
+        let mention = lines.iter().flat_map(|l| l.spans.iter()).find(|s| s.content == "@aaron").expect("the mention is its own span");
+        assert_eq!(mention.style.fg, Some(crate::theme::agent_color(Some(AgentColor::Yellow))), "aaron isn't on the thread yet, but is a local agent");
+        assert!(plain(&lines).iter().any(|l| l.contains("@aaron's take")), "the text is unchanged");
+    }
+
+    #[test]
+    fn an_agents_message_to_another_and_its_reply_read_as_one() {
+        use crate::thread::{Row, ThreadView, fixtures};
+        let mut d = fixtures::data();
+        d.items.clear();
+        let mut relay = fixtures::item("r1", ItemKind::UserMessage, ItemBody::Text("Hi aaron, what would you build first?".into()), 1_000);
+        relay.relay_to = Some("Aaron".into());
+        d.items.push(relay);
+        d.items.push(fixtures::item("a1", ItemKind::AssistantMessage, ItemBody::Text("I've asked aaron.".into()), 2_000));
+        d.items.push(fixtures::item("a2", ItemKind::AssistantMessage, ItemBody::Text("Later, on its own.".into()), 3_000));
+        d.items[2].agent = Some(("Nova".into(), None));
+        let v = ThreadView::new("T1", d);
+        let relay = plain(&super::thread_view::row_lines(&v, &Row::Prose(0), 80, false));
+        assert!(relay[0].contains(" atlas "), "the sender's badge first: {relay:?}");
+        assert_eq!(relay[1], "→ aaron");
+        assert_eq!(relay[2], "│ Hi aaron, what would you build first?");
+        let reply = plain(&super::thread_view::row_lines(&v, &Row::Prose(1), 80, false));
+        assert_eq!(reply, vec!["I've asked aaron.".to_string()], "no second atlas badge");
+        let other = plain(&super::thread_view::row_lines(&v, &Row::Prose(2), 80, false));
+        assert!(other[0].contains(" nova "), "a different agent gets its own badge: {other:?}");
     }
 }

@@ -61,6 +61,11 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
             drop(ctx);
             super::ui::run_compose(&t.id)
         }
+        ThreadCommand::Answer { thread, item } => {
+            let t = resolve(&ctx, &thread)?;
+            drop(ctx);
+            super::ui::run_answer(&t.id, &item)
+        }
         ThreadCommand::Open { thread } => {
             let t = resolve(&ctx, &thread)?;
             drop(ctx);

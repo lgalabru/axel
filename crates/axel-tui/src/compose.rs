@@ -30,11 +30,21 @@ const RETRY_FIT: Duration = Duration::from_millis(400);
 /// `fit(rows_wanted, rows_now)` is called at start, on resize, and whenever
 /// the pane needs a different height (an approval card appears, the queue
 /// grows), so the host can move the split border; Rex sizes splits by ratio.
-pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16)) -> Result<()> {
+/// `on_question(item_id)` is called once for each question an agent asks
+/// (an `AskUserQuestion` waiting for you), so it can be put in front of you.
+pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_question: &dyn Fn(&str)) -> Result<()> {
     let owner_pk = glue::owner_pubkey(deps.keystore)?;
     let data = glue::load_thread(deps.store, &owner_pk, thread_id, now_secs())?;
     let mut v = ThreadView::new(thread_id, data);
     v.compose_only = true;
+    let mut asked: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ask_new = |v: &ThreadView| {
+        for id in new_questions(v, &asked) {
+            on_question(&id);
+            asked.insert(id);
+        }
+    };
+    ask_new(&v);
 
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableBracketedPaste);
@@ -87,6 +97,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16)) -> Resul
             if last.elapsed() >= REFRESH {
                 if let Ok(d) = glue::load_thread(deps.store, &owner_pk, thread_id, now_secs()) {
                     v.set_data(d);
+                    ask_new(&v);
                 }
                 last = Instant::now();
             }
@@ -95,6 +106,109 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16)) -> Resul
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+/// Questions waiting for you that `asked` hasn't seen, oldest first.
+pub fn new_questions(v: &ThreadView, asked: &std::collections::HashSet<String>) -> Vec<String> {
+    v.data
+        .items
+        .iter()
+        .filter(|it| it.kind == crate::model::ItemKind::Question && it.status == Some(crate::model::ItemStatus::Pending) && !asked.contains(&it.id))
+        .map(|it| it.id.clone())
+        .collect()
+}
+
+/// One question, alone: the floating pane the composer opens when an agent
+/// asks you to choose.  ↑↓ and Enter (or a digit) answer it; Esc leaves it
+/// for the composer.  Returns once it is answered, here or anywhere else.
+pub fn run_answer(deps: Deps, thread_id: &str, item_id: &str) -> Result<()> {
+    let owner_pk = glue::owner_pubkey(deps.keystore)?;
+    let load = || glue::load_thread(deps.store, &owner_pk, thread_id, now_secs()).map(|d| only_question(d, item_id));
+    let mut v = ThreadView::new(thread_id, load()?);
+    v.compose_only = true;
+    let mut terminal = ratatui::init();
+    let result = (|| -> Result<()> {
+        let mut last = Instant::now();
+        loop {
+            if v.pending_choice().is_none() {
+                return Ok(());
+            }
+            terminal.draw(|f| render_answer(f, &v))?;
+            if event::poll(POLL)?
+                && let Event::Key(key) = event::read()?
+                && key.kind != KeyEventKind::Release
+            {
+                match answer_key(&mut v, key) {
+                    AnswerKey::Leave => return Ok(()),
+                    AnswerKey::Send(session_id, cmd) => {
+                        let reply = (deps.send)(&session_id, cmd).map_err(|e| format!("{e:#}"));
+                        let failed = matches!(reply, Ok(crate::thread::SendReply::Error { .. }) | Err(_));
+                        v.on_reply(reply);
+                        if !failed {
+                            return Ok(());
+                        }
+                    }
+                    AnswerKey::None => {}
+                }
+            }
+            if last.elapsed() >= REFRESH {
+                if let Ok(d) = load() {
+                    v.set_data(d);
+                }
+                last = Instant::now();
+            }
+        }
+    })();
+    ratatui::restore();
+    result
+}
+
+/// The thread as the answer pane sees it: only `item_id`, so it is the one
+/// pending choice.
+fn only_question(mut d: crate::model::ThreadData, item_id: &str) -> crate::model::ThreadData {
+    d.items.retain(|it| it.id == item_id);
+    d
+}
+
+/// What a key does in the answer pane.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AnswerKey {
+    None,
+    /// Esc / Ctrl+C: answer later, from the composer.
+    Leave,
+    /// The answer, for this session.
+    Send(String, crate::thread::SendCommand),
+}
+
+/// Only picking and answering: ↑↓, Enter, digits; Esc leaves.  Typing does
+/// nothing here (in the composer it declines and redirects).
+pub fn answer_key(v: &mut ThreadView, key: crossterm::event::KeyEvent) -> AnswerKey {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Esc => return AnswerKey::Leave,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return AnswerKey::Leave,
+        KeyCode::Up | KeyCode::Down | KeyCode::Enter => {}
+        KeyCode::Char(c) if c.is_ascii_digit() => {}
+        _ => return AnswerKey::None,
+    }
+    match v.handle_compose_key(key) {
+        ThreadAction::Send { session_id, cmd } => AnswerKey::Send(session_id, cmd),
+        _ => AnswerKey::None,
+    }
+}
+
+/// The question card, its options and the keys, from the top of the pane.
+fn render_answer(frame: &mut Frame, v: &ThreadView) {
+    let area = frame.area();
+    let Some(i) = v.pending_choice() else { return };
+    let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
+    let mut lines = row_lines(v, &Row::Choice(i), inner.width as usize, true);
+    lines.push(Line::from(""));
+    lines.push(Line::styled("↑↓ pick · Enter or 1–9 answer · Esc answer later in the composer", crate::theme::dim()));
+    if let Some(st) = &v.status {
+        lines.push(Line::styled(st.clone(), crate::theme::dim()));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Rows the pane wants: composer, queue and (when pending) the approval card.
@@ -132,6 +246,56 @@ pub fn render(frame: &mut Frame, v: &ThreadView) {
         render_queue(frame, v, queue_area);
     }
     render_composer(frame, v, composer_area);
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+    use crate::model::{ChoiceOption, ItemBody, ItemKind, ItemStatus};
+    use crate::thread::{SendCommand, fixtures};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn question_data() -> crate::model::ThreadData {
+        let mut d = fixtures::data();
+        let mut q = fixtures::item(
+            "q1",
+            ItemKind::Question,
+            ItemBody::Choice {
+                prompt: "Database: Which one?".into(),
+                options: vec![ChoiceOption { id: "answer:0".into(), label: "Postgres".into() }, ChoiceOption { id: "answer:1".into(), label: "SQLite".into() }],
+                chosen: None,
+            },
+            9_000,
+        );
+        q.status = Some(ItemStatus::Pending);
+        q.session_id = "S1".into();
+        d.items.push(q);
+        d
+    }
+
+    #[test]
+    fn each_question_is_put_in_front_of_you_once() {
+        let v = ThreadView::new("T1", question_data());
+        let mut asked = std::collections::HashSet::new();
+        assert_eq!(new_questions(&v, &asked), vec!["q1".to_string()], "the fixture's pending permission isn't a question");
+        asked.insert("q1".to_string());
+        assert!(new_questions(&v, &asked).is_empty());
+    }
+
+    #[test]
+    fn the_answer_pane_answers_its_question_and_ignores_typing() {
+        let mut v = ThreadView::new("T1", only_question(question_data(), "q1"));
+        v.compose_only = true;
+        let k = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert_eq!(answer_key(&mut v, k(KeyCode::Char('x'))), AnswerKey::None, "typing does nothing here");
+        assert!(v.composer.is_empty());
+        assert_eq!(answer_key(&mut v, k(KeyCode::Down)), AnswerKey::None);
+        assert_eq!(
+            answer_key(&mut v, k(KeyCode::Enter)),
+            AnswerKey::Send("S1".into(), SendCommand::Answer { item_id: "q1".into(), option_id: "answer:1".into() })
+        );
+        assert_eq!(answer_key(&mut v, k(KeyCode::Esc)), AnswerKey::Leave);
+    }
 }
 
 #[cfg(test)]

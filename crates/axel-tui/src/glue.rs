@@ -602,8 +602,10 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             host: (s.environment_id != local_env).then(|| {
                 store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label)
             }),
+            last_reply_at: None,
         })
         .collect();
+    let mut live_sessions = live_sessions;
     let last_agent_name = sessions.first().map(|s| names.name(&s.agent_pubkey));
 
     // Local items.
@@ -621,6 +623,8 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         } else {
             by_id.get(&it.session_id).map(|s| names.lookup(&s.agent_pubkey))
         };
+        // A relayed message sits in the recipient's session.
+        let relay_to = from.and(by_id.get(&it.session_id)).map(|s| names.name(&s.agent_pubkey));
         items.push(ThreadItem {
             id: it.id,
             session_id: it.session_id,
@@ -633,6 +637,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             status: it.status.map(map_status),
             body: decode_body(kind, &it.content),
             attachments: attachments_of(&it.content),
+            relay_to,
         });
     }
 
@@ -656,6 +661,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             status: Some(ItemStatus::Completed),
             body: ItemBody::Text(t.summary.user_text.clone()),
             attachments: Vec::new(),
+            relay_to: None,
         });
         let mut text = t.summary.assistant_text.clone();
         if t.summary.tool_calls > 0 {
@@ -681,9 +687,14 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             status: Some(ItemStatus::Completed),
             body: ItemBody::Text(text),
             attachments: Vec::new(),
+            relay_to: None,
         });
     }
     items.sort_by_key(|i| (i.at_ms, i.seq));
+    // Who spoke last decides where a message without a mention goes.
+    for live in &mut live_sessions {
+        live.last_reply_at = items.iter().filter(|i| i.session_id == live.id && i.kind == ItemKind::AssistantMessage).map(|i| i.at_ms).max();
+    }
 
     let known_agents = store.list_agents().map_err(se)?.into_iter().map(|a| (a.name, a.color)).collect();
     Ok(ThreadData { thread_id: thread_id.to_string(), title, agents, environments, tokens, cost_usd, items, live_sessions, last_agent_name, known_agents })

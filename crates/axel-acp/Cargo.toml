@@ -37,6 +37,7 @@ doc = false
 
 [dependencies]
 axel-identity.workspace = true
+axel-rex.workspace = true
 axel-store.workspace = true
 agent-client-protocol = "3"
 anyhow.workspace = true

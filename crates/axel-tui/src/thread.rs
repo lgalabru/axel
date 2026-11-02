@@ -140,8 +140,10 @@ pub enum Dispatch {
 /// Decide what `text` typed in the composer should do.
 ///
 /// `@name …` goes to that agent's live **managed** session on this thread as a
-/// prompt (the full text, mention included); when the agent has no such session
-/// it is summoned with the text after the mention.
+/// prompt; when the agent has no such session it is summoned with it.  Either
+/// way the text goes as typed, mention included, so the thread shows who was
+/// asked (a bare `@name` summons it with nothing to do yet).  Without a
+/// mention it goes to the live managed session whose agent replied last.
 pub fn dispatch(text: &str, data: &ThreadData) -> Dispatch {
     let text = text.trim();
     if let Some(rest) = text.strip_prefix('@') {
@@ -155,15 +157,35 @@ pub fn dispatch(text: &str, data: &ThreadData) -> Dispatch {
             if let Some(s) = data.live_sessions.iter().find(|s| s.managed && s.agent_name.eq_ignore_ascii_case(agent)) {
                 return Dispatch::Prompt { session_id: s.id.clone(), text: text.to_string() };
             }
-            return Dispatch::Summon { agent: name.to_string(), text: rest.to_string() };
+            let text = if rest.is_empty() { String::new() } else { text.to_string() };
+            return Dispatch::Summon { agent: name.to_string(), text };
         }
     }
-    if let Some(s) = data.live_sessions.iter().find(|s| s.managed) {
+    if let Some(s) = reply_target(data) {
         return Dispatch::Prompt { session_id: s.id.clone(), text: text.to_string() };
     }
     match &data.last_agent_name {
         Some(agent) => Dispatch::Summon { agent: agent.clone(), text: text.to_string() },
         None => Dispatch::NoTarget,
+    }
+}
+
+/// The live managed session a message without a mention goes to: the one
+/// whose agent replied most recently, else the newest (the list is newest first).
+pub fn reply_target(data: &ThreadData) -> Option<&crate::model::LiveSession> {
+    data.live_sessions.iter().filter(|s| s.managed).fold(None, |best: Option<&crate::model::LiveSession>, s| match best {
+        Some(b) if b.last_reply_at >= s.last_reply_at => Some(b),
+        _ => Some(s),
+    })
+}
+
+/// Who `text` would reach, as the composer shows it: the agent's name, with
+/// `+` when it would be summoned onto the thread.
+pub fn target_label(text: &str, data: &ThreadData) -> Option<String> {
+    match dispatch(text, data) {
+        Dispatch::Prompt { session_id, .. } => data.live_sessions.iter().find(|s| s.id == session_id).map(|s| s.agent_name.to_lowercase()),
+        Dispatch::Summon { agent, .. } => Some(format!("+{}", agent.to_lowercase())),
+        Dispatch::NoTarget => None,
     }
 }
 
@@ -465,6 +487,7 @@ impl ThreadView {
                         status: Some(ItemStatus::Pending),
                         body: ItemBody::Text(text.clone()),
                         attachments: attachments.clone(),
+                        relay_to: None,
                     });
                 }
             // A failed send gives the text back instead of losing it.
@@ -595,8 +618,14 @@ impl ThreadView {
 
     /// The managed session whose mode the prompt shows and Shift+Tab changes
     /// (the newest live one).
+    /// The session the composer talks to (and Shift+Tab switches the mode of).
     pub fn mode_session(&self) -> Option<&crate::model::LiveSession> {
-        self.data.live_sessions.iter().find(|s| s.managed)
+        reply_target(&self.data)
+    }
+
+    /// Who the composer's text would reach (see [`target_label`]).
+    pub fn target(&self) -> Option<String> {
+        target_label(&self.composer.text(), &self.data)
     }
 
     /// Shift+Tab: next runtime mode, in Claude Code's order
@@ -1057,6 +1086,7 @@ pub(crate) mod fixtures {
             status: Some(ItemStatus::Completed),
             body,
             attachments: Vec::new(),
+            relay_to: None,
         }
     }
 
@@ -1115,7 +1145,7 @@ pub(crate) mod fixtures {
             tokens: 12_400,
             cost_usd: 0.42,
             items: items(),
-            live_sessions: vec![LiveSession { id: "S1".into(), agent_name: "Atlas".into(), managed: true, started_at: 1, mode: RuntimeMode::Autopilot, host: None }],
+            live_sessions: vec![LiveSession { id: "S1".into(), agent_name: "Atlas".into(), managed: true, started_at: 1, mode: RuntimeMode::Autopilot, host: None, last_reply_at: None }],
             last_agent_name: Some("Atlas".into()),
         }
     }
@@ -1270,15 +1300,16 @@ mod tests {
     #[test]
     fn composer_dispatch_rules() {
         let d = data();
-        // nova has no live session on this thread -> summon with the text after the mention
+        // nova has no live session on this thread -> summon it with the text as typed
         assert_eq!(
             dispatch("@nova please review", &d),
-            Dispatch::Summon { agent: "nova".into(), text: "please review".into() }
+            Dispatch::Summon { agent: "nova".into(), text: "@nova please review".into() },
+            "the mention stays, so the thread shows who was asked"
         );
-        assert_eq!(dispatch("@nova", &d), Dispatch::Summon { agent: "nova".into(), text: "".into() });
+        assert_eq!(dispatch("@nova", &d), Dispatch::Summon { agent: "nova".into(), text: "".into() }, "a bare mention brings it in idle");
         assert_eq!(
             dispatch("@nova@mini fix the flaky test", &d),
-            Dispatch::Summon { agent: "nova@mini".into(), text: "fix the flaky test".into() },
+            Dispatch::Summon { agent: "nova@mini".into(), text: "@nova@mini fix the flaky test".into() },
             "the host travels with the name"
         );
         // atlas has a live managed session -> prompt it with the full text as typed (case-insensitive name)
@@ -1291,7 +1322,7 @@ mod tests {
         pane.live_sessions[0].managed = false;
         assert_eq!(
             dispatch("@Atlas go", &pane),
-            Dispatch::Summon { agent: "Atlas".into(), text: "go".into() }
+            Dispatch::Summon { agent: "Atlas".into(), text: "@Atlas go".into() }
         );
         assert_eq!(dispatch("  run the tests ", &d), Dispatch::Prompt { session_id: "S1".into(), text: "run the tests".into() });
         let mut no_live = data();
@@ -1305,6 +1336,32 @@ mod tests {
         empty.last_agent_name = None;
         assert_eq!(dispatch("hi", &empty), Dispatch::NoTarget);
         assert_eq!(dispatch("@ hi", &empty), Dispatch::NoTarget, "bare @ is not a mention");
+    }
+
+    #[test]
+    fn a_message_without_a_mention_goes_to_whoever_replied_last() {
+        let live = |id: &str, name: &str, reply: Option<i64>| crate::model::LiveSession {
+            id: id.into(),
+            agent_name: name.into(),
+            managed: true,
+            started_at: 1,
+            mode: RuntimeMode::Autopilot,
+            host: None,
+            last_reply_at: reply,
+        };
+        let mut d = data();
+        // Newest first: nova joined after atlas, but atlas spoke last.
+        d.live_sessions = vec![live("S2", "Nova", Some(100)), live("S1", "Atlas", Some(200))];
+        assert_eq!(dispatch("what do you think?", &d), Dispatch::Prompt { session_id: "S1".into(), text: "what do you think?".into() });
+        assert_eq!(target_label("what do you think?", &d).as_deref(), Some("atlas"));
+        assert_eq!(target_label("@nova and you?", &d).as_deref(), Some("nova"), "a mention picks its agent");
+        assert_eq!(target_label("@vega join us", &d).as_deref(), Some("+vega"), "+ means it would be summoned");
+        // Nobody has replied yet: the newest session.
+        d.live_sessions = vec![live("S2", "Nova", None), live("S1", "Atlas", None)];
+        assert_eq!(dispatch("go", &d), Dispatch::Prompt { session_id: "S2".into(), text: "go".into() });
+        let v = ThreadView::new("T1", d);
+        assert_eq!(v.mode_session().map(|s| s.id.as_str()), Some("S2"), "Shift+Tab acts on the composer's target");
+        assert_eq!(v.target().as_deref(), Some("nova"));
     }
 
     #[test]
@@ -1325,7 +1382,7 @@ mod tests {
         type_str(&mut v, "@nova take over");
         assert_eq!(
             v.handle_key(key(KeyCode::Enter)),
-            ThreadAction::Summon { thread_id: "T1".into(), agent: "nova".into(), text: "take over".into(), attachments: vec![] }
+            ThreadAction::Summon { thread_id: "T1".into(), agent: "nova".into(), text: "@nova take over".into(), attachments: vec![] }
         );
         v.on_reply(Err("spawn failed".into()));
         assert_eq!(v.status.as_deref(), Some("error: spawn failed"));

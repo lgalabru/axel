@@ -817,3 +817,152 @@ fn prompts_from_another_agent_are_framed_for_the_agent_and_tagged_on_the_item() 
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }
+
+#[test]
+fn each_turn_starts_with_what_the_agent_missed_and_notes_wait_for_it() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    // Another agent, nova, already worked on the thread: the owner asked it
+    // something and it answered. Only the owner saw that.
+    let nova = Keypair::generate();
+    f.store
+        .insert_agent(&axel_store::NewAgent {
+            pubkey: nova.public().to_base58(),
+            name: "nova".into(),
+            harness: Harness::Claude,
+            model: None,
+            skills: vec![],
+            prompt: None,
+            color: None,
+            runtime_mode: RuntimeMode::default(),
+            auth_tag: None,
+        })
+        .unwrap();
+    let nova_session = f
+        .store
+        .start_session(
+            &f.owner,
+            &NewSession {
+                thread_id: f.thread_id.clone(),
+                agent_pubkey: nova.public().to_base58(),
+                environment_id: "env-local".into(),
+                environment_label: "local".into(),
+                project_repo_key: None,
+                harness: Harness::Claude,
+                runtime_mode: RuntimeMode::Autopilot,
+                resumed_from: None,
+                runtime: SessionRuntime::Managed,
+            },
+        )
+        .unwrap();
+    let said = |kind: ItemKind, text: &str| {
+        f.store
+            .push_item(&axel_store::NewItem {
+                session_id: nova_session.id.clone(),
+                thread_id: f.thread_id.clone(),
+                turn: 1,
+                kind,
+                status: Some(ItemStatus::Completed),
+                ref_id: None,
+                content: serde_json::json!({ "text": text }),
+            })
+            .unwrap();
+    };
+    said(ItemKind::UserMessage, "compare the two reports");
+    said(ItemKind::AssistantMessage, "Harmonic is ahead on A1.6 to A1.8.");
+
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    send_ok(&sock, Command::Prompt { text: "@atlas what do you think?".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+
+    // The agent read nova's answer and who else is here before the question.
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    assert!(log.contains("You're joining a thread that's already under way"), "{log}");
+    assert!(log.contains(r"[The owner, to nova]\ncompare the two reports"), "{log}");
+    assert!(log.contains(r"[nova replied]\nHarmonic is ahead on A1.6 to A1.8."), "{log}");
+    assert!(log.contains("Also on this thread: nova (idle)"), "{log}");
+    assert!(log.contains(r"---\n\n@atlas what do you think?"), "the question comes last: {log}");
+    // The thread shows the question as typed.
+    assert!(user_texts(&f).iter().any(|(t, _)| t == "@atlas what do you think?"), "{:?}", user_texts(&f));
+
+    // A note from nova starts no turn; it shows on the thread.
+    let from = axel_acp::socket::Sender { pubkey: nova.public().to_base58(), name: "nova".into() };
+    send_ok(&sock, Command::Note { text: "FYI: the QEDIT build passes now.".into(), from });
+    wait_until("the note on the thread", Duration::from_secs(5), || {
+        user_texts(&f).iter().any(|(t, _)| t == "FYI: the QEDIT build passes now.")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(f.store.turns(&f.thread_id).unwrap().len(), 1, "a note doesn't start a turn");
+    said(ItemKind::AssistantMessage, "Second finding: A2 needs the two-run form.");
+
+    // The next turn carries only what's new: the note and nova's new reply.
+    send_ok(&sock, Command::Prompt { text: "and now?".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 2", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    assert!(log.contains("Since your last turn on this thread"), "{log}");
+    assert!(log.contains(r"[nova left you a note (no reply needed)]\nFYI: the QEDIT build passes now."), "{log}");
+    assert!(log.contains(r"[nova replied]\nSecond finding: A2 needs the two-run form."), "{log}");
+    assert_eq!(log.matches("Harmonic is ahead").count(), 1, "what it already saw isn't repeated: {log}");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn the_host_reports_program_status_to_its_pane_as_osc_7501() {
+    use base64::Engine;
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    send_ok(&sock, Command::Prompt { text: "fix the login bug".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+
+    let b64 = |s: &str| base64::prelude::BASE64_STANDARD.encode(s);
+    let pane = f.pane.text();
+    let reports: Vec<&str> = pane.split("\x1b]7501;").skip(1).map(|r| r.split("\x1b\\").next().unwrap()).collect();
+    let states: Vec<&str> = reports.iter().map(|r| r.split(':').next().unwrap()).collect();
+    // working while the turn runs, done when its result is ready, cleared when the session ends.
+    let working = states.iter().position(|s| *s == "state=working").expect("working");
+    let done = states.iter().position(|s| *s == "state=done").expect("done");
+    assert!(working < done && states.last() == Some(&"state=clear"), "{states:?}");
+    // Every report is whole: app and the agent's name as title, every time.
+    for r in &reports {
+        assert!(r.contains(":app=axel") && r.contains(&format!(":title={}", b64("agent"))), "{r}");
+    }
+    assert!(reports[working].contains(&format!(":msg={}", b64("fix the login bug"))), "{}", reports[working]);
+}
+
+#[test]
+fn a_question_waits_for_the_owner_even_in_autopilot() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    send_ok(&sock, Command::Prompt { text: "ask".into(), attachments: vec![], steer: false, from: None });
+    // Autopilot would allow a permission at once; a question waits for the owner.
+    let question = || f.store.items(&f.session_id, 0, 1000).unwrap().into_iter().find(|i| i.kind == ItemKind::Question);
+    wait_until("the question", Duration::from_secs(10), || question().is_some_and(|q| q.status == Some(ItemStatus::Pending)));
+    std::thread::sleep(Duration::from_millis(200));
+    let q = question().unwrap();
+    assert_eq!(q.status, Some(ItemStatus::Pending), "nobody answered for the owner");
+    assert_eq!(q.content["title"], "Database: Which one?");
+    assert_eq!(f.store.get_session(&f.session_id).unwrap().unwrap().state, SessionState::Blocked);
+    assert!(f.pane.text().contains("state=blocked:kind=question"), "Rex hears it's a question");
+
+    send_ok(&sock, Command::Answer { item_id: q.id.clone(), option_id: "answer:1".into() });
+    wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    assert_eq!(question().unwrap().status, Some(ItemStatus::Answered));
+    let said = f.store.items(&f.session_id, 0, 1000).unwrap().into_iter().filter(|i| i.kind == ItemKind::AssistantMessage).map(|i| i.content["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    assert!(said.iter().any(|t| t.contains("picked answer:1")), "the agent got the pick: {said:?}");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}

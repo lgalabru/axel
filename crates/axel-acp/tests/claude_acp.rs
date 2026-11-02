@@ -139,7 +139,6 @@ fn a_turn_streams_asks_permission_and_runs_the_tool() {
     for flag in [
         "--output-format stream-json --verbose --input-format stream-json",
         "--permission-prompt-tool stdio",
-        "--disallowedTools AskUserQuestion",
         "--tools default",
         "--setting-sources user,project,local",
         "--permission-mode default",
@@ -149,6 +148,8 @@ fn a_turn_streams_asks_permission_and_runs_the_tool() {
     ] {
         assert!(joined.contains(flag), "missing `{flag}` in {joined}");
     }
+    // AskUserQuestion stays on: the adapter asks its questions as permission requests.
+    assert!(!joined.contains("AskUserQuestion"), "{joined}");
     assert!(joined.contains(&format!("--session-id {sid}")), "{joined}");
     let mcp: Value = serde_json::from_str(&argv[argv.iter().position(|a| a == "--mcp-config").unwrap() + 1]).unwrap();
     assert_eq!(mcp["mcpServers"]["axel"], json!({ "type": "stdio", "command": "/usr/bin/true", "args": ["mcp"], "env": { "AXEL_AGENT": "pk" } }));

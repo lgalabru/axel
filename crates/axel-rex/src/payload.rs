@@ -171,6 +171,15 @@ pub fn new_split_right_stacked(anchor: &str, top: Value, bottom: Value, keep: f6
     }))
 }
 
+/// `session.new_split`: one terminal right of `anchor` (a block or a split),
+/// which keeps `keep` of the width.
+pub fn new_split_right(anchor: &str, block: Value, keep: f64, focus: bool) -> Result<Value, Error> {
+    if !(keep > 0.0 && keep < 1.0) {
+        return Err(Error::Invalid("ratio must be between 0 and 1".into()));
+    }
+    Ok(json!({ "anchor_id": anchor, "direction": "horizontal", "side": "after", "ratio": keep, "focus": focus, "layout": block }))
+}
+
 /// `session.new_split`: one terminal below `anchor`, which keeps `ratio` of the height.
 pub fn new_split_below(anchor: &str, block: Value, ratio: f64, focus: bool) -> Result<Value, Error> {
     if !(ratio > 0.0 && ratio < 1.0) {

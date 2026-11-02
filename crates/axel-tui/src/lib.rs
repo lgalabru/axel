@@ -25,7 +25,7 @@ pub mod thread;
 pub mod util;
 pub mod view;
 
-pub use compose::run_compose;
+pub use compose::{run_answer, run_compose};
 pub use stream::run_stream;
 pub use thread::{SendCommand, SendReply};
 pub use util::{relative_time, slugify};

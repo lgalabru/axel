@@ -276,8 +276,8 @@ impl Agent {
         if let Some(r) = &resume {
             args.extend(["--resume".into(), r.clone()]);
         }
-        // AskUserQuestion can't be answered over ACP; the adapter disables it too.
-        args.extend(["--disallowedTools".into(), "AskUserQuestion".into()]);
+        // AskUserQuestion stays on: each question is asked as a permission
+        // request whose options are the choices (see `ask_questions`).
         args.extend(["--tools".into(), "default".into()]);
         if !mcp.is_empty() {
             args.extend(["--mcp-config".into(), json!({ "mcpServers": mcp }).to_string()]);
@@ -432,6 +432,7 @@ impl Agent {
                 r
             }),
             Some("hook_callback") => Ok(self.hook_callback(session, &request)),
+            Some("elicitation") => Ok(self.elicitation(session, &request)),
             Some(other) => Err(format!("Unsupported control request subtype: {other}")),
             None => Err("Unsupported control request subtype: undefined".into()),
         };
@@ -455,6 +456,10 @@ impl Agent {
         let title = tools::tool_info(tool, &input).get("title").cloned().unwrap_or(Value::Null);
         let tool_call = json!({ "toolCallId": tool_use_id, "rawInput": input, "title": title });
         // A request Claude withdrew while we asked is answered as aborted by `answer_control`.
+
+        if tool == "AskUserQuestion" {
+            return self.ask_questions(session, &tool_use_id, input);
+        }
 
         if tool == "ExitPlanMode" {
             let outcome = self.ask(
@@ -509,6 +514,70 @@ impl Agent {
             Some("allow") => json!({ "behavior": "allow", "updatedInput": input }),
             _ => json!({ "behavior": "deny", "message": "User refused permission to run tool", "interrupt": true }),
         })
+    }
+
+    /// `AskUserQuestion`: each question in turn as a permission request whose
+    /// options are its choices (ids `answer:<n>`, which tells the host it is a
+    /// question for the owner, never a permission its policy may grant), plus
+    /// "none of these".  The labels picked go back as the tool's `answers`.
+    fn ask_questions(&self, session: &Session, tool_use_id: &Value, input: Value) -> Result<Value, String> {
+        let questions = input.get("questions").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut answers = serde_json::Map::new();
+        for (qi, q) in questions.iter().enumerate() {
+            let text = q.get("question").and_then(Value::as_str).unwrap_or("").to_string();
+            let (tool_call, options, labels) = question_request(tool_use_id, qi, q);
+            let Some(picked) = self.ask(session, &tool_call, options)? else {
+                return Err("Tool use aborted".into());
+            };
+            match picked.strip_prefix(ANSWER_PREFIX).and_then(|n| n.parse::<usize>().ok()).and_then(|n| labels.get(n)) {
+                Some(label) => {
+                    answers.insert(text, Value::String(label.clone()));
+                }
+                None => {
+                    return Ok(json!({
+                        "behavior": "deny",
+                        "message": "The owner didn't pick any of these options. Ask them in plain text what they want instead.",
+                    }));
+                }
+            }
+        }
+        let mut updated = input;
+        if let Some(obj) = updated.as_object_mut() {
+            obj.insert("answers".into(), Value::Object(answers));
+        }
+        Ok(json!({ "behavior": "allow", "updatedInput": updated }))
+    }
+
+    /// An MCP server asks the owner something (`elicitation`), e.g. Axel's
+    /// `send` asking whether an agent may reach another.  A form of one
+    /// choice is asked like a question (see [`elicitation_choice`]); anything
+    /// else is declined, since there is no form to fill in here.
+    fn elicitation(&self, session: &Session, request: &Value) -> Value {
+        if request.get("mode").and_then(Value::as_str) == Some("url") {
+            return json!({ "action": "decline" });
+        }
+        let message = request.get("message").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let schema = request.get("requested_schema").cloned().unwrap_or(Value::Null);
+        let Some((field, choices)) = elicitation_choice(&schema) else {
+            return json!({ "action": "decline" });
+        };
+        let mut options: Vec<Value> = choices
+            .iter()
+            .enumerate()
+            .map(|(i, (_, label))| json!({ "kind": "allow_once", "name": label, "optionId": format!("{ANSWER_PREFIX}{i}") }))
+            .collect();
+        options.push(json!({ "kind": "reject_once", "name": "Decline", "optionId": format!("{ANSWER_PREFIX}none") }));
+        let id = request.get("elicitation_id").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("elicitation-{}", chrono::Utc::now().timestamp_millis()));
+        let server = request.get("mcp_server_name").and_then(Value::as_str).unwrap_or("");
+        let title = if message.is_empty() { format!("{server} asks") } else { message };
+        let tool_call = json!({ "toolCallId": id, "title": title, "kind": "think" });
+        match self.ask(session, &tool_call, Value::Array(options)) {
+            Ok(Some(picked)) => match picked.strip_prefix(ANSWER_PREFIX).and_then(|n| n.parse::<usize>().ok()).and_then(|n| choices.get(n)) {
+                Some((value, _)) => json!({ "action": "accept", "content": { field: value } }),
+                None => json!({ "action": "decline" }),
+            },
+            _ => json!({ "action": "cancel" }),
+        }
     }
 
     /// `session/request_permission`: the option picked, or `None` if cancelled.
@@ -688,6 +757,77 @@ fn is_edit_tool(tool: &str) -> bool {
     // native tools those are Claude Code's Edit and Write (and NotebookEdit,
     // which Claude Code's own accept-edits mode covers too).
     matches!(tool, "Edit" | "Write" | "NotebookEdit" | "MultiEdit")
+}
+
+/// An elicitation form that is one choice: its field and each (value, label).
+/// A string `enum` (labels from `enumNames` when given), a `oneOf` of
+/// `{const, title}`, or a boolean (Yes / No).
+fn elicitation_choice(schema: &Value) -> Option<(String, Vec<(Value, String)>)> {
+    let props = schema.get("properties")?.as_object()?;
+    if props.len() != 1 {
+        return None;
+    }
+    let (field, p) = props.iter().next()?;
+    let choices: Vec<(Value, String)> = if let Some(values) = p.get("enum").and_then(Value::as_array) {
+        let names = p.get("enumNames").and_then(Value::as_array);
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let label = names.and_then(|n| n.get(i)).and_then(Value::as_str).map(String::from).or_else(|| v.as_str().map(String::from)).unwrap_or_else(|| v.to_string());
+                (v.clone(), label)
+            })
+            .collect()
+    } else if let Some(alts) = p.get("oneOf").and_then(Value::as_array) {
+        alts.iter()
+            .filter_map(|a| {
+                let v = a.get("const")?.clone();
+                let label = a.get("title").and_then(Value::as_str).map(String::from).or_else(|| v.as_str().map(String::from)).unwrap_or_else(|| v.to_string());
+                Some((v, label))
+            })
+            .collect()
+    } else if p.get("type").and_then(Value::as_str) == Some("boolean") {
+        vec![(Value::Bool(true), "Yes".into()), (Value::Bool(false), "No".into())]
+    } else {
+        return None;
+    };
+    (!choices.is_empty()).then(|| (field.clone(), choices))
+}
+
+/// Option ids of a question's choices start with this: the host asks the
+/// owner for these, whatever its policy would do with a permission.
+pub const ANSWER_PREFIX: &str = "answer:";
+
+/// The permission request for question `qi` of an `AskUserQuestion` call:
+/// the tool call (its own id per question, the question as its title), the
+/// options (each choice, then "none of these"), and the choices' labels.
+fn question_request(tool_use_id: &Value, qi: usize, q: &Value) -> (Value, Value, Vec<String>) {
+    let text = q.get("question").and_then(Value::as_str).unwrap_or("").trim();
+    let header = q.get("header").and_then(Value::as_str).map(str::trim).filter(|h| !h.is_empty());
+    let multi = q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
+    let mut title = match header {
+        Some(h) => format!("{h}: {text}"),
+        None => text.to_string(),
+    };
+    if multi {
+        // A permission picks one option; the agent gets the one picked.
+        title.push_str(" (pick one)");
+    }
+    let mut labels = Vec::new();
+    let mut options: Vec<Value> = Vec::new();
+    for (i, o) in q.get("options").and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let label = o.get("label").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let name = match o.get("description").and_then(Value::as_str).map(str::trim).filter(|d| !d.is_empty()) {
+            Some(d) => format!("{label} — {d}"),
+            None => label.clone(),
+        };
+        options.push(json!({ "kind": "allow_once", "name": name, "optionId": format!("{ANSWER_PREFIX}{i}") }));
+        labels.push(label);
+    }
+    options.push(json!({ "kind": "reject_once", "name": "None of these (I'll answer in the chat)", "optionId": format!("{ANSWER_PREFIX}none") }));
+    let id = format!("{}#{qi}", tool_use_id.as_str().unwrap_or("question"));
+    let tool_call = json!({ "toolCallId": id, "title": title, "kind": "think", "rawInput": q });
+    (tool_call, Value::Array(options), labels)
 }
 
 fn always_rule(tool: &str) -> Value {
@@ -982,6 +1122,44 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_elicitation_of_one_choice_is_asked_like_a_question() {
+        // What Axel's `send` asks when an agent may not reach another.
+        let form = json!({ "type": "object", "properties": { "answer": { "type": "string", "enum": ["Allow this message", "Always allow", "Don't allow"] } }, "required": ["answer"] });
+        let (field, choices) = elicitation_choice(&form).unwrap();
+        assert_eq!(field, "answer");
+        assert_eq!(choices.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), vec!["Allow this message", "Always allow", "Don't allow"]);
+        let titled = json!({ "properties": { "db": { "oneOf": [{ "const": "pg", "title": "Postgres" }, { "const": "lite", "title": "SQLite" }] } } });
+        assert_eq!(elicitation_choice(&titled).unwrap().1, vec![(json!("pg"), "Postgres".to_string()), (json!("lite"), "SQLite".to_string())]);
+        let yes_no = json!({ "properties": { "ok": { "type": "boolean" } } });
+        assert_eq!(elicitation_choice(&yes_no).unwrap().1[0], (json!(true), "Yes".to_string()));
+        // Free text, or several fields: no form here, so it's declined.
+        assert!(elicitation_choice(&json!({ "properties": { "name": { "type": "string" } } })).is_none());
+        assert!(elicitation_choice(&json!({ "properties": { "a": { "type": "boolean" }, "b": { "type": "boolean" } } })).is_none());
+    }
+
+    #[test]
+    fn a_question_becomes_a_request_with_its_choices_and_a_way_out() {
+        let q = json!({
+            "question": "Which database should staging use?",
+            "header": "Database",
+            "multiSelect": false,
+            "options": [
+                { "label": "Postgres", "description": "what production runs" },
+                { "label": "SQLite" }
+            ]
+        });
+        let (tool_call, options, labels) = question_request(&json!("toolu_1"), 0, &q);
+        assert_eq!(tool_call["toolCallId"], "toolu_1#0", "one item per question");
+        assert_eq!(tool_call["title"], "Database: Which database should staging use?");
+        assert_eq!(labels, vec!["Postgres".to_string(), "SQLite".to_string()]);
+        let names: Vec<&str> = options.as_array().unwrap().iter().map(|o| o["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Postgres — what production runs", "SQLite", "None of these (I'll answer in the chat)"]);
+        assert!(options.as_array().unwrap().iter().all(|o| o["optionId"].as_str().unwrap().starts_with(ANSWER_PREFIX)), "the host knows it's a question");
+        let (multi, _, _) = question_request(&json!("toolu_1"), 1, &json!({ "question": "Which?", "multiSelect": true, "options": [] }));
+        assert_eq!(multi["title"], "Which? (pick one)");
+    }
 
     #[test]
     fn prompts_become_claude_user_messages() {

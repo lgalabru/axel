@@ -275,6 +275,8 @@ pub struct ThreadItem {
     pub body: ItemBody,
     /// Files attached to a user message (`content.attachments`).
     pub attachments: Vec<PathBuf>,
+    /// For a message one agent sent another: the recipient's name.
+    pub relay_to: Option<String>,
 }
 
 /// A session of the thread that has not ended.
@@ -288,6 +290,8 @@ pub struct LiveSession {
     pub mode: RuntimeMode,
     /// The remote host it runs on; `None` when it runs on this machine.
     pub host: Option<String>,
+    /// When its agent last replied on the thread (Unix ms).
+    pub last_reply_at: Option<i64>,
 }
 
 /// Everything the thread view shows, refreshed by the glue.

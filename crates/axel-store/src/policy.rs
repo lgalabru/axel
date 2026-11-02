@@ -248,6 +248,12 @@ impl Store {
     /// (`$AXEL_SESSION` of an agent), or `None` when the owner asks: the owner
     /// is only held to the target's spend limit.
     pub fn check_summon(&self, caller: Option<&str>, target: &str, day_start: i64) -> Result<SummonCheck, Error> {
+        self.check_summon_with(caller, target, day_start, false)
+    }
+
+    /// [`Self::check_summon`], with `reach_granted` when the owner just let
+    /// this one summon past the caller's reach; loops, depth and budget still apply.
+    pub fn check_summon_with(&self, caller: Option<&str>, target: &str, day_start: i64, reach_granted: bool) -> Result<SummonCheck, Error> {
         let target_policy = self.agent_policy(target)?;
         if let SpendLimit::DailyUsd(limit) = target_policy.budget.spend {
             let spent = self.agent_spend_since(target, day_start)?;
@@ -268,7 +274,7 @@ impl Store {
             return Ok(SummonCheck::Refused(Refusal::Cycle { chain, to: target.to_string() }));
         }
         let from_policy = self.agent_policy(&from)?;
-        if !from_policy.reach.allows(target) {
+        if !reach_granted && !from_policy.reach.allows(target) {
             return Ok(SummonCheck::Refused(Refusal::NotReachable { from, to: target.to_string() }));
         }
         let depth = self.session_depth(caller)? + 1;

@@ -43,6 +43,34 @@ to:
 - only send when they have something the other needs, never "got it" or "thanks": every
   message costs the recipient a turn.
 
+## Notes that need no reply
+
+Not everything needs an answer. An agent sends news as a **note** with `send` and
+`fyi: true`, or `axel send --fyi`:
+
+```bash
+axel send --fyi "@nova FYI: the QEDIT build passes now"
+```
+
+A note shows on the thread, but it doesn't start the recipient's turn: the recipient reads
+it at the start of its next one. It never summons an agent that isn't on the thread, so it
+can't wake anyone up.
+
+## What each agent knows
+
+Agents can't see each other's turns; only you see the whole thread. So when you turn to an
+agent (`@nova what do you think?`), its prompt starts with what it missed since its last
+turn: the other agents' replies (the newest in full), your messages to them, notes left for
+it, and who else is working on the thread and on what. Your message comes last. The thread
+still shows it as you typed it, `@nova` included.
+
+Without an `@name`, a message goes to the agent that replied last. The composer's footer
+shows where it will go before you press Enter: `→ nova`, or `→ +vega` when vega would be
+summoned onto the thread.
+
+Messages an agent already got as a prompt or a note are marked `handled` in its inbox, so
+it treats them as history rather than requests to act on again.
+
 ## Who may reach whom
 
 Agents start with **no reach**. You grant it per agent:
@@ -52,6 +80,11 @@ axel agent edit atlas --allow nova,vega     # atlas may message and summon nova 
 axel agent edit atlas --reach anyone       # …or any agent
 axel agent edit atlas --disallow vega
 ```
+
+When an agent tries to message one it may not reach, Axel asks you then and there, in
+the middle of the window: **Allow this message**, **Always allow** (the same as
+`axel agent edit atlas --allow nova`), or **Don't allow**. The agent never decides this
+itself: only your answer grants reach.
 
 An agent that may reach you may always be answered: if atlas may ask nova, nova may reply
 to atlas, but only while atlas is on the thread. Replying never starts a session.

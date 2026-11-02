@@ -347,16 +347,24 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         };
         let mut command = vec![host_spec.program.clone()];
         command.extend(host_spec.args.iter().cloned());
-        let window = rex
-            .new_window(&format!("{label} · log"), &command, Some(&work_dir), &host_spec.env, false)
-            .context("opening a Rex window for the session host")?;
-        let block = window.block_ids.first().cloned();
+        let pane_label = format!("{label}{}", super::ui::AGENT_PANE_SUFFIX);
+        // In the thread's window, with the thread's other agents; a window of
+        // its own only when that window can't be found.
+        let (window_id, block) = match super::ui::place_agent_pane(rex, &pane_label, &command, Some(&work_dir), &host_spec.env)? {
+            Some((w, b)) => (w, Some(b)),
+            None => {
+                let w = rex
+                    .new_window(&pane_label, &command, Some(&work_dir), &host_spec.env, false)
+                    .context("opening a Rex window for the session host")?;
+                (w.window_id, w.block_ids.first().cloned())
+            }
+        };
         ctx.store.update_session(
             &agent_kp,
             &session.id,
-            &SessionUpdate { rex: Some((Some(rex.env().session.clone()), Some(window.window_id.clone()), block)), ..Default::default() },
+            &SessionUpdate { rex: Some((Some(rex.env().session.clone()), Some(window_id.clone()), block)), ..Default::default() },
         )?;
-        return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: Some(window.window_id), host_spec: None });
+        return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: Some(window_id), host_spec: None });
     }
 
     let here = match (&ctx.rex, target) {

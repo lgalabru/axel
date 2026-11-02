@@ -22,7 +22,7 @@ pub mod context;
 mod server;
 mod tools;
 
-pub use context::{AxelContext, BlockedKind, CallScope, Delivery, InboxMessage, LocalContext, Outcome, SendReport, StatusState};
+pub use context::{AxelContext, BlockedKind, CallScope, Delivery, Grant, InboxMessage, LocalContext, MessageKind, Outcome, SendError, SendReport, StatusState};
 pub use server::AxelMcp;
 pub use rmcp::ErrorData;
 

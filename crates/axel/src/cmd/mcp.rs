@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use axel_mcp::{AxelContext, BlockedKind, CallScope, InboxMessage, LocalContext, SendReport, StatusState};
+use axel_mcp::{AxelContext, BlockedKind, CallScope, Grant, InboxMessage, LocalContext, MessageKind, SendError, SendReport, StatusState};
 
 use super::Ctx;
 
@@ -16,13 +16,34 @@ impl AxelContext for CliContext {
         LocalContext.scope()
     }
 
-    fn send(&self, to: &[String], text: &str) -> Result<SendReport, String> {
-        let go = || -> Result<SendReport> {
-            let ctx = Ctx::open()?;
-            let (recipients, hosts) = super::inbox::resolve_names(&ctx, to)?;
-            super::inbox::send_message(&ctx, &recipients, &hosts, text)
-        };
-        go().map_err(|e| format!("{e:#}"))
+    fn send(&self, to: &[String], text: &str, kind: MessageKind, grant: Grant) -> Result<SendReport, SendError> {
+        let failed = |e: anyhow::Error| SendError::Failed(format!("{e:#}"));
+        let ctx = Ctx::open().map_err(failed)?;
+        let (recipients, hosts) = super::inbox::resolve_names(&ctx, to).map_err(failed)?;
+        let mut _once = None;
+        if let Some(from) = super::policy::caller_agent() {
+            let denied = super::policy::denied_reach(&ctx, &from, &recipients).map_err(failed)?;
+            if !denied.is_empty() {
+                match grant {
+                    // Ask the owner (the tool elicits): say who, by name.
+                    Grant::None => {
+                        let names = denied.iter().map(|r| super::policy::name_of(&ctx, r)).collect();
+                        return Err(SendError::NoReach { from: super::policy::name_of(&ctx, &from), to: names });
+                    }
+                    // This message (and the summons it may need), nothing after.
+                    Grant::Once => _once = Some(super::policy::grant_reach_once(&denied)),
+                    // As `axel agent edit <from> --allow <them>`, which the owner just chose.
+                    Grant::Always => {
+                        let mut p = ctx.store.agent_policy(&from).map_err(|e| failed(e.into()))?;
+                        for r in &denied {
+                            p.reach.allow(r);
+                        }
+                        ctx.store.set_agent_policy(&from, &p).map_err(|e| failed(e.into()))?;
+                    }
+                }
+            }
+        }
+        super::inbox::send_message(&ctx, &recipients, &hosts, text, kind).map_err(failed)
     }
 
     fn set_status(&self, state: StatusState, msg: Option<&str>, kind: Option<BlockedKind>) -> Result<(), String> {

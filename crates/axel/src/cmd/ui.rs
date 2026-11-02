@@ -491,6 +491,56 @@ fn close_axel_layers(ctx: &Ctx, rex: &axel_rex::Rex) {
     close_own_layer(ctx);
 }
 
+/// An agent's session pane is labelled `<agent> · <thread> · log`.
+pub const AGENT_PANE_SUFFIX: &str = " · log";
+/// The thread keeps this share of the window's width; agents' panes stack in the rest.
+const AGENT_COLUMN_KEEP: f64 = 0.78;
+
+/// Where the next agent pane goes in the window of `block`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AgentPaneSpot {
+    /// Under the last agent pane in the window's column of agents.
+    Below(String),
+    /// A new column on the right of everything (the tiled layout's root).
+    Right(String),
+}
+
+fn agent_pane_spot(view: &serde_json::Value, block: &str) -> Option<AgentPaneSpot> {
+    let layer = tiled_layer_of(view, block)?;
+    let last_agent = layer
+        .get("blocks")?
+        .as_array()?
+        .iter()
+        .rev()
+        .filter(|b| b.get("label").and_then(|l| l.as_str()).is_some_and(|l| l.ends_with(AGENT_PANE_SUFFIX)))
+        .find_map(|b| b.get("block_id").and_then(|i| i.as_str()));
+    match last_agent {
+        Some(b) => Some(AgentPaneSpot::Below(b.to_string())),
+        None => tiled_root(view, block).map(AgentPaneSpot::Right),
+    }
+}
+
+/// Open an agent's session pane in the window this process's pane is in, so
+/// a thread's agents sit together (and Rex's Activity lists them together):
+/// a column on the right, one pane per agent.  `None` when this pane's
+/// window can't be found; the caller opens a window instead.
+pub fn place_agent_pane(
+    rex: &axel_rex::Rex,
+    label: &str,
+    command: &[String],
+    cwd: Option<&std::path::Path>,
+    env: &[(String, String)],
+) -> Result<Option<(String, String)>> {
+    let me = rex.env().block.clone();
+    let Some(window) = window_of_block(rex, &me)? else { return Ok(None) };
+    let Some(spot) = agent_pane_spot(&rex.view()?, &me) else { return Ok(None) };
+    let block = match spot {
+        AgentPaneSpot::Below(anchor) => rex.split_below(&anchor, label, command, 0.5, cwd, env, false)?,
+        AgentPaneSpot::Right(root) => rex.split_right(&root, label, command, AGENT_COLUMN_KEEP, cwd, env, false)?,
+    };
+    Ok(Some((window, block)))
+}
+
 /// The window holding `block` and its tiled layer, from `session.view`.
 fn tiled_layer_of<'a>(view: &'a serde_json::Value, block: &str) -> Option<&'a serde_json::Value> {
     let has = |l: &serde_json::Value| l.get("blocks").and_then(|b| b.as_array()).is_some_and(|bs| bs.iter().any(|b| b.get("block_id").and_then(|i| i.as_str()) == Some(block)));
@@ -586,10 +636,44 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
             }
         });
     }
-    let res = axel_tui::run_compose(deps, thread_id, &fit);
+    // A question an agent asks you floats in front of the thread, centered.
+    let ask = |item_id: &str| {
+        if let Some(rex) = &ctx.rex {
+            open_question(rex, thread_id, item_id);
+        }
+    };
+    let res = axel_tui::run_compose(deps, thread_id, &fit, &ask);
     if let Some(rex) = &ctx.rex {
         leave(rex, stream.as_deref());
     }
+    res
+}
+
+/// Where a question floats: centered, a third of the window tall.
+const QUESTION_BOUNDS: [f64; 4] = [0.2, 0.3, 0.6, 0.36];
+/// The floating question pane's label.
+const QUESTION_LABEL: &str = "question";
+
+/// Open `axel thread answer` for `item_id` in a floating pane over this
+/// window, focused, so you can answer it right away.
+fn open_question(rex: &axel_rex::Rex, thread_id: &str, item_id: &str) {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+    let cmd = vec![exe, "thread".into(), "answer".into(), thread_id.to_string(), item_id.to_string()];
+    if let Err(e) = rex.new_floating_terminal_with_focus(QUESTION_LABEL, QUESTION_BOUNDS, &cmd, None, &passthrough_env(), true) {
+        eprintln!("axel: could not open the question: {e}");
+    }
+}
+
+/// `axel thread answer`: one question, alone; the floating layer closes with it.
+pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
+    let ctx = Ctx::open()?;
+    let cwd = std::env::current_dir().context("reading current directory")?;
+    let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
+    let summon = |_: &str, _: &str, _: &str, _: &[std::path::PathBuf]| -> Result<String> { anyhow::bail!("not from here") };
+    let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None };
+    let res = axel_tui::run_answer(deps, thread_id, item_id);
+    close_own_layer(&ctx);
     res
 }
 
@@ -837,6 +921,17 @@ mod dock_tests {
         assert_eq!(tiled_root(&view(), "block:launcher").as_deref(), Some("split:root"));
         assert_eq!(tiled_root(&view(), "block:x").as_deref(), Some("block:x"), "a window with one pane anchors on it");
         assert_eq!(tiled_root(&view(), "block:nowhere"), None);
+    }
+
+    #[test]
+    fn agent_panes_stack_in_a_column_on_the_right() {
+        // No agent pane yet: a new column right of the whole layout.
+        assert_eq!(agent_pane_spot(&view(), "block:launcher"), Some(AgentPaneSpot::Right("split:root".into())));
+        // With one there, the next goes under the last one.
+        let mut v = view();
+        v["windows"][1]["layers"][0]["blocks"].as_array_mut().unwrap().push(json!({"block_id": "block:jude", "label": "atlas · Ship it · log"}));
+        assert_eq!(agent_pane_spot(&v, "block:compose"), Some(AgentPaneSpot::Below("block:jude".into())));
+        assert_eq!(agent_pane_spot(&v, "block:nowhere"), None);
     }
 
     #[test]

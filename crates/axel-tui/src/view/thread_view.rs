@@ -145,6 +145,22 @@ fn with_right(mut line: Line<'static>, right: &str, width: usize, base: Style) -
 /// The header above an agent's (or another participant's) message: a badge
 /// in their colour — square · lowercase name · square · arrow tip — and the
 /// time against the right edge.  `None` for your own messages.
+/// The left edge of a message one agent sent another.
+const RELAY_GUTTER: &str = "│ ";
+
+/// Item `i` is said by the agent whose message comes right before it (turn
+/// ends aside), so one badge covers both: an agent's note to another agent
+/// and its reply to you read as one message.
+fn continues_speaker(items: &[ThreadItem], i: usize) -> bool {
+    let speaker = |it: &ThreadItem| match (it.kind, &it.body) {
+        (ItemKind::AssistantMessage, ItemBody::Text(_)) => it.agent.as_ref().map(|(n, _)| n.to_lowercase()),
+        (ItemKind::UserMessage, ItemBody::Text(_)) if it.relay_to.is_some() => it.agent.as_ref().map(|(n, _)| n.to_lowercase()),
+        _ => None,
+    };
+    let Some(me) = speaker(&items[i]) else { return false };
+    items[..i].iter().rev().find(|it| it.kind != ItemKind::TurnEnd).and_then(speaker).is_some_and(|prev| prev == me)
+}
+
 pub fn speaker_header(it: &ThreadItem, base: Style, width: usize) -> Option<Line<'static>> {
     let (name, color) = match (&it.agent, &it.author) {
         (Some((name, color)), _) => (name.clone(), theme::agent_color(*color)),
@@ -185,14 +201,16 @@ pub fn clean_text(text: &str) -> String {
 }
 
 /// Split a wrapped line into spans, colouring `@name` tokens that match a known agent.
-fn mention_spans(line: &str, agents: &[(String, Option<axel_store::AgentColor>, axel_store::StatusState)], style: Style) -> Vec<Span<'static>> {
+/// `@name` in `line`, where `name` (the name characters right after the `@`,
+/// so `@nova's` and `@nova,` count) is one of `agents`, in that agent's colour.
+fn mention_spans(line: &str, agents: &[(String, Option<axel_store::AgentColor>)], style: Style) -> Vec<Span<'static>> {
+    let is_name = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
     let mut spans = Vec::new();
     let mut plain = String::new();
     for word in line.split_inclusive(' ') {
-        let token = word.trim_end();
-        let matched = token.strip_prefix('@').and_then(|n| {
-            let n = n.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-            agents.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(n)).map(|(_, color, _)| (n.len(), *color))
+        let matched = word.strip_prefix('@').and_then(|rest| {
+            let n: String = rest.chars().take_while(|c| is_name(*c)).collect();
+            agents.iter().find(|(name, _)| !n.is_empty() && name.eq_ignore_ascii_case(&n)).map(|(_, color)| (n.len(), *color))
         });
         match matched {
             Some((n_len, color)) => {
@@ -213,7 +231,7 @@ fn mention_spans(line: &str, agents: &[(String, Option<axel_store::AgentColor>, 
 }
 
 /// Like [`prose_lines`] but highlights `@name` mentions of known agents.
-fn user_lines(prefix: Vec<Span<'static>>, text: &str, width: usize, style: Style, agents: &[(String, Option<axel_store::AgentColor>, axel_store::StatusState)]) -> Vec<Line<'static>> {
+fn user_lines(prefix: Vec<Span<'static>>, text: &str, width: usize, style: Style, agents: &[(String, Option<axel_store::AgentColor>)]) -> Vec<Line<'static>> {
     let indent: usize = prefix.iter().map(|s| s.content.chars().count()).sum();
     let body_w = width.saturating_sub(indent).max(8);
     let mut lines = Vec::new();
@@ -302,9 +320,23 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                     lines.push(Line::from(Span::styled("  × not sent · session ended while queued", dim)));
                     lines
                 }
+                (ItemKind::UserMessage, ItemBody::Text(t)) if it.relay_to.is_some() => {
+                    // One agent to another: under the sender's badge (unless its
+                    // previous message already shows it), marked and set off.
+                    let mut lines: Vec<Line<'static>> = if continues_speaker(items, *i) { Vec::new() } else { speaker_header(it, base, width).into_iter().collect() };
+                    let to = it.relay_to.clone().unwrap_or_default();
+                    lines.push(Line::from(vec![Span::styled("→ ", dim), Span::styled(to.to_lowercase(), dim.bold())]));
+                    let gutter = Span::styled(RELAY_GUTTER, dim);
+                    for l in user_lines(Vec::new(), t.trim(), width.saturating_sub(RELAY_GUTTER.len()), dim, &mention_names(&v.data)) {
+                        let mut spans = vec![gutter.clone()];
+                        spans.extend(l.spans);
+                        lines.push(Line::from(spans));
+                    }
+                    lines
+                }
                 (ItemKind::UserMessage, ItemBody::Text(t)) => {
                     let prefix = if speaker_header(it, base, width).is_some() { Vec::new() } else { you_prefix(base, true) };
-                    let mut lines = user_lines(prefix, t.trim(), width, base, &v.data.agents);
+                    let mut lines = user_lines(prefix, t.trim(), width, base, &mention_names(&v.data));
                     match speaker_header(it, base, width) {
                         // Another participant: header line, text below.
                         Some(h) => lines.insert(0, h),
@@ -330,8 +362,9 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                     lines
                 }
                 (_, ItemBody::Text(t)) => {
-                    // Agent: header line (badge + time), the response starts below it.
-                    let mut lines: Vec<Line<'static>> = speaker_header(it, base, width).into_iter().collect();
+                    // Agent: header line (badge + time), the response starts below
+                    // it. Right after its own message, the same agent goes on under it.
+                    let mut lines: Vec<Line<'static>> = if continues_speaker(items, *i) { Vec::new() } else { speaker_header(it, base, width).into_iter().collect() };
                     lines.extend(prose_lines(Vec::new(), &clean_text(t), width, base));
                     lines
                 }
@@ -601,19 +634,30 @@ pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
     2 + composer_text_rows(v, area.width, max) as u16 + chips + 1
 }
 
-/// `⏵⏵ autopilot on (shift+tab to cycle)` for the live managed session.
+/// `→ atlas · ⏵⏵ autopilot on (shift+tab to cycle)`: who the composer's text
+/// would reach, then the mode of the session it talks to.
 fn mode_spans(v: &ThreadView) -> Vec<Span<'static>> {
-    let Some(s) = v.mode_session() else { return Vec::new() };
+    let target = v.target().map(|t| {
+        let color = v
+            .data
+            .known_agents
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(t.trim_start_matches('+')))
+            .map_or(theme::ACCENT, |(_, c)| theme::agent_color(*c));
+        vec![Span::styled("→ ".to_string(), theme::dim()), Span::styled(t, Style::default().fg(color)), Span::styled(" · ".to_string(), theme::dim())]
+    });
+    let Some(s) = v.mode_session() else { return target.unwrap_or_default() };
     let (label, color) = match s.mode {
         crate::model::RuntimeMode::Autopilot => ("⏵⏵ autopilot on", theme::ACCENT),
         crate::model::RuntimeMode::Edits => ("⏵⏵ accept edits on", Color::Indexed(141)),
         crate::model::RuntimeMode::Plan => ("⏸ plan mode on", Color::Indexed(73)),
         crate::model::RuntimeMode::Supervised => ("⏵ asks before acting", theme::DIM),
     };
-    let mut spans = vec![
+    let mut spans = target.unwrap_or_default();
+    spans.extend([
         Span::styled(label.to_string(), Style::default().fg(color)),
         Span::styled(" (shift+tab to cycle)".to_string(), theme::dim()),
-    ];
+    ]);
     if let Some(h) = &s.host {
         spans.push(Span::styled(format!(" · {} on {h}", s.agent_name), theme::accent()));
     }
@@ -716,9 +760,9 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
             "agent is working · Enter queues a message · ^S steers it in now"
         } else {
             if v.compose_only {
-                "message the thread · @name to summon"
+                "message the thread · @name for someone else"
             } else {
-                "message the thread · @name to summon · Esc dashboard"
+                "message the thread · @name for someone else · Esc dashboard"
             }
         };
         frame.render_widget(
@@ -794,8 +838,11 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
         Some(st) => st.chars().count(),
         None => help_line(&v.help()).width(),
     };
-    if left.len() > 2 && right.width() < full {
-        left.truncate(2);
+    // Tight: drop the "(shift+tab to cycle)" hint and the host, keep who and the mode.
+    if right.width() < full
+        && let Some(i) = left.iter().position(|s| s.content.starts_with(" (shift+tab"))
+    {
+        left.truncate(i);
         right = fit(&left);
     }
     frame.render_widget(Paragraph::new(Line::from(left)), footer);

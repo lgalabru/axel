@@ -394,6 +394,28 @@ impl Rex {
         Ok(ids)
     }
 
+    /// Run `command` in a new terminal right of `anchor` (a block or a split),
+    /// which keeps `keep` of the width.  Returns the new block's id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_right(
+        &self,
+        anchor: &str,
+        label: &str,
+        command: &[String],
+        keep: f64,
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+        focus: bool,
+    ) -> Result<String, Error> {
+        let block = payload::terminal_block(label, command, cwd, env)?;
+        let args = payload::new_split_right(anchor, block, keep, focus)?;
+        let result = self.api_call("session.new_split", args)?;
+        ids_field(&result, "block_ids")
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Invalid("session.new_split returned no block".into()))
+    }
+
     /// Split `anchor` and run `command` in a new terminal below it; the anchor
     /// keeps `ratio` of the height.  Returns the new block's id.
     #[allow(clippy::too_many_arguments)]

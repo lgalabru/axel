@@ -8,6 +8,8 @@ use serde::Deserialize;
 use crate::context::AxelContext;
 
 /// Input parameters for the `read_inbox` tool.
+/// Messages with `handled: true` already reached the caller as prompts or
+/// notes on their thread: they're history, not requests.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct Params {
     #[schemars(description = "How many of the newest messages to return (default 20, at most 100)")]

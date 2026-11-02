@@ -314,6 +314,10 @@ const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
 
+/// `app` in this host's OSC 7501 reports: the program in the pane is Axel's
+/// session host, whatever harness it drives.
+const PROGRAM_STATUS_APP: &str = "axel";
+
 struct Host<W: Write> {
     cfg: HostConfig,
     store: Store,
@@ -340,6 +344,9 @@ struct Host<W: Write> {
     /// What `session/new` said about native modes, for later switches.
     native_modes: Option<acp::SessionModeState>,
     ended: bool,
+    /// When this agent last started a turn (Unix ms): the thread after that is
+    /// what it hasn't seen.  `None` before its first turn here.
+    seen_through: Option<i64>,
 }
 
 impl<W: Write> Host<W> {
@@ -366,6 +373,7 @@ impl<W: Write> Host<W> {
             mode_cell,
             native_modes: None,
             ended: false,
+            seen_through: None,
         }
     }
 
@@ -386,6 +394,28 @@ impl<W: Write> Host<W> {
         }
         let clean: String = text.chars().filter(|c| !c.is_control()).take(200).collect();
         let _ = write!(self.out, "\x1b]9;{clean}\x07");
+        let _ = self.out.flush();
+    }
+
+    /// Report this session's state to the terminal its pane runs in, as an
+    /// OSC 7501 Program Status record (revision 0.4).  Each report replaces the
+    /// record whole, so `app` and `title` (the agent's name) go in every one.
+    fn program_status(&mut self, state: axel_rex::osc::State, kind: Option<axel_rex::osc::Kind>, msg: &str) {
+        let title = match self.store.agent_by_pubkey(&self.cfg.agent_pubkey) {
+            Ok(Some(a)) => a.name,
+            _ => std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into()),
+        };
+        let msg = msg.trim();
+        let report = axel_rex::osc::Report {
+            state,
+            id: None,
+            kind,
+            progress: None,
+            app: Some(PROGRAM_STATUS_APP),
+            title: Some(&title),
+            msg: (!msg.is_empty()).then_some(msg),
+        };
+        let _ = write!(self.out, "{}", axel_rex::osc::encode(&report));
         let _ = self.out.flush();
     }
 
@@ -737,6 +767,19 @@ impl<W: Write> Host<W> {
                     ),
                 }
             }
+            Command::Note { text, from } => {
+                if text.trim().is_empty() {
+                    return (Reply::Error { message: "empty note".into() }, Action::None);
+                }
+                let content = json!({ "text": text, "from": from.pubkey, "fyi": true });
+                match self.push(ItemKind::UserMessage, Some(ItemStatus::Completed), None, content) {
+                    Ok(_) => {
+                        self.line(DIM, "✎", &format!("note from {}  {}", from.name, head(&text, 100)));
+                        (Reply::Ok, Action::None)
+                    }
+                    Err(e) => (Reply::Error { message: format!("store: {e}") }, Action::None),
+                }
+            }
             Command::Steer { item_id } => {
                 let Some(pos) = self.queue.iter().position(|q| q.item_id == item_id) else {
                     return (
@@ -853,6 +896,59 @@ impl<W: Write> Host<W> {
         Some((q.text, q.files, q.from))
     }
 
+    /// What this agent missed on its thread since its last turn, and who
+    /// else is working there (see [`crate::catchup`]).
+    fn catch_up(&self) -> Option<String> {
+        use crate::catchup::{Entry, Peer, Speaker};
+        let me = &self.cfg.session_id;
+        let items = self.store.thread_items(&self.cfg.thread_id, 400).ok()?;
+        let sessions = self
+            .store
+            .list_sessions(axel_store::SessionFilter { thread_id: Some(self.cfg.thread_id.clone()), ..Default::default() })
+            .unwrap_or_default();
+        let name = |pk: &str| -> String {
+            match self.store.agent_by_pubkey(pk) {
+                Ok(Some(a)) => a.name,
+                _ => pk.chars().take(8).collect(),
+            }
+        };
+        let agent_of = |sid: &str| sessions.iter().find(|s| s.id == sid).map(|s| name(&s.agent_pubkey));
+        let entries: Vec<Entry> = items
+            .iter()
+            .filter(|it| self.seen_through.is_none_or(|t| it.at > t))
+            .filter_map(|it| {
+                let text = it.content.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                if text.is_empty() {
+                    return None;
+                }
+                let from = it.content.get("from").and_then(|f| f.as_str());
+                let fyi = it.content.get("fyi").and_then(|f| f.as_bool()).unwrap_or(false);
+                let speaker = match (it.session_id == *me, it.kind, from) {
+                    (true, ItemKind::UserMessage, Some(f)) if fyi => Speaker::Note { from: name(f) },
+                    (true, _, _) => return None,
+                    (false, ItemKind::AssistantMessage, _) => Speaker::Agent { name: agent_of(&it.session_id)? },
+                    // Queued prompts that haven't started aren't said yet.
+                    (false, ItemKind::UserMessage, _) if it.status == Some(ItemStatus::Pending) => return None,
+                    (false, ItemKind::UserMessage, Some(f)) if f == self.cfg.agent_pubkey => return None,
+                    (false, ItemKind::UserMessage, Some(f)) => Speaker::Relay { from: name(f), to: agent_of(&it.session_id)? },
+                    (false, ItemKind::UserMessage, None) => Speaker::Owner { to: agent_of(&it.session_id)? },
+                    _ => return None,
+                };
+                Some(Entry { speaker, text: text.to_string() })
+            })
+            .collect();
+        let peers: Vec<Peer> = sessions
+            .iter()
+            .filter(|s| s.ended_at.is_none() && s.id != *me && s.agent_pubkey != self.cfg.agent_pubkey)
+            .map(|s| {
+                let status = self.store.status(&s.id).ok().flatten();
+                let working = status.as_ref().is_some_and(|st| st.state == StatusState::Working);
+                Peer { name: name(&s.agent_pubkey), working, doing: status.and_then(|st| st.msg).filter(|_| working) }
+            })
+            .collect();
+        crate::catchup::render(&entries, &peers, self.seen_through.is_none())
+    }
+
     fn start_turn(
         &mut self,
         cx: &ConnectionTo<Agent>,
@@ -863,8 +959,12 @@ impl<W: Write> Host<W> {
         self.turn += 1;
         self.turn_started = Instant::now();
         self.turn_user_text = text.clone();
-        // The thread shows the message as written; the agent also reads who wrote it.
-        let wire_text = from.as_ref().map_or_else(|| text.clone(), |f| f.frame(&text));
+        // The thread shows the message as written; the agent also reads who
+        // wrote it, and first what it missed on the thread.
+        let framed = from.as_ref().map_or_else(|| text.clone(), |f| f.frame(&text));
+        let catch_up = self.catch_up();
+        self.seen_through = Some(chrono::Utc::now().timestamp_millis());
+        let wire_text = crate::catchup::prepend(catch_up.as_deref(), &framed);
         self.turn_assistant_text.clear();
         self.turn_tool_calls = 0;
         self.turn_files_edited = 0;
@@ -890,6 +990,7 @@ impl<W: Write> Host<W> {
                 ..Default::default()
             },
         );
+        self.program_status(axel_rex::osc::State::Working, None, &head(&text, 200));
         let turn = self.turn;
         let files_note = if files.is_empty() {
             String::new()
@@ -998,6 +1099,14 @@ impl<W: Write> Host<W> {
                 ..Default::default()
             },
         );
+        // A finished turn is a result to look at (done); a cancelled one is at
+        // rest (idle); a failed one stopped (error).
+        let (osc_state, osc_msg) = match stop_reason.as_str() {
+            "error" => (axel_rex::osc::State::Error, "the turn failed".to_string()),
+            "cancelled" => (axel_rex::osc::State::Idle, String::new()),
+            _ => (axel_rex::osc::State::Done, head.clone()),
+        };
+        self.program_status(osc_state, None, &osc_msg);
         let secs = duration_ms as f64 / 1000.0;
         let tools = self.turn_tool_calls;
         let turn = self.turn;
@@ -1292,13 +1401,15 @@ impl<W: Write> Host<W> {
             format!("{title}  {DIM}{summary}{RESET}")
         };
 
-        match policy::decide(
-            self.cfg.runtime_mode,
-            kind,
-            &title,
-            &raw_input,
-            &self.cfg.disallowed_tools,
-        ) {
+        // A question for the owner (its choices are `answer:` options) is never
+        // a permission: no policy may pick an answer, whatever the mode.
+        let question = !req.options.is_empty() && req.options.iter().all(|o| o.option_id.to_string().starts_with(crate::claude::ANSWER_PREFIX));
+        let decision = if question {
+            Decision::Ask
+        } else {
+            policy::decide(self.cfg.runtime_mode, kind, &title, &raw_input, &self.cfg.disallowed_tools)
+        };
+        match decision {
             Decision::Allow => {
                 let resp = match pick("allow", "allow_once") {
                     Some(id) => acp::RequestPermissionResponse::new(
@@ -1340,13 +1451,13 @@ impl<W: Write> Host<W> {
                     .map(|o| json!({ "option_id": o.option_id.to_string(), "name": o.name, "kind": enum_str(&o.kind) }))
                     .collect();
                 let item = self.push(
-                    ItemKind::Permission,
+                    if question { ItemKind::Question } else { ItemKind::Permission },
                     Some(ItemStatus::Pending),
                     Some(perm_ref),
                     json!({ "title": title, "kind": kind.as_str(), "raw_input": truncate_json(&raw_input, RAW_LIMIT), "options": opts }),
                 )?;
-let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
-                self.notify(&format!("{who} needs permission: {title}"));
+                let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+                self.notify(&if question { format!("{who} asks: {title}") } else { format!("{who} needs permission: {title}") });
                                 self.state = SessionState::Blocked;
                 self.store.update_session(
                     &self.signer,
@@ -1356,12 +1467,18 @@ let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
                         ..Default::default()
                     },
                 )?;
+                let (osc_kind, blocked_kind) = if question {
+                    (axel_rex::osc::Kind::Question, BlockedKind::Question)
+                } else {
+                    (axel_rex::osc::Kind::Permission, BlockedKind::Permission)
+                };
+                self.program_status(axel_rex::osc::State::Blocked, Some(osc_kind), &title);
                 self.store.record_status(
                     &self.signer,
                     &self.cfg.session_id,
                     &StatusReport {
                         state: StatusState::Blocked,
-                        kind: Some(BlockedKind::Permission),
+                        kind: Some(blocked_kind),
                         title: Some(title.clone()),
                         msg: if summary.is_empty() {
                             None
@@ -1399,15 +1516,18 @@ let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
                 acp::PermissionOptionId::new(option_id.to_string()),
             )),
         ));
-        let status = if allowed {
-            ItemStatus::Allowed
-        } else {
-            ItemStatus::Denied
+        let question = option_id.starts_with(crate::claude::ANSWER_PREFIX);
+        let status = match (question, allowed) {
+            (true, _) => ItemStatus::Answered,
+            (false, true) => ItemStatus::Allowed,
+            (false, false) => ItemStatus::Denied,
         };
         self.store
             .update_item(item_id, Some(status), Some(json!({ "answer": option_id })))?;
         if self.pending.is_empty() {
             self.set_state(SessionState::Running)?;
+            let prompt = head(&self.turn_user_text, 200);
+            self.program_status(axel_rex::osc::State::Working, None, &prompt);
             self.store.record_status(
                 &self.signer,
                 &self.cfg.session_id,
@@ -1491,6 +1611,8 @@ let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
             return;
         }
         self.ended = true;
+        // The session is over: its record goes.
+        self.program_status(axel_rex::osc::State::Clear, None, "");
         self.finalize_text();
         self.cancel_pending(reason);
         // Queued prompts never ran: keep them visible as cancelled.

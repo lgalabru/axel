@@ -83,9 +83,34 @@ pub fn describe(ctx: &Ctx, r: &Refusal) -> String {
     }
 }
 
+thread_local! {
+    /// Agents the owner just let the caller reach, for one send (see [`grant_reach_once`]).
+    static REACH_GRANTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// While the returned guard lives, the caller may reach `pubkeys` (message,
+/// and summon if need be): the owner allowed this one message.
+pub fn grant_reach_once(pubkeys: &[String]) -> ReachGrant {
+    REACH_GRANTED.with(|g| g.borrow_mut().extend(pubkeys.iter().cloned()));
+    ReachGrant(pubkeys.to_vec())
+}
+
+/// Ends a [`grant_reach_once`] when dropped.
+pub struct ReachGrant(Vec<String>);
+
+impl Drop for ReachGrant {
+    fn drop(&mut self) {
+        REACH_GRANTED.with(|g| g.borrow_mut().retain(|pk| !self.0.contains(pk)));
+    }
+}
+
+fn reach_granted(pubkey: &str) -> bool {
+    REACH_GRANTED.with(|g| g.borrow().iter().any(|p| p == pubkey))
+}
+
 /// Check that a new session of `target` may start, from whoever is asking.
 pub fn check_summon(ctx: &Ctx, target: &str) -> Result<(Option<String>, Option<axel_store::RuntimeMode>)> {
-    match ctx.store.check_summon(caller_session().as_deref(), target, local_day_start())? {
+    match ctx.store.check_summon_with(caller_session().as_deref(), target, local_day_start(), reach_granted(target))? {
         SummonCheck::Allowed { parent, mode_cap } => Ok((parent, mode_cap)),
         SummonCheck::Refused(r) => bail!("{}", describe(ctx, &r)),
     }
@@ -98,22 +123,24 @@ pub fn check_summon(ctx: &Ctx, target: &str) -> Result<(Option<String>, Option<a
 /// Replying never summons — starting a session still checks reach.
 pub fn check_message(ctx: &Ctx, recipients: &[String]) -> Result<()> {
     let Some(from) = caller_agent() else { return Ok(()) };
-    let reach = ctx.store.agent_policy(&from)?.reach;
-    let mut denied = Vec::new();
-    for r in recipients.iter().filter(|r| **r != from && !reach.allows(r)) {
-        if !ctx.store.agent_policy(r)?.reach.allows(&from) {
-            denied.push(name_of(ctx, r));
-        }
-    }
+    let denied: Vec<String> = denied_reach(ctx, &from, recipients)?.iter().map(|r| name_of(ctx, r)).collect();
     if denied.is_empty() {
         return Ok(());
     }
-    let f = name_of(ctx, &from);
-    bail!(
-        "{f} may not message {}; allow it with `axel agent edit {f} --allow {}`",
-        denied.join(", "),
-        denied.join(",")
-    )
+    bail!("{}", axel_mcp::SendError::NoReach { from: name_of(ctx, &from), to: denied })
+}
+
+/// The recipients (pubkeys) `from` may not message: not in its reach, and not
+/// agents that may reach it (whom it may always answer).
+pub fn denied_reach(ctx: &Ctx, from: &str, recipients: &[String]) -> Result<Vec<String>> {
+    let reach = ctx.store.agent_policy(from)?.reach;
+    let mut denied = Vec::new();
+    for r in recipients.iter().filter(|r| **r != from && !reach.allows(r) && !reach_granted(r)) {
+        if !ctx.store.agent_policy(r)?.reach.allows(from) {
+            denied.push(r.clone());
+        }
+    }
+    Ok(denied)
 }
 
 /// One-line description of a reach, with names.
@@ -122,5 +149,21 @@ pub fn reach_label(ctx: &Ctx, reach: &Reach) -> String {
         Reach::Nobody => "nobody (only you)".into(),
         Reach::Anyone => "any agent".into(),
         Reach::Only(pks) => pks.iter().map(|pk| name_of(ctx, pk)).collect::<Vec<_>>().join(", "),
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+
+    #[test]
+    fn a_one_time_grant_lasts_as_long_as_its_guard() {
+        assert!(!reach_granted("pk-atlas"));
+        {
+            let _g = grant_reach_once(&["pk-atlas".to_string()]);
+            assert!(reach_granted("pk-atlas"));
+            assert!(!reach_granted("pk-nova"), "only who the owner allowed");
+        }
+        assert!(!reach_granted("pk-atlas"), "gone with the guard");
     }
 }

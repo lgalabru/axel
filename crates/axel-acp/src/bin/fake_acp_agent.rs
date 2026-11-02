@@ -125,6 +125,27 @@ fn prompt(
         return;
     }
 
+    if text == "ask" {
+        // A question for the owner, as the Claude adapter asks AskUserQuestion.
+        let resp = request(
+            lines,
+            60,
+            "session/request_permission",
+            json!({
+                "sessionId": sid,
+                "toolCall": { "toolCallId": "toolu_q#0", "title": "Database: Which one?", "kind": "think" },
+                "options": [
+                    { "optionId": "answer:0", "name": "Postgres", "kind": "allow_once" },
+                    { "optionId": "answer:1", "name": "SQLite", "kind": "allow_once" },
+                    { "optionId": "answer:none", "name": "None of these", "kind": "reject_once" }
+                ]
+            }),
+        );
+        let picked = resp.as_ref().and_then(|r| r.pointer("/result/outcome/optionId")).and_then(Value::as_str).unwrap_or("none").to_string();
+        update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": format!("picked {picked}") } }));
+        respond(id, json!({ "stopReason": "end_turn" }));
+        return;
+    }
     if text.contains("thought") {
         update(
             json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "Let me think." } }),

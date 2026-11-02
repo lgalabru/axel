@@ -84,10 +84,25 @@ So:
   the recipient a turn, and an acknowledgement often triggers another one back.
   When you've been asked for something, your next message to them is the
   result; if you have nothing for them yet, send nothing.
+- **News that needs no reply is a note.** Use `send` with `fyi: true` (or
+  `axel send --fyi …`) for things like "FYI: the build passes now". A note
+  starts no turn: the recipient reads it at the start of its next one. It
+  never summons an agent that isn't on the thread. Don't send greetings or
+  "I'm here" at all.
 - **Write `@name` plainly.** Don't bold it or wrap it in backticks inside the
   text you send.
 - Writing `@atlas` in your normal reply does **nothing**. Only `send` /
   `axel send` deliver.
+
+## What you missed
+
+Other agents' turns on your thread are visible only to the owner. So when a turn
+starts after others have spoken, its prompt begins with a catch-up: the other
+agents' recent replies (the newest in full), the owner's messages to them, notes
+left for you, and who else is working on the thread and on what. The owner's
+message comes after the `---`. When the owner asks "what do you think?", the
+catch-up usually holds the reply they mean. If another agent is already doing
+part of the work, don't redo it: build on it or `send` to them.
 
 ## Working on a remote host
 
@@ -109,14 +124,17 @@ If your first prompt says you run on a remote host, the owner is away:
 
 ## When Axel refuses
 
-Agents start with no reach. The owner grants it per agent. An agent that may
+Agents start with no reach. The owner grants it per agent. When you `send` to an
+agent you may not reach, Axel asks the owner on the spot (allow this message, always
+allow, or not), and sends it if they agree. An agent that may
 reach you may always be answered: if nova may message you, you may reply to nova
 with `send`, but only while nova is working on the thread. Replying never
 starts a session. A refusal names the exact command that would allow it:
 
 | Refusal | Meaning | What to do |
 |---|---|---|
-| `nova may not message atlas; allow it with axel agent edit …` | You have no reach to that agent. | Tell the owner what you wanted and quote the command. Don't look for another way in. |
+| `nova may not message atlas; allow it with axel agent edit …` | You have no reach to that agent, and the owner couldn't be asked. | Tell the owner what you wanted and quote the command. Don't look for another way in. |
+| `The owner didn't allow nova to message atlas.` | `send` asked the owner, who said no. | Carry on without it, or tell the owner why you needed it. Don't try another way. |
 | `… is already in this summon chain …` | Summoning it would form a loop. | Do the work yourself, or ask the owner. |
 | `the summon chain would reach depth N …` | Too many agents summoned in a row. | Do the work yourself, or ask the owner. |
 | `… reached its $X daily budget …` | That agent has spent its budget for today. | Tell the owner. |
@@ -135,6 +153,8 @@ axel status working "migrating the auth tests"    # one line the owner sees on t
 axel status blocked --kind question "which DB should staging use?"
 axel status done "PR ready: auth refresh fix"
 axel inbox --agent "$AXEL_AGENT_NAME"             # messages left for you (e.g. while you ran in a pane)
+# read_inbox marks `handled: true` the messages that already reached you as prompts
+# or notes: they're history, not requests. Don't act on them again.
 axel thread show "$AXEL_THREAD"                   # projects, participants, sessions, messages
 ```
 

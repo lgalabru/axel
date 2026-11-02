@@ -43,7 +43,7 @@ base64 = "0.23"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 libc = "0.2"
-rmcp = { version = "3.5", features = ["server", "transport-io", "schemars"] }
+rmcp = { version = "3.5", features = ["server", "transport-io", "schemars", "elicitation"] }
 schemars = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

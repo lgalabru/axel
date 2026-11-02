@@ -26,8 +26,10 @@ pub trait AxelContext: Send + Sync {
     }
 
     /// Send `text` to the agents named in `to`, as `axel send` does.
-    fn send(&self, _to: &[String], _text: &str) -> Result<SendReport, String> {
-        Err("sending is not available in this server".into())
+    /// `grant` is what the owner just allowed (asked by elicitation), never
+    /// something an agent can ask for itself.
+    fn send(&self, _to: &[String], _text: &str, _kind: MessageKind, _grant: Grant) -> Result<SendReport, SendError> {
+        Err(SendError::Failed("sending is not available in this server".into()))
     }
 
     /// Report this session's status, as `axel status` does.
@@ -39,6 +41,58 @@ pub trait AxelContext: Send + Sync {
     fn inbox(&self, _limit: usize) -> Result<Vec<InboxMessage>, String> {
         Err("the inbox is not available in this server".into())
     }
+}
+
+/// Why `send` sent nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendError {
+    /// `from` may not reach the agents `to` (names); the owner can allow it.
+    NoReach { from: String, to: Vec<String> },
+    /// Anything else: policy, budget, a bad name. The message says what.
+    Failed(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::NoReach { from, to } => write!(
+                f,
+                "{from} may not message {}; allow it with `axel agent edit {from} --allow {}`",
+                to.join(", "),
+                to.join(",")
+            ),
+            SendError::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+/// What the owner allowed when asked about a refused reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Grant {
+    /// Nothing: reach is checked as usual.
+    #[default]
+    None,
+    /// This message may reach its recipients.
+    Once,
+    /// The sender may reach them from now on (as `axel agent edit --allow`).
+    Always,
+}
+
+/// What a message asks of its recipients.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MessageKind {
+    /// Something to act on or answer: it starts the recipient's turn, or
+    /// summons the recipient onto the thread.
+    #[default]
+    Request,
+    /// Nothing to act on and no reply needed: the recipient reads it with its
+    /// next turn. It never starts a turn or summons anyone.
+    Fyi,
+}
+
+impl MessageKind {
+    /// The tag a signed message carries when it is [`MessageKind::Fyi`].
+    pub const FYI_TAG: &'static str = "fyi";
 }
 
 /// What `send` did: the signed message, then one outcome per recipient.
@@ -69,6 +123,11 @@ pub enum Outcome {
     Queued,
     /// It wasn't on the thread; a new session started with the message.
     Summoned { session: String },
+    /// A note (no reply needed): the recipient reads it with its next turn.
+    Noted,
+    /// A note for an agent that isn't working on the thread: notes don't
+    /// summon, so it waits in its inbox.
+    NotOnThread,
     /// It runs in a terminal pane; the message waits in its inbox.
     InPane,
     /// No thread to deliver on; the message waits in its inbox.
@@ -87,6 +146,8 @@ impl Outcome {
             Outcome::Delivered => "delivered to its session".into(),
             Outcome::Queued => "busy; queued for its next turn".into(),
             Outcome::Summoned { session } => format!("summoned onto the thread (session {})", &session[..12.min(session.len())]),
+            Outcome::Noted => "noted; it reads it with its next turn".into(),
+            Outcome::NotOnThread => "not working on the thread; a note doesn't summon, so it's left in its inbox".into(),
             Outcome::InPane => "runs in a pane; left in its inbox".into(),
             Outcome::InboxOnly => "not on a thread; left in its inbox".into(),
             Outcome::AwaitingSync => "lives on the owner's machine; delivered when it syncs (within seconds while it's awake)".into(),
@@ -147,6 +208,9 @@ pub struct InboxMessage {
     pub at: u64,
     pub thread: Option<String>,
     pub text: String,
+    /// Already put in front of you on its thread (as a prompt or a note):
+    /// history, not a request to act on again.
+    pub handled: bool,
 }
 
 /// One call's view of the world.

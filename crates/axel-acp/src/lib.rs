@@ -15,6 +15,7 @@ mod agent_rpc;
 pub mod claude;
 pub mod codex;
 pub mod attach;
+pub mod catchup;
 mod host;
 pub mod log;
 pub mod policy;

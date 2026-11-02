@@ -72,6 +72,10 @@ pub enum Command {
     Send {
         /// Message text; `@name` mentions are resolved to recipients.
         text: Vec<String>,
+        /// News that needs no reply: read with the recipient's next turn,
+        /// never starting one or summoning anyone.
+        #[arg(long)]
+        fyi: bool,
     },
     /// Print an inbox.
     Inbox {
@@ -261,6 +265,9 @@ pub enum ThreadCommand {
     Stream { thread: String },
     /// Only the composer: prompt, queue, approvals, mode (the bottom pane of `split`).
     Compose { thread: String },
+    /// One question an agent asked, to answer (the floating pane the composer opens).
+    #[command(hide = true)]
+    Answer { thread: String, item: String },
     /// Continue a thread: a new session resuming its last harness conversation.
     Resume {
         thread: String,
