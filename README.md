@@ -7,7 +7,6 @@
 # Axel
 
 **Agent orchestration, designed for [Rex](https://www.superlogical.com/rex).**
-Website: [axel.md](https://axel.md) · docs: [docs.axel.md](https://docs.axel.md).
 
 A year of agent apps taught us what works. Axel keeps those ideas and brings them back to the
 terminal:
@@ -51,7 +50,8 @@ See `docs/DESIGN.md`. Install: `just install` (release build, symlinked into `~/
 
 | | |
 |---|---|
-| `axel` | floating launcher / inbox (inline when not in Rex) |
+| `axel` | floating launcher / inbox (inline when not in Rex); the first time, runs `axel setup` |
+| `axel setup` | check this machine (Rex, harnesses, ACP adapters) and create an agent, interactively |
 | `axel ui [--screen launch\|inbox]` | what the floating pane runs |
 | `axel agent new NAME [--harness claude\|codex\|opencode] [--model M] [--skills a,b\|*]` | create an agent (key, attestation, record) |
 | `axel agent ls\|show\|archive` | |
@@ -76,7 +76,8 @@ See `docs/DESIGN.md`. Install: `just install` (release build, symlinked into `~/
   the Agent Client Protocol. You work in the **thread view**: your messages, the agent's prose,
   questions inline; tool bursts fold into one line (Space expands); `l` jumps to the host pane,
   which prints the raw frames. Permissions are decided by Axel's policy, never by a dialog.
-  Adapters: `npm i -g @zed-industries/claude-code-acp` (Claude), `codex-acp` (Codex), `goose acp`.
+  Claude's and Codex's adapters are built in (`axel claude-acp` drives the `claude` CLI,
+  `axel codex-acp` drives `codex app-server`: no Node). Others: `opencode acp`, `goose acp`.
 - **pane**: the harness's own CLI in a Rex pane; status via hooks.
 
 ## Autopilot

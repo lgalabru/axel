@@ -3,19 +3,21 @@ title: Quick start
 description: Create an agent, give it something to do, and follow along.
 ---
 
-## 1. Create an agent
+## 1. Run axel
 
 ```bash
-axel agent new atlas --harness claude --color orange
+axel
 ```
 
-This generates atlas's key, stores it in your keychain, and signs an attestation that you
-own it. You can also create agents from the launcher the first time you press Enter.
+The first time, Axel walks you through setup: it checks your machine, then creates your
+first agent. Name it (say `atlas`), pick its harness, a few skills, a colour and a mode.
+That generates its key, stores it in your keychain, and signs an attestation that you own
+it. Later agents: `axel setup` again, or `axel agent new`.
 
-## 2. Open Axel
+## 2. The launcher
 
-In any Rex terminal, run `axel` (or press your [key binding](/installation#a-key-binding)).
-Two panes float over the window:
+Setup ends in the launcher. From then on, run `axel` in any Rex terminal (or press your
+[key binding](/installation#a-key-binding)). Two panes float over the window:
 
 ```text
 ╭ why not today? ────────────────────────────────────────────────────╮

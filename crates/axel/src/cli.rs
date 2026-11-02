@@ -76,6 +76,14 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Get this machine ready and create an agent (runs by itself the first time).
+    Setup,
+    /// The built-in Claude Code ACP agent (what managed Claude sessions run).
+    #[command(name = "claude-acp", hide = true)]
+    ClaudeAcp,
+    /// The built-in Codex ACP agent (what managed Codex sessions run).
+    #[command(name = "codex-acp", hide = true)]
+    CodexAcp,
     /// Check Rex, keystore and database health.
     Doctor,
     /// Start the MCP server on stdio (for MCP client integration).

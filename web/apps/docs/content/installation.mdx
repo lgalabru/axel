@@ -17,22 +17,35 @@ description: Rex, Axel, and the harness your agents run.
 ```bash
 git clone https://github.com/lgalabru/axel && cd axel
 just install    # release build, linked into ~/.local/bin and ~/.cargo/bin
-axel doctor     # checks Rex, the keychain and the database
+axel
 ```
 
-The first run creates your **owner key** (an Ed25519 key kept in the macOS keychain) and
-the local database at `~/.axel/axel.db`.
+## First run
+
+The first time, `axel` runs **`axel setup`** before anything else:
+
+- it checks this machine: Rex, git, and which harnesses (Claude Code, Codex, OpenCode) and
+  ACP adapters are installed, and offers to install a missing adapter;
+- it creates your first agent: a name, its harness, a few skills, a colour and a runtime
+  mode;
+- for Claude Code on autopilot, it offers to accept Claude Code's one-time bypass prompt;
+- then it opens the launcher.
+
+It also creates your **owner key** (an Ed25519 key kept in the macOS keychain) and the local
+database at `~/.axel/axel.db`. Run `axel setup` again any time to add another agent, and
+`axel doctor` to check everything is in order.
 
 ## Managed sessions (recommended)
 
 Axel drives agents best over the [Agent Client Protocol](https://agentclientprotocol.com):
 you then work in Axel's own thread view, and permissions are decided by your policies
-rather than by a dialog in some pane. Install the adapter for your harness:
+rather than by a dialog in some pane.
 
-```bash
-npm i -g @zed-industries/claude-code-acp   # Claude Code
-# codex-acp for Codex, `goose acp` for Goose
-```
+- **Claude Code:** nothing to install. Axel's adapter is built in and drives the `claude`
+  CLI directly; no Node or npm needed.
+- **Codex:** nothing to install either. Axel's adapter drives your `codex` through
+  `codex app-server`, so it always runs your Codex version, config and login.
+- **OpenCode:** ACP is built into OpenCode itself (`opencode acp`).
 
 Without an adapter, an agent runs as its normal CLI in a Rex pane, and reports its status
 through hooks that Axel installs at launch.

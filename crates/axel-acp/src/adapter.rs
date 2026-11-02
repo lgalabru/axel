@@ -6,7 +6,7 @@ use axel_store::Harness;
 ///
 /// Overridable with `AXEL_ACP_<HARNESS>` (harness name upper-cased, non
 /// alphanumerics as `_`; e.g. `AXEL_ACP_CLAUDE="npx -y @zed-industries/claude-code-acp"`).
-/// Defaults: claude → `claude-code-acp`, codex → `codex-acp`, opencode →
+/// Defaults: claude → `axel claude-acp`, codex → `axel codex-acp` (both built in), opencode →
 /// `opencode acp`, custom `goose` → `goose acp`, any other custom command is
 /// split like a shell would (quotes honoured, no expansion).
 pub fn adapter_command(harness: &Harness) -> Vec<String> {
@@ -36,8 +36,19 @@ pub fn env_var_name(harness: &Harness) -> String {
 
 fn default_command(harness: &Harness) -> Vec<String> {
     match harness {
-        Harness::Claude => vec!["claude-code-acp".into()],
-        Harness::Codex => vec!["codex-acp".into()],
+        // Built in: `axel claude-acp` drives the `claude` CLI directly (see
+        // `crate::claude`).  `AXEL_ACP_CLAUDE=claude-code-acp` goes back to
+        // Zed's Node adapter.
+        Harness::Claude => match std::env::current_exe() {
+            Ok(exe) => vec![exe.to_string_lossy().into_owned(), "claude-acp".into()],
+            Err(_) => vec!["axel".into(), "claude-acp".into()],
+        },
+        // Built in too: `axel codex-acp` drives `codex app-server` (see
+        // `crate::codex`).  `AXEL_ACP_CODEX=codex-acp` goes back to Zed's.
+        Harness::Codex => match std::env::current_exe() {
+            Ok(exe) => vec![exe.to_string_lossy().into_owned(), "codex-acp".into()],
+            Err(_) => vec!["axel".into(), "codex-acp".into()],
+        },
         Harness::Opencode => vec!["opencode".into(), "acp".into()],
         Harness::Custom(cmd) => {
             let parts = shell_split(cmd);
@@ -105,8 +116,10 @@ mod tests {
 
     #[test]
     fn defaults() {
-        assert_eq!(adapter_command(&Harness::Claude), vec!["claude-code-acp"]);
-        assert_eq!(adapter_command(&Harness::Codex), vec!["codex-acp"]);
+        let claude = adapter_command(&Harness::Claude);
+        assert_eq!(claude.len(), 2, "{claude:?}");
+        assert_eq!(claude[1], "claude-acp", "the built-in adapter: this binary's `claude-acp`");
+        assert_eq!(adapter_command(&Harness::Codex)[1], "codex-acp", "built in");
         assert_eq!(adapter_command(&Harness::Opencode), vec!["opencode", "acp"]);
         assert_eq!(
             adapter_command(&Harness::Custom("goose".into())),

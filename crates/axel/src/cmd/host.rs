@@ -314,11 +314,11 @@ fn handle(req: Request) -> Result<Response> {
     Ok(match req {
         Request::Hello => {
             let env = ctx.store.local_environment()?;
-            let missing = ["git", "node", "claude", "claude-code-acp"]
-                .into_iter()
-                .filter(|p| launch::which(p).is_none())
-                .map(String::from)
-                .collect();
+            // The Claude adapter is built into axel; node only matters to install Claude Code.
+            let mut missing: Vec<String> = ["git", "claude"].into_iter().filter(|p| launch::which(p).is_none()).map(String::from).collect();
+            if missing.iter().any(|m| m == "claude") && launch::which("node").is_none() {
+                missing.push("node".into());
+            }
             Response::Hello {
                 environment_id: env.id,
                 label: env.label,
@@ -451,9 +451,6 @@ fn install_deps(target: &str, missing: &[String]) -> Result<()> {
     }
     if missing.iter().any(|m| m == "claude") {
         steps.push("npm install -g @anthropic-ai/claude-code");
-    }
-    if missing.iter().any(|m| m == "claude-code-acp") {
-        steps.push("npm install -g @zed-industries/claude-code-acp");
     }
     if missing.iter().any(|m| m == "git") {
         bail!("git is missing on {target}: install the Xcode command line tools there (xcode-select --install)");

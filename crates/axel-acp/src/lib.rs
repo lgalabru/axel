@@ -11,6 +11,9 @@
 //! docs/CONTRACTS.md "axel-acp".
 
 mod adapter;
+mod agent_rpc;
+pub mod claude;
+pub mod codex;
 pub mod attach;
 mod host;
 pub mod log;

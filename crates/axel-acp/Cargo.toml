@@ -11,6 +11,30 @@ path = "src/bin/fake_acp_agent.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fake_claude"
+path = "src/bin/fake_claude.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "claude_acp"
+path = "src/bin/claude_acp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fake_codex"
+path = "src/bin/fake_codex.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "codex_acp"
+path = "src/bin/codex_acp.rs"
+test = false
+doc = false
+
 [dependencies]
 axel-identity.workspace = true
 axel-store.workspace = true
@@ -22,6 +46,7 @@ tokio = { workspace = true, features = ["net", "fs"] }
 futures = "0.3"
 chrono.workspace = true
 base64.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

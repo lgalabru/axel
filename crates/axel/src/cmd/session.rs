@@ -77,11 +77,9 @@ pub fn log_path(session_id: &str) -> PathBuf {
 
 /// `_meta` for `session/new`: Claude gets the guard-only hook settings through
 /// the adapter's `claudeCode.options.extraArgs` (`--settings <file>`).
-/// Run the adapter on the `claude` you have installed, not the one bundled
-/// in its SDK: the bundled one lags (claude-code-acp 0.16 ships a Claude Code
-/// that only knows Opus 4.6 / Sonnet 4.5), so agents asked to use `fable` or a
-/// current model would silently get the bundled default.  Pane sessions run
-/// the installed `claude` too, so both kinds of session behave alike.
+/// The adapter runs the `claude` you have installed (the built-in one starts
+/// `$CLAUDE_CODE_EXECUTABLE`; Zed's Node adapter would otherwise use the one
+/// bundled in its SDK, which lags), so pane and managed sessions behave alike.
 /// `$CLAUDE_CODE_EXECUTABLE`, when set, wins.
 fn claude_executable_env() -> Option<(String, String)> {
     if let Ok(v) = std::env::var("CLAUDE_CODE_EXECUTABLE")
@@ -95,6 +93,12 @@ fn claude_executable_env() -> Option<(String, String)> {
 }
 
 fn session_meta(agent: &axel_store::Agent) -> Option<serde_json::Map<String, serde_json::Value>> {
+    // Codex gets who it is as developer instructions (the built-in adapter
+    // reads `systemPrompt.append`); the Claude extras below don't apply.
+    if agent.harness == axel_store::Harness::Codex {
+        let meta = serde_json::json!({ "systemPrompt": { "append": super::launch::identity_prompt(agent) } });
+        return meta.as_object().cloned();
+    }
     if agent.harness != axel_store::Harness::Claude {
         return None;
     }

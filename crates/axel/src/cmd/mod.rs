@@ -11,6 +11,7 @@ mod log;
 mod policy;
 mod reconcile;
 mod session;
+mod setup;
 mod status;
 mod thread;
 mod ui;
@@ -65,7 +66,22 @@ impl Ctx {
 
 pub fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        None => ui::open_launcher(),
+        None => {
+            // The first time, with no agent yet: walk through setup, then open.
+            if setup::interactive() && Ctx::open().map(|c| setup::needed(&c)).unwrap_or(false) {
+                return match setup::run()? {
+                    setup::Next::Open => ui::open_launcher(),
+                    setup::Next::Quit => Ok(()),
+                };
+            }
+            ui::open_launcher()
+        }
+        Some(Command::ClaudeAcp) => axel_acp::claude::serve_stdio(),
+        Some(Command::CodexAcp) => axel_acp::codex::serve_stdio(),
+        Some(Command::Setup) => match setup::run()? {
+            setup::Next::Open => ui::open_launcher(),
+            setup::Next::Quit => Ok(()),
+        },
         Some(Command::Ui { screen, thread }) => ui::run_inline(screen, thread),
         Some(Command::Session { command }) => session::run(command),
         Some(Command::Log { session, follow }) => log::run(&session, follow),

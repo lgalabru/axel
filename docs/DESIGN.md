@@ -450,8 +450,44 @@ Imports: see `IMPORTS.md`. Nothing is copied with its relay/tmux/Tauri coupling.
 
 The `pane` runtime (the native CLI in a Rex pane) stays. The **managed** runtime is what
 makes the thread the place you work: Axel drives the harness over **ACP** (Agent Client
-Protocol, JSON-RPC over stdio) and owns the conversation. One protocol covers Claude
-(`claude-code-acp`), Codex (`codex-acp`), Goose (`goose acp`) and others.
+Protocol, JSON-RPC over stdio) and owns the conversation. One protocol covers Claude,
+Codex, OpenCode (`opencode acp`), Goose (`goose acp`) and others.
+
+**Claude's adapter is built in** (`axel claude-acp`, `axel-acp/src/claude/`): a Rust port of
+Zed's `claude-code-acp` 0.16.2 that drives the `claude` CLI directly, the way Anthropic's
+Agent SDK does (`--output-format stream-json --input-format stream-json
+--permission-prompt-tool stdio`, plus the SDK's control protocol: `initialize` with the
+appended system prompt and a PostToolUse hook, `can_use_tool`, `interrupt`,
+`set_permission_mode`, `set_model`). Up to the host it sends the same ACP as the Node
+adapter: message and thought chunks, tool calls with the same titles, kinds, diffs and
+locations, plans, slash commands, the same permission options and stop reasons, the same
+replay on `session/load`. One difference on purpose: Claude uses its native Read / Write /
+Edit / Bash instead of the adapter's `mcp__acp__*` stand-ins (Axel's `fs/*` handlers read
+and write the disk just like them), which also saves Claude a ToolSearch round trip per
+turn. No Node or npm is needed; `AXEL_ACP_CLAUDE=claude-code-acp` goes back to Zed's.
+`crates/axel-acp/tests/claude_acp.rs` checks it against a fake `claude`.
+
+**So is Codex's** (`axel codex-acp`, `axel-acp/src/codex/`). Zed's `codex-acp` compiles
+OpenAI's engine in (codex-core, pinned to one Codex release), so it lags the `codex` you
+have installed: it can't use models newer than its pin. Axel's drives your `codex` over
+its own JSON-RPC protocol, `codex app-server` (`thread/start` or `thread/resume`,
+`turn/start` with the session's approval policy, sandbox and model, `turn/interrupt`,
+`model/list`, `review/start`, `thread/compact/start`), and answers Codex's command,
+file-change and permission approvals from the host. Up to the host it sends what `codex-acp`
+0.16.0 sends: chunks, tool calls with its titles, kinds, locations and diffs, plans, usage,
+its slash commands and permission options, replay on `session/load`. On purpose, it differs
+in three ways:
+
+- it takes the host's mode ids, each an approval policy and a sandbox:
+  - `default` asks unless the action is known to be safe, in a workspace-write sandbox;
+  - `acceptEdits` asks on request, in a workspace-write sandbox;
+  - `plan` is read-only;
+  - `bypassPermissions` never asks and has no sandbox;
+- it supports `session/set_model`;
+- it passes the identity prompt as Codex developer instructions.
+
+`AXEL_ACP_CODEX=codex-acp` goes back to Zed's. `crates/axel-acp/tests/codex_acp.rs` checks it
+against a fake app-server.
 
 ```
 thread view (TUI, any pane) ──unix socket──▶ axel session host <id> ──stdio/ACP──▶ adapter ──▶ harness

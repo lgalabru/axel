@@ -4,7 +4,8 @@ description: Every axel command. `axel <command> --help` has the flags.
 ---
 
 `axel` with no arguments opens the launcher (inside Rex, as floating panes; elsewhere,
-inline). Run it again to close it. Everything else is a subcommand.
+inline). Run it again to close it. The first time, with no agent yet, it runs `axel setup`
+first. Everything else is a subcommand.
 
 ## Agents
 
@@ -62,4 +63,5 @@ Thread and session ids accept any unique prefix.
 | `axel ui [--screen launch\|threads\|dashboard\|inbox]` | What the floating panes run. |
 | `axel mcp` | The MCP server, on stdio. |
 | `axel hook claude\|codex` | The hook sink; installed for you at launch. |
+| `axel setup` | Check this machine and create an agent, interactively. Runs by itself the first time. |
 | `axel doctor` | Check Rex, the keychain and the database. |
