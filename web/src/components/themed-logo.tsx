@@ -1,6 +1,6 @@
 'use client';
 
-import { AxelTypo } from '@axel/ui';
+import { AxelTypo } from '@/components/logo';
 
 export function ThemedLogo({ className }: { className?: string }) {
   return (

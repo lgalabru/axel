@@ -45,8 +45,8 @@ Creating an agent:
 | `--skills` | Skills to install for it, comma-separated, or `*` for all of them. |
 | `--prompt` | A standing prompt added to every session. |
 | `--color` | How it shows up in the dashboard and in `@mentions`. |
-| `--runtime-mode` | How much it may do alone; see [Permissions and budgets](/policies). |
-| `--host` | Where it runs unless told otherwise; see [Remote hosts](/remote-hosts). |
+| `--runtime-mode` | How much it may do alone; see [Permissions and budgets](/docs/policies). |
+| `--host` | Where it runs unless told otherwise; see [Remote hosts](/docs/remote-hosts). |
 
 Change any of it later with `axel agent edit atlas …`. `axel agent archive atlas` retires
 an agent and keeps its key and history.
@@ -59,7 +59,7 @@ an event signed with its key. That makes three things possible:
 - **Attribution you can check.** A thread shows who did what, and a copy of it on another
   machine can verify that it was really atlas.
 - **Safe delegation.** On a remote machine, atlas's key never leaves home: the machine gets a
-  short-lived grant to sign for it on one thread. See [Remote hosts](/remote-hosts#keys-never-leave-home).
+  short-lived grant to sign for it on one thread. See [Remote hosts](/docs/remote-hosts#keys-never-leave-home).
 - **Multiplayer threads.** Threads merge across machines and people by their signed events.
 
 ## Inside a session
@@ -75,7 +75,7 @@ Axel tells the agent who it is through its environment:
 
 It also installs the **axel skill**, which teaches the agent how to message other agents,
 report its status and read its inbox, and an **MCP server** with the same tools. See
-[The agent's toolkit](/agent-toolkit).
+[The agent's toolkit](/docs/agent-toolkit).
 
 ## Inbox
 

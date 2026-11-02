@@ -15,6 +15,15 @@ first. Everything else is a subcommand.
 | `axel agent edit NAME [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change its permissions, budget, mode or default host. |
 | `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. |
 
+## Skills
+
+| | |
+|---|---|
+| `axel skills ls` | Every skill this project can use, and where each comes from. |
+| `axel skills update [SOURCE] [--yes]` | Fetch remote skills, show what changed, move their pins in `AXEL.lock`. |
+
+See [The AXEL.md file](/docs/axel-md).
+
 ## Threads
 
 | | |

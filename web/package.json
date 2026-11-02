@@ -3,17 +3,35 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "turbo dev",
-    "dev:www": "turbo dev --filter=@axel/www",
-    "dev:docs": "turbo dev --filter=@axel/docs",
-    "build": "turbo build",
-    "build:www": "turbo build --filter=@axel/www",
-    "build:docs": "turbo build --filter=@axel/docs",
-    "lint": "turbo lint",
-    "clean": "turbo clean && rm -rf node_modules"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^1.5.0",
+    "clsx": "^2.1.1",
+    "fumadocs-core": "^16.2.5",
+    "fumadocs-mdx": "^14.1.1",
+    "fumadocs-ui": "^16.2.5",
+    "lucide-react": "^0.468.0",
+    "next": "^16.1.1",
+    "next-themes": "^0.4.4",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
-    "turbo": "^2.4.4"
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/mdx": "^2.0.13",
+    "@types/node": "^25.0.3",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.23",
+    "eslint": "^9.39.2",
+    "eslint-config-next": "^16.1.1",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.9.3"
   },
   "packageManager": "pnpm@10.0.0"
 }

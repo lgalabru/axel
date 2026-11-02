@@ -1,17 +1,20 @@
 # axel.md
 
-The Axel website: `apps/www` is the landing page (https://axel.md), `apps/docs` the
-documentation (https://docs.axel.md, Fumadocs, pages in `apps/docs/content/*.mdx`).
+The Axel website, one Next.js app: the landing page at `/` (`src/app/(home)`) and the
+documentation at `/docs` (`src/app/(docs)`, Fumadocs, pages in `content/docs/*.mdx`).
+Each half has its own root layout and stylesheet, so their styles never mix.
 
 ```bash
 pnpm install
-pnpm dev:www     # http://localhost:3000
-pnpm dev:docs    # http://localhost:3001
+pnpm dev         # http://localhost:3000 and http://localhost:3000/docs
 pnpm build
 ```
 
-URLs live in `apps/www/src/lib/site.ts`.
+URLs live in `src/lib/site.ts`. On Vercel, the project's root directory is `web`.
+Requests to the old `docs.axel.md` redirect to `axel.md/docs` (see `next.config.mjs`),
+as long as that domain stays attached to the project.
 
+The favicons in `src/app` are cut from `assets/axel-icon-source.png`.
 `assets/make-mascot.py` cuts the mascot out of `assets/axel-mascot-source.png` (its checkerboard is painted in) and writes the hero image, icons and social preview. Run it from `web/`.
 
 ## README banner

@@ -40,7 +40,7 @@ out = src.convert('RGBA'); out.putalpha(mask)
 bbox = mask.point(lambda v: 255 if v > 8 else 0).getbbox()
 m = out.crop(bbox); m.save('assets/axel-mascot.png', optimize=True)
 INK = (15, 18, 16, 255)
-m.save('apps/www/public/mascot.webp', 'WEBP', quality=90, method=6)
+m.save('public/mascot.webp', 'WEBP', quality=90, method=6)
 def tile(size, pad=0.08, round_=True):
     c = Image.new('RGBA', (size, size), INK); inner = int(size * (1 - 2 * pad)); s = inner / max(m.size)
     mm = m.resize((int(m.width * s), int(m.height * s)), Image.LANCZOS)
@@ -48,10 +48,8 @@ def tile(size, pad=0.08, round_=True):
     if round_:
         k = Image.new('L', (size, size), 0); ImageDraw.Draw(k).rounded_rectangle((0, 0, size - 1, size - 1), radius=int(size * 0.225), fill=255); c.putalpha(k)
     return c
-for app in ('www', 'docs'):
-    tile(512).save(f'apps/{app}/src/app/icon.png', optimize=True)
-    tile(180, round_=False).convert('RGB').save(f'apps/{app}/src/app/apple-icon.png', optimize=True)
-tile(256).save('apps/docs/public/mascot-icon.png', optimize=True)
+# The favicons (src/app/icon.png, apple-icon.png, favicon.ico) come from axel-icon-source.png.
+tile(256).save('public/mascot-icon.png', optimize=True)
 og = Image.new('RGBA', (1200, 630), INK); h = 540; mm = m.resize((int(m.width * h / m.height), h), Image.LANCZOS)
-og.alpha_composite(mm, ((1200 - mm.width) // 2, (630 - h) // 2)); og.convert('RGB').save('apps/www/public/og.png', optimize=True)
+og.alpha_composite(mm, ((1200 - mm.width) // 2, (630 - h) // 2)); og.convert('RGB').save('public/og.png', optimize=True)
 print(m.size)

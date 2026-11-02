@@ -1,6 +1,6 @@
 /** Where the site, its docs and its code live. */
 export const SITE = "https://axel.md";
-export const DOCS = "https://docs.axel.md";
+export const DOCS = "/docs";
 export const REPO = "https://github.com/lgalabru/axel";
 
 export const TITLE = "Axel: agent orchestration, designed for Rex";

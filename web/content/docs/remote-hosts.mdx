@@ -52,7 +52,7 @@ axel agent edit atlas --host mini       # `--host local` brings it home
    aren't touched.
 3. **The agent** starts in a worktree on its own branch, in a managed session on the
    host's Rex, on autopilot: nobody is there to answer prompts, and the guard hook still
-   runs. Its [permissions and budget](/policies) and the agents it may reach go with it.
+   runs. Its [permissions and budget](/docs/policies) and the agents it may reach go with it.
    Rex on the host notifies you when a turn ends or something needs you.
 4. **Your laptop follows along** while the host has live sessions: the thread view streams
    as if the agent ran locally. It backs off while the laptop sleeps and catches up after.
@@ -60,7 +60,7 @@ axel agent edit atlas --host mini       # `--host local` brings it home
 Prompts, steering, approvals and messages you send to that session are relayed to the
 host. When you're back, its branch (and any uncommitted work) is fetched home.
 
-Agents on the host can [message agents on your laptop](/messaging): those messages are
+Agents on the host can [message agents on your laptop](/docs/messaging): those messages are
 delivered when your laptop syncs, under the sender's permissions.
 
 ## Keys never leave home
