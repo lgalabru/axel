@@ -3,6 +3,7 @@ import { RootProvider } from 'fumadocs-ui/provider/next';
 import { DocsLayout } from 'fumadocs-ui/layouts/docs';
 import type { ReactNode } from 'react';
 import { source } from '@/lib/source';
+import { SITE } from '@/lib/site';
 import { SidebarLogo } from '@/components/themed-logo';
 import './globals.css';
 
@@ -12,6 +13,13 @@ export const metadata = {
     default: 'axel Documentation',
   },
   description: 'Axel: agent orchestration, designed for Rex.',
+  metadataBase: new URL(SITE),
+  openGraph: {
+    siteName: 'Axel',
+    type: 'website',
+    images: [{ url: '/og.png', width: 1280, height: 640, alt: 'Axel: agent orchestration, designed for Rex' }],
+  },
+  twitter: { card: 'summary_large_image', images: ['/og.png'] },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

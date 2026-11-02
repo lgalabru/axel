@@ -50,6 +50,4 @@ def tile(size, pad=0.08, round_=True):
     return c
 # The favicons (src/app/icon.png, apple-icon.png, favicon.ico) come from axel-icon-source.png.
 tile(256).save('public/mascot-icon.png', optimize=True)
-og = Image.new('RGBA', (1200, 630), INK); h = 540; mm = m.resize((int(m.width * h / m.height), h), Image.LANCZOS)
-og.alpha_composite(mm, ((1200 - mm.width) // 2, (630 - h) // 2)); og.convert('RGB').save('public/og.png', optimize=True)
-print(m.size)
+# public/og.png is assets/axel-og.png, copied as-is.

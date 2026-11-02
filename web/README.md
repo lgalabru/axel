@@ -14,7 +14,7 @@ URLs live in `src/lib/site.ts`. On Vercel, the project's root directory is `web`
 Requests to the old `docs.axel.md` redirect to `axel.md/docs` (see `next.config.mjs`),
 as long as that domain stays attached to the project.
 
-The favicons in `src/app` are cut from `assets/axel-icon-source.png`.
+The favicons in `src/app` are cut from `assets/axel-icon-source.png`; `public/og.png` is `assets/axel-og.png`.
 `assets/make-mascot.py` cuts the mascot out of `assets/axel-mascot-source.png` (its checkerboard is painted in) and writes the hero image, icons and social preview. Run it from `web/`.
 
 ## README banner
