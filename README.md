@@ -20,9 +20,11 @@ terminal:
   another model and a review skill. Each has its own Ed25519 key, permissions and budget, and
   loads only its own skills.
 - **The terminal**, from Rex. Agent apps rebuilt the terminal because it couldn't keep work
-  alive, show who's waiting on you, or reach your other machines. Rex can: durable sessions,
-  the Program Status Protocol (`OSC 7501`), Tailscale built in, and a server API programs can
-  drive. Axel is just a program in a Rex pane, and your Mac mini on the tailnet is a host
+  alive, show who's waiting on you, reach your other machines, or even scroll: a long agent
+  conversation in a full-screen TUI, or inside tmux, is junk the moment you scroll up. Rex
+  fixes all of it: durable sessions, the Program Status Protocol (`OSC 7501`), Tailscale
+  built in, real scrollback, and a server API programs can drive. A thread streams into its
+  pane as plain output, so it scrolls like anything else. Axel is just a program in a Rex pane, and your Mac mini on the tailnet is a host
   (`@atlas@mini`). See [Why Rex](https://docs.axel.md/why-rex).
 
 ```

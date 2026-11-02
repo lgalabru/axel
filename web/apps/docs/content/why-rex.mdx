@@ -19,7 +19,10 @@ They had to. The terminal they started from couldn't:
 - keep work alive when you disconnect, close the window or switch devices;
 - tell you, reliably, that a program is waiting on *you*;
 - reach your other machines without opening them up to the internet;
-- be arranged by a program, so a tool could lay out the panes it needs.
+- be arranged by a program, so a tool could lay out the panes it needs;
+- scroll. An agent's conversation in a full-screen TUI redraws over itself, and inside tmux
+  you're in copy mode, scrolling a screen that was never meant to be scrolled. A long
+  session's history is junk the moment you scroll up.
 
 So the agent ended up in an app, and you ended up with one more window that isn't your
 terminal.
@@ -64,6 +67,15 @@ exposed to the internet, and the machine doesn't even need Tailscale installed.
 (`rex -S mini`). `@aaron@mini` starts aaron in the mini's Rex session, and you can watch his
 pane from anywhere on your tailnet. See [Remote hosts](/remote-hosts).
 
+### Scrollback that's the terminal's
+
+In Rex each block keeps its own scrollback, and Rex is the terminal: no multiplexer layer in
+between turning your wheel into arrow keys, no copy mode.
+
+**Axel builds on it:** a thread's conversation streams into its pane as plain terminal output,
+not a full-screen redraw, so a day of agent work scrolls, selects and searches like any other
+output. The composer lives in its own small pane below it.
+
 ### A terminal programs can drive
 
 Everything Rex does is a [server API](https://www.superlogical.com/rex/docs/automate/server-api.md)
@@ -85,6 +97,7 @@ With that foundation, the good ideas don't need an app anymore:
 | **Named agents** | Buzz, skills.sh | Agents with keys, their own skills, permissions and budgets. See [Agents and identity](/agents). |
 | **Agents elsewhere** | Remote agent apps | Rex hosts on your tailnet. See [Remote hosts](/remote-hosts). |
 | **Knowing who needs you** | Per-app status lights | `OSC 7501`, shown by Rex everywhere. |
+| **Reading a long conversation** | Each app's own scrolling view | Plain output in a Rex pane, native scrollback. |
 
 You keep your terminal, your shell, your keys, and the agents' native CLIs. Axel adds the
 layer around them.

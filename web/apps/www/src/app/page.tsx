@@ -314,30 +314,8 @@ function Specialists() {
   );
 }
 
-/** What Rex gives Axel, one tile each. */
+/** Why Rex is the foundation. */
 function RexFoundation() {
-  const tiles = [
-    {
-      title: "Sessions that outlive you",
-      body: "A Rex session keeps every pane alive across disconnects, reboots of your laptop and switches of device. Agents run in it, not in a window you might close.",
-      code: "rex -S mini",
-    },
-    {
-      title: "Status the terminal understands",
-      body: "Rex's Program Status Protocol lets a program say it is working, done, or blocked on a permission, a question or a login. Axel reports every agent through it, so Rex's tabs and session picker show who needs you.",
-      code: "OSC 7501 ; state=blocked:kind=permission",
-    },
-    {
-      title: "Tailscale, built in",
-      body: "A Rex server joins your tailnet as its own device, and only its owner gets in. Your Mac mini at home is one host name away, from anywhere, with nothing exposed to the internet.",
-      code: "https://rex-mini.<tailnet>.ts.net",
-    },
-    {
-      title: "A terminal programs can drive",
-      body: "Everything Rex does is a server API: floating panes, splits, labels, events. Axel is just a program in a Rex pane using it, and your agents can use it too, through Rex's own skill.",
-      code: "session.new_layer · session.new_split",
-    },
-  ];
   return (
     <section id="rex" className="relative mx-auto max-w-5xl scroll-mt-16 px-6 py-24">
       <p className="text-spectrum mb-3 inline-block text-sm font-semibold uppercase tracking-widest">The foundation</p>
@@ -345,25 +323,20 @@ function RexFoundation() {
       <div className="max-w-3xl space-y-4 text-lg leading-relaxed text-muted">
         <p>
           The agent apps of the past year found the right ideas, then rebuilt the terminal badly to deliver them: their own windows, their own status lights, their own way to
-          reach a remote machine. They had to, because the terminal couldn&apos;t keep work alive, couldn&apos;t tell you a program was waiting on you, and didn&apos;t know
-          your other machines.
+          reach a remote machine. They had to. The terminal couldn&apos;t keep work alive, couldn&apos;t tell you a program was waiting on you, didn&apos;t know your other
+          machines, and couldn&apos;t even scroll: a long agent conversation in a full-screen TUI, or inside tmux, is junk the moment you scroll up.
         </p>
         <p>
           <a href={REX} className="text-fg underline decoration-pink/60 underline-offset-4 hover:decoration-pink">
             Rex
           </a>
           , by Superlogical, starts from scratch on what a terminal session is: a durable session around the work itself, driven by software while you can always see and take
-          control of it. Axel builds on exactly that.
+          control of it. Sessions survive disconnects and devices. Programs report when they&apos;re working, done or blocked on you, and Rex shows it on the tab. Servers join
+          your tailnet on their own. Scrollback is the terminal&apos;s, not a TUI&apos;s redraw. And every bit of it is an API a program can drive.
         </p>
-      </div>
-      <div className="mt-12 grid gap-4 md:grid-cols-2">
-        {tiles.map((t) => (
-          <div key={t.title} className="rounded-2xl border border-line bg-surface p-6">
-            <h3 className="text-lg font-semibold text-fg">{t.title}</h3>
-            <p className="mt-2 text-base leading-relaxed text-muted">{t.body}</p>
-            <div className="mt-4 truncate font-mono text-[13px] text-violet">{t.code}</div>
-          </div>
-        ))}
+        <p>
+          Axel is just a program in a Rex pane, built on exactly that. A thread streams into its pane as plain terminal output, so you scroll it like anything else.
+        </p>
       </div>
     </section>
   );
