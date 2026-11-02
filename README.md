@@ -7,7 +7,6 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/scarce/axel/actions/workflows/release.yml"><img alt="Release" src="https://github.com/scarce/axel/actions/workflows/release.yml/badge.svg"></a>
   <a href="https://github.com/scarce/axel/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/scarce/axel?color=a64dff"></a>
   <a href="https://www.superlogical.com/rex"><img alt="Built for Rex" src="https://img.shields.io/badge/built%20for-Rex-f58a62"></a>
   <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-black">
@@ -29,12 +28,16 @@
 ---
 
 ```sh
-axel                                    # the launcher floats over your Rex window
-> @atlas add retries to the webhook sender, then ask @nova@mini to review it
+# Two agents: one builds, one reviews with another model
+axel agent new atlas --harness claude
+axel agent new nova --harness codex --skills review
+
+# A thread: atlas does the work, then hands the diff to nova
+axel thread new --agent atlas "add retries to the webhook sender, then ask @nova to review it"
 ```
 
-Type what you want and press Enter. `atlas` takes the thread here, and `nova` picks up the
-review on your Mac mini. Close the laptop; it's all still running when you're back.
+Or run `axel` in Rex and type the same thing into the launcher that floats over your window.
+The thread keeps going when you close the laptop, and you can pick it up from any machine.
 
 ## Key features
 

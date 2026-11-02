@@ -23,9 +23,10 @@ pub fn decode(s: &str) -> Option<Vec<u8>> {
     }
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let hi = (pair[0] as char).to_digit(16)?;
-        let lo = (pair[1] as char).to_digit(16)?;
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for &[hi, lo] in pairs {
+        let hi = (hi as char).to_digit(16)?;
+        let lo = (lo as char).to_digit(16)?;
         out.push(((hi << 4) | lo) as u8);
     }
     Some(out)

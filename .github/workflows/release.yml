@@ -34,7 +34,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - id: v
@@ -57,10 +57,9 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       MACOSX_DEPLOYMENT_TARGET: '13.0'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - uses: actions/checkout@v5
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -94,7 +93,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -118,11 +117,11 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: axel
           sparse-checkout: .github/scripts
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: scarce/homebrew-axel
           ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}

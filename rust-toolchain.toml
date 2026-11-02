@@ -1,0 +1,6 @@
+# CI and local builds use the same Rust, so a new release's lints never break main by surprise.
+# Upgrading is a one-line change here.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
