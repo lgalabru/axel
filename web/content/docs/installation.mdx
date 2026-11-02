@@ -10,15 +10,28 @@ description: Rex, Axel, and the harness your agents run.
   runs the same interface inline in your terminal.
 - **A harness**: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex) or
   [OpenCode](https://opencode.ai), installed and logged in.
-- **Rust** and [`just`](https://github.com/casey/just), to build Axel from source.
 
-## Build Axel
+## Install Axel
 
 ```bash
-git clone https://github.com/lgalabru/axel && cd axel
-just install    # release build, linked into ~/.local/bin and ~/.cargo/bin
+brew install scarce/axel/axel
 axel
 ```
+
+Every commit on `main` that passes CI is released, so `brew upgrade` always brings the
+newest build. Use the full name: Homebrew core has an unrelated `axel`.
+
+### From source
+
+With Rust and [`just`](https://github.com/casey/just):
+
+```bash
+git clone https://github.com/scarce/axel && cd axel
+just install    # release build, linked into ~/.local/bin and ~/.cargo/bin
+```
+
+`~/.local/bin` usually comes before Homebrew on your `PATH`, so a source build wins over
+the Homebrew one until you remove `~/.local/bin/axel`.
 
 ## First run
 

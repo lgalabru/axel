@@ -44,7 +44,9 @@ event, so replicas merge. Agents are named Ed25519 identities with an inbox. The
 Claude Code hooks, Codex notify, ACP, or `axel status`, never by scraping a terminal,
 and is mirrored to Rex through OSC 7501 so Rex's tab indicators agree with Axel.
 
-See `docs/DESIGN.md`. Install: `just install` (release build, symlinked into `~/.local/bin` and `~/.cargo/bin`).
+Install: `brew install scarce/axel/axel`. Every commit on `main` that passes CI is
+released, so `brew upgrade` always brings the newest build. From source: `just install`
+(release build, symlinked into `~/.local/bin` and `~/.cargo/bin`). See `docs/DESIGN.md`.
 
 ## Commands
 

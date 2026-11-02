@@ -1,0 +1,136 @@
+name: Release
+
+# Every commit on main that passes CI ships: a GitHub release `v<version>` with
+# macOS binaries, and the formula in scarce/homebrew-axel moved to it, so
+# `brew upgrade` always lands on the newest main.
+#
+# The version is the workspace's major.minor plus the commit count on main
+# (0.3.142), so it only ever grows.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'web/**'
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+
+# Releases go out one at a time, in push order, so an older build never
+# overwrites the formula after a newer one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          base=$(sed -n -E '/^\[workspace\.package\]/,/^\[/ s/^version = "([0-9]+\.[0-9]+)\..*"/\1/p' Cargo.toml)
+          echo "version=$base.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [ci, version]
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Stamp the version
+        run: sed -i '' -E "/^\[workspace\.package\]/,/^\[/ s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+      - name: Build
+        run: cargo build --release -p axel --bin axel --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          dir=target/${{ matrix.target }}/release
+          if [ "${{ matrix.target }}" = aarch64-apple-darwin ]; then
+            "$dir/axel" --version | grep -q "$VERSION"
+          fi
+          name=axel-$VERSION-${{ matrix.target }}.tar.gz
+          tar -C "$dir" -czf "$name" axel
+          shasum -a 256 "$name" > "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axel-${{ matrix.target }}
+          path: axel-*.tar.gz*
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        run: |
+          {
+            git log -1 --format='%B' "$GITHUB_SHA"
+            echo
+            echo '```'
+            echo 'brew install scarce/axel/axel   # or: brew upgrade axel'
+            echo '```'
+          } > notes.md
+          gh release create "v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "axel $VERSION" --notes-file notes.md --latest
+
+  tap:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: axel
+          sparse-checkout: .github/scripts
+      - uses: actions/checkout@v4
+        with:
+          repository: scarce/homebrew-axel
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: tap
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Move the formula to this release
+        run: |
+          sha() { cut -d' ' -f1 "dist/axel-$VERSION-$1.tar.gz.sha256"; }
+          mkdir -p tap/Formula
+          axel/.github/scripts/formula.sh "$VERSION" "$GITHUB_REPOSITORY" \
+            "$(sha aarch64-apple-darwin)" "$(sha x86_64-apple-darwin)" > tap/Formula/axel.rb
+          cd tap
+          git config user.name "axel release"
+          git config user.email "release@axel.md"
+          git add Formula/axel.rb
+          git commit -m "axel $VERSION"
+          git push
