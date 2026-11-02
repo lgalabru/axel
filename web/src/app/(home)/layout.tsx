@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Analytics } from "@vercel/analytics/react";
+import { Analytics } from "@vercel/analytics/next";
 import { Header } from "@/components/header";
 import { DESCRIPTION, DOCS, REPO, SITE, TITLE } from "@/lib/site";
 import "./globals.css";
