@@ -79,7 +79,8 @@ fn token_to_path(token: &str) -> PathBuf {
 
 /// Interpret `paste` as dropped file paths. Returns `Some(paths)` only when the
 /// paste is non-empty and **every** token resolves (canonicalised) to an existing
-/// file or directory; otherwise `None`, and the caller treats the paste as text.
+/// file; otherwise `None`, and the caller treats the paste as text. A directory
+/// is text: it's a place you're naming, and there's nothing in it to attach.
 pub fn parse_dropped_paths(paste: &str) -> Option<Vec<PathBuf>> {
     let tokens = tokenize(paste);
     if tokens.is_empty() {
@@ -92,7 +93,7 @@ pub fn parse_dropped_paths(paste: &str) -> Option<Vec<PathBuf>> {
             // Bare words ("hello world") are text, not relative paths.
             return None;
         }
-        let canon = std::fs::canonicalize(&p).ok()?;
+        let canon = std::fs::canonicalize(&p).ok().filter(|c| c.is_file())?;
         if !out.contains(&canon) {
             out.push(canon);
         }
@@ -286,8 +287,10 @@ mod tests {
         assert_eq!(parse_dropped_paths(&url), Some(vec![expect_spaced.clone()]));
         let url_host = format!("file://localhost{}", plain.display());
         assert_eq!(parse_dropped_paths(&url_host), Some(vec![expect_plain.clone()]));
-        // directories count too
-        assert_eq!(parse_dropped_paths(t.0.to_str().unwrap()), Some(vec![canon(&t.0)]));
+        // A directory is text, alone or with files.
+        assert_eq!(parse_dropped_paths(t.0.to_str().unwrap()), None);
+        assert_eq!(parse_dropped_paths(&format!("file://{}", t.0.display())), None);
+        assert_eq!(parse_dropped_paths(&format!("{} {}", plain.display(), t.0.display())), None);
     }
 
     #[test]

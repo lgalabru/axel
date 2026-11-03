@@ -180,6 +180,157 @@ pub fn display_path(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Ask the terminal to report keys unambiguously (the kitty keyboard
+/// protocol, which Rex speaks), so Shift+Enter arrives as itself rather than
+/// as Enter.  Returns whether it was turned on, for [`restore_keys`].
+pub fn enhance_keys() -> bool {
+    use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+    if !crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        return false;
+    }
+    crossterm::execute!(std::io::stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)).is_ok()
+}
+
+/// While `~/.axel/logs/keys.on` exists, each key and paste as the TUI
+/// receives it, appended to `~/.axel/logs/keys.log`: to see what a key
+/// really arrives as. Off by default, since it records what's typed.
+pub fn log_key(ev: &crossterm::event::Event) {
+    use crossterm::event::Event;
+    if !matches!(ev, Event::Key(_) | Event::Paste(_)) {
+        return;
+    }
+    let Some(dir) = dirs::home_dir().map(|h| h.join(".axel/logs")) else { return };
+    if !dir.join("keys.on").exists() {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("keys.log")) {
+        let _ = writeln!(f, "{} {ev:?}", chrono::Local::now().format("%H:%M:%S%.3f"));
+    }
+}
+
+/// Undo [`enhance_keys`].
+pub fn restore_keys(enhanced: bool) {
+    if enhanced {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+    }
+}
+
+
+/// A thread's title from what was typed: its first non-blank line (the
+/// whole text is the intent, the agent's first prompt). Labels can't hold
+/// line breaks.
+pub fn title_line(text: &str) -> String {
+    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string()
+}
+
+/// A link to one run of tool calls (a fold) on a thread: what a click on a
+/// fold line in the conversation pane opens, through the `axel-links://` handler.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolsLink {
+    pub thread: String,
+    /// The fold's first tool call item id.
+    pub fold: String,
+    /// The Rex session to open the details pane in, and its server.
+    pub session: String,
+    pub server: Option<String>,
+}
+
+impl ToolsLink {
+    /// Its own scheme: `axel://` belongs to the Axel app's sign-in callback.
+    pub const SCHEME: &'static str = "axel-links";
+
+    /// `axel-links://tools?thread=…&fold=…&session=…[&server=…]`, values percent-encoded.
+    pub fn url(&self) -> String {
+        let mut u = format!(
+            "{}://tools?thread={}&fold={}&session={}",
+            Self::SCHEME,
+            pct_encode(&self.thread),
+            pct_encode(&self.fold),
+            pct_encode(&self.session)
+        );
+        if let Some(sv) = &self.server {
+            u.push_str(&format!("&server={}", pct_encode(sv)));
+        }
+        u
+    }
+
+    pub fn parse(url: &str) -> Option<ToolsLink> {
+        let rest = url.strip_prefix(&format!("{}://tools?", Self::SCHEME))?;
+        let mut thread = None;
+        let mut fold = None;
+        let mut session = None;
+        let mut server = None;
+        for pair in rest.split('&') {
+            let (k, v) = pair.split_once('=')?;
+            let v = pct_decode(v)?;
+            match k {
+                "thread" => thread = Some(v),
+                "fold" => fold = Some(v),
+                "session" => session = Some(v),
+                "server" => server = Some(v),
+                _ => {}
+            }
+        }
+        Some(ToolsLink { thread: thread?, fold: fold?, session: session?, server })
+    }
+}
+
+/// A link that copies the command a tool call ran: `axel-links://copy?item=…`.
+/// It names the call, not the command, so it stays short whatever the command,
+/// and the handler copies it exactly as the agent ran it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyLink {
+    /// The tool call's conversation item id.
+    pub item: String,
+}
+
+impl CopyLink {
+    pub fn url(&self) -> String {
+        format!("{}://copy?item={}", ToolsLink::SCHEME, pct_encode(&self.item))
+    }
+
+    pub fn parse(url: &str) -> Option<CopyLink> {
+        let rest = url.strip_prefix(&format!("{}://copy?", ToolsLink::SCHEME))?;
+        let item = rest.split('&').find_map(|pair| pair.strip_prefix("item=")).and_then(pct_decode)?;
+        (!item.is_empty()).then_some(CopyLink { item })
+    }
+}
+
+/// `text` as a terminal hyperlink (OSC 8) to `url`.
+pub fn hyperlink(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
+fn pct_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn pct_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +412,35 @@ mod tests {
         assert_eq!(ellipsize("hello", 10), "hello");
         assert_eq!(ellipsize("hello world", 5), "hell…");
         assert_eq!(ellipsize("hello", 0), "");
+    }
+
+    #[test]
+    fn a_title_is_the_first_line_that_says_something() {
+        assert_eq!(super::title_line("\n  fix the login bug  \nit fails on refresh"), "fix the login bug");
+        assert_eq!(super::title_line("one line"), "one line");
+        assert_eq!(super::title_line(" \n "), "");
+    }
+
+    #[test]
+    fn a_tools_link_round_trips_through_its_url() {
+        let l = super::ToolsLink {
+            thread: "01a19dee".into(),
+            fold: "item-7".into(),
+            session: "session:01a18a1a-98e9".into(),
+            server: Some("unix:///Users/ludo/Library/Application%20Support/rex/server.sock".into()),
+        };
+        let url = l.url();
+        assert!(url.starts_with("axel-links://tools?thread=01a19dee&fold=item-7&session=session%3A01a18a1a-98e9&server=unix%3A%2F%2F%2F"), "{url}");
+        assert!(url.contains("Application%2520Support"), "a % in a value is encoded too: {url}");
+        assert_eq!(super::ToolsLink::parse(&url), Some(l));
+        assert_eq!(super::ToolsLink::parse("https://example.com"), None);
+        assert_eq!(super::ToolsLink::parse("axel-links://tools?thread=t"), None, "fold and session are needed");
+        assert_eq!(super::ToolsLink::parse("axel://tools?thread=t&fold=f&session=s"), None, "not ours: the app's own scheme");
+        let copy = super::CopyLink { item: "01M6F4203Q&x".into() };
+        assert_eq!(copy.url(), "axel-links://copy?item=01M6F4203Q%26x");
+        assert_eq!(super::CopyLink::parse(&copy.url()), Some(copy));
+        assert_eq!(super::CopyLink::parse("axel-links://copy?item="), None);
+        assert_eq!(super::ToolsLink::parse("axel-links://copy?item=x"), None, "a copy link isn't a tools link");
+        assert_eq!(super::hyperlink("axel://x", "5 tool calls"), "\x1b]8;;axel://x\x1b\\5 tool calls\x1b]8;;\x1b\\");
     }
 }

@@ -207,6 +207,9 @@ pub struct SpawnTarget {
 
 #[derive(Clone, Debug)]
 pub struct Launcher {
+    /// Its pane grows to fit the prompt (the floating launcher in Rex): the
+    /// prompt stays put at the top while it grows, instead of scrolling.
+    pub pane_grows: bool,
     pub step: Step,
     pub cwd: PathBuf,
     pub harnesses: Vec<String>,
@@ -252,6 +255,7 @@ pub struct Launcher {
 impl Launcher {
     pub fn new(cwd: PathBuf, projects: Vec<ProjectRow>, agents: Vec<AgentRow>, harnesses: Vec<String>) -> Self {
         let mut l = Self {
+            pane_grows: false,
             step: Step::Title,
             cwd,
             harnesses: if harnesses.is_empty() { vec![Harness::default().to_string()] } else { harnesses },
@@ -421,7 +425,7 @@ impl Launcher {
         match self.step {
             Step::Title => match parse_dropped_paths(text) {
                 Some(paths) => self.attach(paths),
-                None => self.title.insert_str(text),
+                None => self.title.paste(text),
             },
             Step::Where => match self.where_mode {
                 WhereMode::List => {
@@ -625,10 +629,23 @@ impl Launcher {
                 self.title_focus = TitleFocus::Attachments;
                 self.attach_sel = self.attach_sel.min(self.attachments.len() - 1);
             }
+            // Shift+Enter (Option+Enter): a line break, as in the thread composer.
+            KeyCode::Enter if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) => {
+                self.title.insert_newline();
+                self.error = None;
+            }
             KeyCode::Enter => return self.quick_launch(),
             KeyCode::Tab => self.title_next(),
             KeyCode::Esc => return Action::Back,
-            KeyCode::Down => return Action::FocusThreads,
+            // ↑/↓ move between the prompt's lines; ↓ on the last goes to the recent threads.
+            KeyCode::Up if !key.modifiers.contains(KeyModifiers::SUPER) => {
+                self.title.line_up();
+            }
+            KeyCode::Down if !key.modifiers.contains(KeyModifiers::SUPER) => {
+                if !self.title.line_down() {
+                    return Action::FocusThreads;
+                }
+            }
             KeyCode::BackTab => {}
             // Backspace on an empty prompt removes the last attachment chip.
             KeyCode::Backspace if self.title.is_empty() && key.modifiers.is_empty() => {
@@ -1233,6 +1250,50 @@ mod tests {
     }
 
     #[test]
+    fn a_pasted_directory_is_text_not_an_attachment() {
+        let dir = std::env::temp_dir();
+        let mut l = launcher();
+        l.handle_paste(dir.to_str().unwrap());
+        assert!(l.attachments.is_empty(), "no chip for a directory");
+        assert_eq!(l.title.text(), dir.to_str().unwrap(), "the path is in the prompt, as pasted");
+    }
+
+    #[test]
+    fn option_arrows_move_by_word_in_the_prompt() {
+        let mut l = launcher();
+        for c in "fix the login".chars() {
+            l.handle_key(key(KeyCode::Char(c)));
+        }
+        l.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(l.title.cursor(), 8, "Option+← to the start of the word");
+        l.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+        assert_eq!(l.title.cursor(), 4);
+        l.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
+        assert_eq!(l.title.cursor(), 7, "Option+→ to the end of the word");
+    }
+
+    #[test]
+    fn the_prompt_takes_several_lines() {
+        let mut l = launcher();
+        for c in "fix it".chars() {
+            l.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(l.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)), Action::None, "Shift+Enter doesn't launch");
+        for c in "it fails".chars() {
+            l.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(l.title.text(), "fix it\nit fails");
+        assert_eq!(l.handle_key(key(KeyCode::Up)), Action::None, "↑ to the first line");
+        assert_eq!(l.title.cursor(), 6);
+        assert_eq!(l.handle_key(key(KeyCode::Down)), Action::None, "↓ back to the second");
+        assert_eq!(l.handle_key(key(KeyCode::Down)), Action::FocusThreads, "↓ on the last line: the recent threads");
+        l.title.clear();
+        l.handle_paste("first\nsecond");
+        assert_eq!(l.title.text(), "first\nsecond", "a pasted text keeps its lines");
+        assert_eq!(crate::util::title_line(&l.title.text()), "first", "the thread is named after its first line");
+    }
+
+    #[test]
     fn attachments_chips_backspace_and_plan() {
         let dir = std::env::temp_dir().join(format!("axel-tui-launcher-attach-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1653,10 +1714,10 @@ mod tests {
     fn paste_goes_to_focused_field() {
         let mut l = launcher();
         l.handle_paste("pasted\ntitle");
-        assert_eq!(l.title.text(), "pasted title");
+        assert_eq!(l.title.text(), "pasted\ntitle", "the prompt keeps lines");
         l.handle_key(key(KeyCode::Tab));
-        l.handle_paste("zeb");
-        assert_eq!(l.filter.text(), "zeb");
+        l.handle_paste("zeb\nra");
+        assert_eq!(l.filter.text(), "zeb ra", "one-line fields still collapse them");
     }
 
     #[test]

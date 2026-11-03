@@ -839,7 +839,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
     let delegation = axel_identity::delegate(&agent_kp, &job_key.parse()?, &thread.id, now.saturating_sub(300), now + DELEGATION_SECS)?;
     let from = super::policy::caller_agent()
         .filter(|pk| *pk != agent.pubkey)
-        .map(|pk| socket::Sender { name: super::policy::name_of(ctx, &pk), pubkey: pk });
+        .map(|pk| socket::Sender::new(pk.clone(), super::policy::name_of(ctx, &pk)));
     let policy = ctx.store.agent_policy(&agent.pubkey)?;
     let peers = ctx
         .store

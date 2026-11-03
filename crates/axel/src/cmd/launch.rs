@@ -154,7 +154,8 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     // 1. Thread: new, or an existing one we're spawning another agent onto.
     let thread = match &req.thread_id {
         Some(id) => ctx.store.get_thread(id)?.with_context(|| format!("thread {id} not found"))?,
-        None => ctx.store.create_thread(&owner, &req.title, &req.title, None)?,
+        // The first line names it; the whole text is what we're building.
+        None => ctx.store.create_thread(&owner, &axel_tui::util::title_line(&req.title), &req.title, None)?,
     };
 
     // 2. Projects (0..n). Zero projects = scratch directory.
@@ -167,7 +168,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
             let path = std::fs::canonicalize(p).unwrap_or(p.clone());
             let key = repo_key(&path);
             ctx.store.upsert_project(&env.id, &path, key.as_deref())?;
-            let (work_dir, ws) = prepare_workspace(&path, req.workspace, req.branch.as_deref(), &req.title)?;
+            let (work_dir, ws) = prepare_workspace(&path, req.workspace, req.branch.as_deref(), &axel_tui::util::title_line(&req.title))?;
             ctx.store.attach_project(&owner, &thread.id, key.as_deref(), &path, &ws)?;
             if primary_dir.is_none() {
                 primary_dir = Some(work_dir);
@@ -194,7 +195,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     let work_dir = match primary_dir {
         Some(d) => d,
         None => {
-            let dir = paths::home().join("scratch").join(format!("{}-{}", axel_tui::slugify(&req.title), &thread.id[..8]));
+            let dir = paths::home().join("scratch").join(format!("{}-{}", axel_tui::slugify(&thread.title), &thread.id[..8]));
             std::fs::create_dir_all(&dir)?;
             if req.thread_id.is_none() {
                 let ws = ThreadWorkspace { kind: WorkspaceKind::Scratch, branch: None, worktree_path: None };
@@ -348,17 +349,14 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         let mut command = vec![host_spec.program.clone()];
         command.extend(host_spec.args.iter().cloned());
         let pane_label = format!("{label}{}", super::ui::AGENT_PANE_SUFFIX);
-        // In the thread's window, with the thread's other agents; a window of
-        // its own only when that window can't be found.
-        let (window_id, block) = match super::ui::place_agent_pane(rex, &pane_label, &command, Some(&work_dir), &host_spec.env)? {
-            Some((w, b)) => (w, Some(b)),
-            None => {
-                let w = rex
-                    .new_window(&pane_label, &command, Some(&work_dir), &host_spec.env, false)
-                    .context("opening a Rex window for the session host")?;
-                (w.window_id, w.block_ids.first().cloned())
-            }
-        };
+        // The session host runs out of sight, in no window: the thread's own
+        // pane reports each agent's status to Rex (see `ui::run_stream`).
+        // The thread's window is still its window, for focusing it.
+        let window_id = super::ui::window_of_block(rex, &rex.env().block).ok().flatten().unwrap_or_default();
+        let block = Some(
+            rex.new_detached_terminal(&pane_label, &command, Some(&work_dir), &host_spec.env)
+                .context("starting the session host in Rex")?,
+        );
         ctx.store.update_session(
             &agent_kp,
             &session.id,
@@ -662,7 +660,9 @@ pub fn identity_prompt(agent: &axel_store::Agent) -> String {
         "You are {name}, an agent in Axel. People on this thread call you {name}; answer to that name. \
          Your Axel agent pubkey is {pk}. To message or bring in another agent, use the `send` tool of the \
          `axel` MCP server (or `axel send \"@name …\"`); the `axel` skill explains how. Writing @name in \
-         your reply alone does nothing.",
+         your reply alone does nothing. Ask the owner, not other agents, for anything only the owner knows \
+         (about themselves, or their decisions). The owner reads every line of the thread: give results, \
+         don't narrate what you're about to do.",
         name = agent.name,
         pk = agent.pubkey
     );

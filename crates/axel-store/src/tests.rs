@@ -1638,6 +1638,12 @@ fn items_seq_per_session_patch_pending_and_thread_view() {
     assert_eq!(rest, vec![3]);
     assert!(s.items(&s1.id, 3, 10).unwrap().is_empty());
 
+    // A turn's tool calls still open: only that session's, that turn's, still running.
+    let open: Vec<String> = s.open_tool_calls(&s1.id, 1).unwrap().into_iter().map(|i| i.id).collect();
+    assert_eq!(open, vec![a2.id.clone()]);
+    assert!(s.open_tool_calls(&s1.id, 2).unwrap().is_empty(), "another turn");
+    assert!(s.open_tool_calls(&s2.id, 1).unwrap().is_empty(), "a permission isn't a tool call");
+
     // Lookup by ACP reference and shallow merge patch.
     assert_eq!(s.item_by_ref(&s1.id, "call-1").unwrap().unwrap().id, a2.id);
     assert!(

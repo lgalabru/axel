@@ -203,6 +203,21 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// A session's tool calls in `turn` still running or pending, oldest first:
+    /// the ones that never got a result, when the turn ends.
+    pub fn open_tool_calls(&self, session_id: &str, turn: i64) -> Result<Vec<ConversationItem>, Error> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLS} FROM conversation_items
+             WHERE session_id = ?1 AND turn = ?2 AND kind = ?3 AND status IN (?4, ?5)
+             ORDER BY seq ASC"
+        ))?;
+        let rows = st.query_map(
+            params![session_id, turn, ItemKind::ToolCall.as_str(), ItemStatus::Running.as_str(), ItemStatus::Pending.as_str()],
+            row_item,
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Permissions and questions still waiting for an answer, oldest first;
     /// `thread_id` `None` means every thread.
     pub fn pending_items(&self, thread_id: Option<&str>) -> Result<Vec<ConversationItem>, Error> {

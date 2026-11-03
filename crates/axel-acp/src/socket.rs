@@ -22,9 +22,11 @@ pub const TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
     /// Start a turn with this user text (`session/prompt`), optionally with
-    /// file attachments (absolute paths preferred).  While a turn is running
-    /// the prompt is queued (replied with [`Reply::Queued`]) and starts when
-    /// the turn ends; `steer` puts it first and cancels the running turn.
+    /// file attachments (absolute paths preferred).  While a turn is running,
+    /// the owner's prompt goes into it, for the agent to read at its next step,
+    /// when the harness can take one ([`Reply::Steering`]); otherwise, and for
+    /// another agent's, it is queued ([`Reply::Queued`]) and starts when the
+    /// turn ends.  `steer` instead cancels the running turn and starts this.
     Prompt {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -38,10 +40,14 @@ pub enum Command {
     /// A note from another agent that needs no reply: it shows on the thread
     /// and the agent reads it with its next turn, but it starts no turn.
     Note { text: String, from: Sender },
-    /// Send a queued prompt now: move it first and cancel the running turn.
+    /// Send a queued prompt now: into the running turn when the harness can
+    /// take it there, else first, cancelling the running turn.
     Steer { item_id: String },
-    /// Withdraw a queued prompt.
+    /// Withdraw a prompt not read yet (queued, or sent into the turn and not
+    /// taken in).
     Dequeue { item_id: String },
+    /// Change the text of a prompt not read yet; an error once the agent has.
+    Edit { item_id: String, text: String },
     /// Switch the session's runtime mode (policy and the adapter's native mode).
     SetMode { mode: axel_store::RuntimeMode },
     /// Cancel the running turn (`session/cancel`); also rejects pending permissions.
@@ -62,6 +68,11 @@ pub enum Reply {
     /// The prompt was queued behind the running turn as this `UserMessage`
     /// item (status `pending` until its turn starts).
     Queued {
+        item_id: String,
+    },
+    /// The prompt went into the running turn as this `UserMessage` item
+    /// (`pending` until the agent takes it in, at its next step).
+    Steering {
         item_id: String,
     },
     Status {
@@ -103,8 +114,22 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
+    fn a_message_says_its_answer_goes_back_and_an_answer_says_not_to_repeat_it() {
+        let ask = Sender::new("PKatlas", "atlas").frame("do you know their birth date?");
+        assert!(ask.starts_with("Message from atlas, another Axel agent on this thread:\n\ndo you know their birth date?"));
+        assert!(ask.contains("your answer goes back to atlas by itself") && ask.contains("Don't `send` it to atlas as well"), "{ask}");
+        let back = Sender { reply: true, ..Sender::new("PKorion", "orion") }.frame("No, I don't.");
+        assert!(back.starts_with("orion's answer to your message:\n\nNo, I don't."));
+        assert!(back.contains("The owner has already seen this answer") && back.contains("don't repeat or summarise it"), "{back}");
+        // Old hosts never sent `reply`: it defaults to a message.
+        let old: Sender = serde_json::from_value(serde_json::json!({ "pubkey": "PK", "name": "nova" })).unwrap();
+        assert!(!old.reply);
+        assert_eq!(serde_json::to_value(Sender::new("PK", "nova")).unwrap(), serde_json::json!({ "pubkey": "PK", "name": "nova" }));
+    }
+
+    #[test]
     fn notes_round_trip_with_their_sender() {
-        let note = Command::Note { text: "FYI: green".into(), from: Sender { pubkey: "PK".into(), name: "nova".into() } };
+        let note = Command::Note { text: "FYI: green".into(), from: Sender::new("PK", "nova") };
         let v = serde_json::to_value(&note).unwrap();
         assert_eq!(v, serde_json::json!({ "cmd": "note", "text": "FYI: green", "from": { "pubkey": "PK", "name": "nova" } }));
         assert_eq!(serde_json::from_value::<Command>(v).unwrap(), note);
@@ -201,19 +226,39 @@ mod tests {
 pub struct Sender {
     pub pubkey: String,
     pub name: String,
+    /// It is `name`'s answer to a message from the recipient, returned on its
+    /// own when `name`'s turn ended (see [`Sender::frame`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply: bool,
 }
 
 impl Sender {
-    /// What the receiving agent reads: who wrote, and how to answer.  Its
-    /// replies on the thread reach the owner only, not the sender.
+    /// An agent's message (not a reply).
+    pub fn new(pubkey: impl Into<String>, name: impl Into<String>) -> Sender {
+        Sender { pubkey: pubkey.into(), name: name.into(), reply: false }
+    }
+
+    /// What the receiving agent reads: who wrote, and what happens to its answer.
+    ///
+    /// A message's answer goes back to its sender by itself (the host returns
+    /// the turn's reply), so the recipient just answers. A returned answer the
+    /// owner has already seen: the asker uses it, without repeating it.
     pub fn frame(&self, text: &str) -> String {
-        format!(
-            "Message from {name}, another Axel agent on this thread:\n\n{text}\n\n\
-             ---\nOnly the owner sees your replies here. To answer {name}, use the axel `send` tool with to: [\"{name}\"] \
-             (or run `axel send \"@{name} <your reply>\"`) only when you have something {name} needs: \
-             a result, an answer, or a question. Don't send \"received\", \"thanks\" or \"on it\": \
-             every message costs {name} a turn.",
-            name = self.name
-        )
+        let name = &self.name;
+        if self.reply {
+            format!(
+                "{name}'s answer to your message:\n\n{text}\n\n\
+                 ---\nThe owner has already seen this answer on the thread. Use it to carry on with your task; \
+                 don't repeat or summarise it for the owner. If it settles what you were doing, end your turn with \
+                 a line at most. Don't reply to {name} unless you need something more from it."
+            )
+        } else {
+            format!(
+                "Message from {name}, another Axel agent on this thread:\n\n{text}\n\n\
+                 ---\nJust answer here: when your turn ends, your answer goes back to {name} by itself, and the owner \
+                 sees it on the thread. Don't `send` it to {name} as well, and don't announce what you're about to do \
+                 (\"I'll check…\", \"replying to {name}\"): give the answer."
+            )
+        }
     }
 }

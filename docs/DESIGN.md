@@ -511,6 +511,29 @@ in three ways:
 `AXEL_ACP_CODEX=codex-acp` goes back to Zed's. `crates/axel-acp/tests/codex_acp.rs` checks it
 against a fake app-server.
 
+**A message sent while the agent works goes into its turn.** The agent reads it at its next
+step instead of after the whole turn, and nothing is interrupted. ACP has no word for it, so
+both adapters take two requests of Axel's own, and advertise them as
+`agentCapabilities._meta.axel.steer`:
+
+- `_axel/steer {sessionId, messageId, prompt}`: into the running turn; `accepted: false`
+  when none is running (the host then sends it as a prompt). When it lands, the adapter
+  sends `_axel/steered {messageId}`.
+- `_axel/unsteer {sessionId, messageId}`: withdraw it if it hasn't landed;
+  `withdrawn: false` once it has. The host edits a message by withdrawing it and sending the
+  new text.
+
+Claude takes such a message into its queue and folds it in at the turn's next step, between
+tool calls. It echoes it back as it does, with `--replay-user-messages`, and one sent after
+the turn's last step runs as a turn of its own, which the same prompt waits for.
+`cancel_async_message` withdraws it. On `session/cancel`, the adapter withdraws what hasn't
+landed and says so (`_axel/unsteered`), and the host runs those next. Codex takes one with
+`turn/steer` against the active turn id, at once, so there is nothing to withdraw.
+
+Messages from other agents still wait for their own turn, so the answer goes back to the
+sender by itself. So does anything sent to an adapter without the capability. `Ctrl+S` still
+interrupts the turn and starts a new one with the message.
+
 ```
 thread view (TUI, any pane) ──unix socket──▶ axel session host <id> ──stdio/ACP──▶ adapter ──▶ harness
         ▲                                        │  prints the raw log (this pane *is* `l`)
@@ -546,6 +569,31 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   question in a floating, centered pane (`axel thread answer THREAD ITEM`): ↑↓ and Enter,
   or a digit, answers it; Esc leaves it to the composer. The labels picked go back to
   Claude as the tool's `answers`. A multi-select question takes one pick.
+- **Tool call details**: in the conversation pane each run of tool calls is an OSC 8
+  link, `axel-links://tools?thread=…&fold=<first call id>&session=…&server=…`
+  (`axel://` is the app's sign-in callback). A small handler app,
+  `~/.axel/apps/Axel Links.app` (an AppleScript applet that declares the scheme;
+  `axel links install`, or built on first use), hands each URL to `axel open-url`,
+  which opens a floating Rex pane down the right of the window (titled with the agent and
+  the number of calls) running `axel thread tools`: the run's agent and time span, then
+  each call with its start, duration and status, its input as its kind reads best (a
+  command and what it's for, an edit as a diff, a file and its lines, a search), and its
+  output (as stored, up to 4 KB), printed as plain output so it scrolls natively; Esc or
+  q closes it. Code is highlighted with syntect's bundled syntaxes (no themes: syntax
+  scopes map to the terminal's own palette, like bat's `ansi` theme): commands as shell,
+  edits and writes and what a read returned as their file's language.
+- **Recovering a session**: a message for a managed session whose host has died
+  (its socket refuses, or is gone) ends that session and resumes the agent on the
+  thread, in its harness conversation (`--resume`/`session/load`), with the message as
+  the first prompt. Any summon of an agent back onto a thread it worked on resumes its
+  last conversation there. The reconciler counts every Rex block (`session.list_blocks`),
+  detached ones included, so a minimized agent pane is never taken for a closed one.
+- **Answers come back**: a turn another agent's message started (`Sender`, not `reply`)
+  ends by returning its last assistant message to that agent: the host runs `axel send
+  --reply --to <agent>` with the session's environment (signed, policy-checked and
+  delivered as any message; tagged `reply`; never summons). The asker reads it framed as
+  an answer the owner has already seen. A turn a reply started returns nothing, so
+  agents can't ping-pong.
 - **Asking for reach**: when `send` is refused only because the sender may not reach a
   recipient, Axel's MCP server asks the owner by MCP elicitation (one choice: allow this
   message, always allow, don't allow). The Claude adapter answers Claude's `elicitation`
@@ -553,10 +601,16 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   the policy as `agent edit --allow` would; "this message" is a grant scoped to that one
   `send` call (a guard), honoured by both the message and summon checks. A client that
   can't elicit gets the refusal with the command, as before.
-- **Agent panes**: a managed session's host pane (`<agent> · <thread> · log`) opens in the
-  window of the pane that launched it (the launcher, the composer, or the agent that
-  summoned it): a column on the right, one pane per agent. A thread's agents share its
-  window, and Rex's Activity lists them together.
+- **Agent panes**: a managed session's host pane (`<agent> · <thread> · log`) starts
+  minimized: a detached Rex block, running but in no window. ^L in the composer shows the
+  log of the agent you're talking to beside the conversation (`session.move_block`), and
+  minimizes it again (`session.detach_block`). The thread's stream pane reports one
+  OSC 7501 record per live agent (`id=<agent>`, its state, `kind` when blocked), and a
+  root record (no `id`) for the thread: the most urgent agent state, the thread's title,
+  and each agent's state as `msg`. The root record is what Rex's tab and sidebar show.
+  A finished turn is recorded `done` (cancelled: `idle`, failed: `error`), which Rex marks
+  as an unseen result, and the pane rings the bell (BEL) whenever an agent becomes `done`
+  or `blocked`, as Claude Code does when it finishes or needs you.
 - **Notes**: `send` with `fyi` (`axel send --fyi`) tags the signed message `fyi`. To a
   live managed session it's `Command::Note`: a `UserMessage` item with `fyi: true`, no
   turn started, read in the next catch-up. It never summons. Inbox entries that already

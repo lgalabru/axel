@@ -2,7 +2,12 @@
 //! `axel claude-acp`.  It speaks the Agent SDK's control protocol and, per
 //! prompt, streams "Hello", runs one Bash tool call through `can_use_tool`
 //! and the PostToolUse hook, and ends the turn.  The prompt `sleep` instead
-//! waits for an `interrupt`.  Its argv and every control request it receives
+//! waits for an `interrupt`.  The prompt `work` starts a tool call and takes
+//! messages sent into the turn, as Claude Code does: each waits in its queue
+//! (`cancel_async_message` withdraws it) until one reading `fold` arrives,
+//! which takes them all in (echoed, with `--replay-user-messages`) and ends
+//! the turn, or one reading `late`, which ends the turn first and runs them
+//! as a turn of their own.  Its argv and every control request it receives
 //! are appended to `$FAKE_CLAUDE_LOG`, one JSON value per line.
 
 use std::io::{BufRead, Write};
@@ -27,8 +32,82 @@ fn ok(request_id: &Value, response: Value) {
     send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": response } }));
 }
 
+/// Claude's echo of a user message it took in (`--replay-user-messages`).
+fn echo(uuid: &Value, text: &str) {
+    send(json!({ "type": "user", "isReplay": true, "uuid": uuid, "message": { "role": "user", "content": [{ "type": "text", "text": text }] } }));
+}
+
+fn text_reply(text: &str) {
+    send(json!({ "type": "stream_event", "event": { "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } } }));
+    send(json!({ "type": "stream_event", "event": { "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": text } } }));
+}
+
+/// The `work` prompt: a tool call that runs until a steer says how to end.
+fn work(lines: &mut impl Iterator<Item = std::io::Result<String>>) {
+    send(json!({ "type": "assistant", "message": { "role": "assistant", "model": "claude-sonnet-test", "content": [
+        { "type": "tool_use", "id": "toolu_w", "name": "Bash", "input": { "command": "sleep 60", "description": "Work" } }
+    ] } }));
+    let mut queued: Vec<(Value, String)> = Vec::new();
+    while let Some(Ok(l)) = lines.next() {
+        let Ok(m) = serde_json::from_str::<Value>(&l) else { continue };
+        if m["type"] == "control_request" {
+            log(&m["request"]);
+            match m["request"]["subtype"].as_str() {
+                Some("cancel_async_message") => {
+                    let before = queued.len();
+                    queued.retain(|(u, _)| *u != m["request"]["message_uuid"]);
+                    ok(&m["request_id"], json!({ "cancelled": queued.len() < before }));
+                }
+                Some("interrupt") => {
+                    ok(&m["request_id"], json!({}));
+                    send(json!({ "type": "result", "subtype": "error_during_execution", "is_error": false, "errors": [] }));
+                    return;
+                }
+                _ => ok(&m["request_id"], json!({})),
+            }
+            continue;
+        }
+        if m["type"] != "user" {
+            continue;
+        }
+        log(&json!({ "steer": m }));
+        let text = m["message"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+        queued.push((m["uuid"].clone(), text.clone()));
+        match text.as_str() {
+            // Taken in at the next step: echoed, then the turn goes on and ends.
+            "fold" => {
+                send(json!({ "type": "user", "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_w", "content": "worked", "is_error": false }
+                ] } }));
+                let all: Vec<String> = queued.iter().map(|(_, t)| t.clone()).collect();
+                for (u, t) in queued.drain(..) {
+                    echo(&u, &t);
+                }
+                text_reply(&format!("read: {}", all.join(", ")));
+                send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done" }));
+                return;
+            }
+            // After the last step: the turn ends, then they run as a turn of their own.
+            "late" => {
+                send(json!({ "type": "user", "message": { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "toolu_w", "content": "worked", "is_error": false }
+                ] } }));
+                send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "first" }));
+                for (u, t) in queued.drain(..) {
+                    echo(&u, &t);
+                }
+                text_reply("second turn");
+                send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "second" }));
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn main() {
     log(&json!({ "argv": std::env::args().skip(1).collect::<Vec<_>>() }));
+    let replays = std::env::args().any(|a| a == "--replay-user-messages");
     let session = std::env::args().skip_while(|a| a != "--session-id" && a != "--resume").nth(1).unwrap_or_default();
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
@@ -58,6 +137,13 @@ fn main() {
             Some("user") => {
                 let text = msg["message"]["content"][0]["text"].as_str().unwrap_or("").to_string();
                 send(json!({ "type": "system", "subtype": "init", "session_id": session }));
+                if replays {
+                    echo(&json!("prompt-uuid"), &text);
+                }
+                if text == "work" {
+                    work(&mut lines);
+                    continue;
+                }
                 if text == "sleep" {
                     // Wait for the interrupt, then end the turn as Claude Code does.
                     while let Some(Ok(l)) = lines.next() {

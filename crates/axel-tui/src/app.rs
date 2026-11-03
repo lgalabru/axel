@@ -36,8 +36,11 @@ pub fn run(deps: Deps, initial: Screen) -> Result<Outcome> {
     // alternate screen, which the composer reads as prompt history.
     // Focus reports: the recent-threads pane only highlights its row while it has focus.
     let _ = execute!(stdout(), EnableBracketedPaste, EnableMouseCapture, EnableFocusChange);
+    // Shift+Enter in the thread view's composer is a line break.
+    let keys = crate::util::enhance_keys();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        crate::util::restore_keys(keys);
         let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture, DisableFocusChange);
         ratatui::restore();
         previous_hook(info);
@@ -45,6 +48,7 @@ pub fn run(deps: Deps, initial: Screen) -> Result<Outcome> {
 
     let result = event_loop(&mut terminal, &deps, &owner_pk, initial);
 
+    crate::util::restore_keys(keys);
     let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture, DisableFocusChange);
     ratatui::restore();
     let _ = std::panic::take_hook();
@@ -66,7 +70,9 @@ struct App<'a> {
     /// Opened straight onto the launcher (the floating prompt): leaving it closes Axel.
     prompt_first: bool,
     /// Last size asked of `Deps::fit_prompt`.
-    prompt_expanded: bool,
+    prompt_size: Option<crate::PromptSize>,
+    /// Settling the prompt pane on the rows it needs (see [`App::settle_prompt`]).
+    prompt_fit: Option<PromptFit>,
     last_refresh: Instant,
 }
 
@@ -89,7 +95,8 @@ impl<'a> App<'a> {
             picker: ThreadPicker { can_manage: deps.manage_thread.is_some(), ..Default::default() },
             focused,
             prompt_first,
-            prompt_expanded: false,
+            prompt_size: None,
+            prompt_fit: None,
             last_refresh: Instant::now(),
         };
         app.open(initial);
@@ -100,7 +107,9 @@ impl<'a> App<'a> {
         let projects = glue::load_projects(deps.store).unwrap_or_default();
         let agents = glue::load_agents(deps.store).unwrap_or_default();
         let harnesses = deps.harnesses.iter().map(|h| h.to_string()).collect();
-        Launcher::new(deps.cwd.clone(), projects, agents, harnesses)
+        let mut l = Launcher::new(deps.cwd.clone(), projects, agents, harnesses);
+        l.pane_grows = deps.fit_prompt.is_some();
+        l
     }
 
     fn open(&mut self, screen: Screen) {
@@ -175,15 +184,42 @@ impl<'a> App<'a> {
         }
     }
 
-    /// The prompt pane grows for the full launch form and shrinks back for
-    /// the one-line prompt, so the recent threads below stay visible.
+    /// The prompt pane grows with the prompt's lines (and for the full
+    /// launch form), and shrinks back, so the recent threads below stay visible.
     fn fit_prompt(&mut self) {
         let Some(fit) = self.deps.fit_prompt else { return };
-        let expanded = matches!(self.screen, Screen::Launcher) && self.launcher.step != Step::Title;
-        if expanded != self.prompt_expanded {
-            self.prompt_expanded = expanded;
-            fit(expanded);
+        let size = if matches!(self.screen, Screen::Launcher) && self.launcher.step != Step::Title {
+            crate::PromptSize::Form
+        } else {
+            let width = crossterm::terminal::size().map_or(80, |(w, _)| w);
+            crate::PromptSize::Rows(view::launcher_view::prompt_pane_rows(&self.launcher, width))
+        };
+        if self.prompt_size != Some(size) {
+            self.prompt_size = Some(size);
+            // What Rex's pane chrome cost last time (rows asked beyond those
+            // needed) goes into every later ask, growing or shrinking, so the
+            // pane lands on its size at once instead of overshooting.
+            let extra = self.prompt_fit.map_or(0, |f| f.asked.saturating_sub(f.want));
+            let (size, fit_next) = match size {
+                crate::PromptSize::Rows(want) => {
+                    let asked = want + extra;
+                    (crate::PromptSize::Rows(asked), Some(PromptFit { want, asked, tries: 0, at: Instant::now() }))
+                }
+                crate::PromptSize::Form => (size, self.prompt_fit.map(|f| PromptFit { tries: 4, ..f })),
+            };
+            self.prompt_fit = fit_next;
+            fit(size);
         }
+    }
+
+    /// The pane Rex gave the prompt can come out short of what was asked
+    /// (splits are sized by ratio, and pane title bars take rows too): ask
+    /// again for what's missing, a few times, so every line shows.
+    fn settle_prompt(&mut self, height: u16) {
+        let Some(fit) = self.deps.fit_prompt else { return };
+        let Some(f) = self.prompt_fit.as_mut() else { return };
+        let Some(ask) = f.correction(height) else { return };
+        fit(crate::PromptSize::Rows(ask));
     }
 
     fn draw(&self, frame: &mut ratatui::Frame) {
@@ -203,6 +239,7 @@ impl<'a> App<'a> {
 
     /// Returns `Some(outcome)` when the UI should exit.
     fn handle(&mut self, ev: Event) -> Option<Outcome> {
+        crate::util::log_key(&ev);
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => match &self.screen {
                 Screen::Dashboard => {
@@ -268,7 +305,10 @@ impl<'a> App<'a> {
             }
             Event::Paste(text) => {
                 match &self.screen {
-                    Screen::Launcher => self.launcher.handle_paste(&text),
+                    Screen::Launcher => {
+                        self.launcher.handle_paste(&text);
+                        self.fit_prompt();
+                    }
                     Screen::Thread(_) => {
                         if let Some(t) = self.thread.as_mut() {
                             t.handle_paste(&text);
@@ -484,6 +524,34 @@ impl<'a> App<'a> {
     }
 }
 
+/// Asking Rex for prompt rows until the pane has them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PromptFit {
+    /// Rows the prompt needs.
+    want: u16,
+    /// Rows last asked of Rex.
+    asked: u16,
+    tries: u8,
+    at: Instant,
+}
+
+/// Wait this long after a resize before checking it took.
+const PROMPT_SETTLE: Duration = Duration::from_millis(250);
+
+impl PromptFit {
+    /// What to ask next when the pane is `height` rows: the rows still
+    /// missing on top of the last ask; `None` once it fits (or after a few tries).
+    fn correction(&mut self, height: u16) -> Option<u16> {
+        if height >= self.want || self.tries >= 4 || self.at.elapsed() < PROMPT_SETTLE {
+            return None;
+        }
+        self.asked += self.want - height;
+        self.tries += 1;
+        self.at = Instant::now();
+        Some(self.asked)
+    }
+}
+
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &str, initial: Screen) -> Result<Outcome> {
     let mut app = App::new(deps, owner_pk, initial);
     loop {
@@ -491,6 +559,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &s
         app.dashboard.compact =
             view::dashboard_view::mode_for(ratatui::layout::Rect::new(0, 0, size.width, size.height))
                 == view::dashboard_view::Mode::Compact;
+        app.settle_prompt(size.height);
         terminal.draw(|f| app.draw(f))?;
         if event::poll(POLL)? {
             let ev = event::read()?;
@@ -508,3 +577,37 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &s
         app.refresh(false);
     }
 }
+#[cfg(test)]
+mod prompt_fit_tests {
+    use super::*;
+
+    #[test]
+    fn what_the_chrome_costs_carries_over_to_the_next_ask() {
+        let past = Instant::now() - Duration::from_secs(1);
+        // Growing to 8 rows needed an ask of 9.
+        let grown = PromptFit { want: 8, asked: 9, tries: 1, at: past };
+        let extra = grown.asked.saturating_sub(grown.want);
+        // Deleting a line: 7 needed, so 8 asked straight away; the pane never
+        // comes out short, so there is nothing to correct.
+        let mut shrunk = PromptFit { want: 7, asked: 7 + extra, tries: 0, at: past };
+        assert_eq!(shrunk.asked, 8);
+        assert_eq!(shrunk.correction(7), None, "it fits at once");
+    }
+
+    #[test]
+    fn a_short_pane_is_asked_again_for_the_missing_rows() {
+        let past = Instant::now() - Duration::from_secs(1);
+        let mut f = PromptFit { want: 8, asked: 8, tries: 0, at: past };
+        assert_eq!(f.correction(7), Some(9), "a row short: ask for one more");
+        f.at = past;
+        assert_eq!(f.correction(7), Some(10), "still short: one more again");
+        f.at = past;
+        assert_eq!(f.correction(8), None, "it fits");
+        assert_eq!(f.correction(12), None, "taller is fine (the pane never shrinks below its first size)");
+        let mut f = PromptFit { want: 8, asked: 8, tries: 0, at: Instant::now() };
+        assert_eq!(f.correction(5), None, "the resize may not have landed yet");
+        let mut f = PromptFit { want: 8, asked: 8, tries: 4, at: past };
+        assert_eq!(f.correction(5), None, "gives up after a few tries");
+    }
+}
+

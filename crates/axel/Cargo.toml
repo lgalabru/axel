@@ -10,6 +10,7 @@ name = "axel"
 path = "src/main.rs"
 
 [dependencies]
+crossterm.workspace = true
 axel-identity.workspace = true
 axel-inbox.workspace = true
 axel-config.workspace = true
@@ -29,6 +30,13 @@ base64.workspace = true
 libc.workspace = true
 dialoguer = "0.12.0"
 console = "0.16.6"
+unicode-width = "0.2"
+# The syntaxes come from the dump build.rs compiles, not syntect's own bundle.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "regex-fancy"] }
+
+[build-dependencies]
+# Only to compile `syntaxes/` into the dump the binary embeds (see build.rs).
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "yaml-load", "dump-create", "regex-fancy"] }
 
 [dev-dependencies]
 tempfile.workspace = true

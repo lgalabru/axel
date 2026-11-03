@@ -24,27 +24,32 @@ pub enum Command {
         thread: Option<String>,
     },
     /// Sessions: one agent instance on a thread.
+    #[command(visible_alias = "sessions")]
     Session {
         #[command(subcommand)]
         command: SessionCommand,
     },
     /// Tail a managed session's raw harness log.
+    #[command(visible_alias = "logs")]
     Log {
         session: String,
         #[arg(long, short)]
         follow: bool,
     },
     /// Agents: named Ed25519 identities with a harness profile and an inbox.
+    #[command(visible_alias = "agents")]
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
     },
     /// Skills this project can use: directories, and remote skills pinned in AXEL.lock.
+    #[command(visible_alias = "skill")]
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
     },
     /// Threads: units of work (project + agent + workspace + intent).
+    #[command(visible_alias = "threads")]
     Thread {
         #[command(subcommand)]
         command: ThreadCommand,
@@ -69,13 +74,21 @@ pub enum Command {
         kind: Option<String>,
     },
     /// Send a signed message to agents by `@name` (as the owner, or as $AXEL_AGENT).
+    #[command(alias = "msg")]
     Send {
         /// Message text; `@name` mentions are resolved to recipients.
         text: Vec<String>,
         /// News that needs no reply: read with the recipient's next turn,
         /// never starting one or summoning anyone.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "reply")]
         fyi: bool,
+        /// Recipients by name, instead of the `@name`s in the text (repeatable).
+        #[arg(long = "to", value_name = "NAME")]
+        to: Vec<String>,
+        /// An answer to the recipient's message (what a session returns when
+        /// its turn ends); never summons.
+        #[arg(long, hide = true)]
+        reply: bool,
     },
     /// Print an inbox.
     Inbox {
@@ -95,9 +108,18 @@ pub enum Command {
     CodexAcp,
     /// Check Rex, keystore and database health.
     Doctor,
+    /// `axel-links://` links (a click on a run of tool calls opens its details).
+    Links {
+        #[command(subcommand)]
+        command: LinksCommand,
+    },
+    /// Open an `axel-links://` link (what the links handler app runs).
+    #[command(hide = true)]
+    OpenUrl { url: String },
     /// Start the MCP server on stdio (for MCP client integration).
     Mcp,
     /// Remote machines that run agents for this one.
+    #[command(visible_alias = "hosts")]
     Host {
         #[command(subcommand)]
         command: HostCommand,
@@ -139,6 +161,7 @@ pub enum HostCommand {
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
     /// Create an agent: generates a key, stores it, attests it, records it.
+    #[command(aliases = ["create", "add"])]
     New {
         name: String,
         #[arg(long, default_value = "claude")]
@@ -173,11 +196,13 @@ pub enum AgentCommand {
         policy: PolicyArgs,
     },
     /// List agents.
+    #[command(alias = "list")]
     Ls {
         #[arg(long)]
         json: bool,
     },
     /// Show one agent, including its attestation.
+    #[command(alias = "info")]
     Show { name: String },
     /// Archive an agent (keeps its key and history).
     Archive { name: String },
@@ -216,6 +241,7 @@ pub enum ReachArg {
 #[derive(Subcommand, Debug)]
 pub enum ThreadCommand {
     /// Create a thread and spin up its first agent session.
+    #[command(aliases = ["create", "start"])]
     New {
         /// What we're building (the intent; also the first prompt).
         title: Vec<String>,
@@ -268,6 +294,9 @@ pub enum ThreadCommand {
     /// One question an agent asked, to answer (the floating pane the composer opens).
     #[command(hide = true)]
     Answer { thread: String, item: String },
+    /// A run of tool calls in full (the floating pane a click on one opens).
+    #[command(hide = true)]
+    Tools { thread: String, fold: String },
     /// Continue a thread: a new session resuming its last harness conversation.
     Resume {
         thread: String,
@@ -284,6 +313,7 @@ pub enum ThreadCommand {
         worktree: Option<String>,
     },
     /// List threads.
+    #[command(alias = "list")]
     Ls {
         #[arg(long)]
         json: bool,
@@ -291,16 +321,19 @@ pub enum ThreadCommand {
         all: bool,
     },
     /// Show a thread: projects, participants, sessions, usage, messages.
+    #[command(alias = "info")]
     Show { thread: String },
     /// End every live session on a thread (closes their panes).
     Stop { thread: String },
     /// Settle a thread: finished, still listed (under "settled").
+    #[command(alias = "settle")]
     Done { thread: String },
     /// Reopen a settled or archived thread.
     Reopen { thread: String },
     /// Archive a thread: stops its sessions and hides it.
     Archive { thread: String },
     /// Delete a thread: stops its sessions and hides it everywhere for good.
+    #[command(alias = "rm")]
     Delete { thread: String },
 }
 
@@ -319,6 +352,7 @@ pub enum SessionCommand {
         to: String,
     },
     /// List sessions.
+    #[command(alias = "list")]
     Ls {
         #[arg(long)]
         all: bool,
@@ -396,6 +430,12 @@ impl From<AgentColorArg> for AgentColor {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum LinksCommand {
+    /// Build and register the app that opens `axel-links://` links.
+    Install,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum SkillsCommand {
     /// List the skills available here and where each comes from.
     #[command(alias = "list")]
@@ -408,4 +448,40 @@ pub enum SkillsCommand {
         #[arg(long, short)]
         yes: bool,
     },
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    fn parses(args: &[&str]) -> Command {
+        let mut argv = vec!["axel"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?}: {e}")).command.expect("a command")
+    }
+
+    #[test]
+    fn plurals_and_verb_synonyms_reach_the_same_commands() {
+        assert!(matches!(parses(&["sessions", "ls"]), Command::Session { command: SessionCommand::Ls { .. } }));
+        assert!(matches!(parses(&["session", "list"]), Command::Session { command: SessionCommand::Ls { .. } }));
+        assert!(matches!(parses(&["threads", "list"]), Command::Thread { command: ThreadCommand::Ls { .. } }));
+        assert!(matches!(parses(&["thread", "rm", "x"]), Command::Thread { command: ThreadCommand::Delete { .. } }));
+        assert!(matches!(parses(&["thread", "settle", "x"]), Command::Thread { command: ThreadCommand::Done { .. } }));
+        assert!(matches!(parses(&["thread", "info", "x"]), Command::Thread { command: ThreadCommand::Show { .. } }));
+        assert!(matches!(parses(&["agents", "list"]), Command::Agent { command: AgentCommand::Ls { .. } }));
+        assert!(matches!(parses(&["agent", "create", "nova"]), Command::Agent { command: AgentCommand::New { .. } }));
+        assert!(matches!(parses(&["agent", "add", "nova"]), Command::Agent { command: AgentCommand::New { .. } }));
+        assert!(matches!(parses(&["hosts", "list"]), Command::Host { command: HostCommand::Ls }));
+        assert!(matches!(parses(&["skill", "list"]), Command::Skills { command: SkillsCommand::Ls }));
+        assert!(matches!(parses(&["logs", "s1"]), Command::Log { .. }));
+        assert!(matches!(parses(&["msg", "@nova", "hi"]), Command::Send { .. }));
+    }
+
+    #[test]
+    fn the_plurals_show_in_help_and_the_synonyms_dont() {
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("[aliases: sessions]") || help.contains("sessions"), "{help}");
+        assert!(!help.contains("msg"), "hidden synonyms stay out of the overview: {help}");
+    }
 }

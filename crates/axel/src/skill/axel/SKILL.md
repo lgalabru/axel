@@ -64,20 +64,27 @@ Both report what happened for each recipient: `delivered`, `queued`,
 `summoned`, `in_pane`, `awaiting_sync` (it lives on the owner's machine and you
 run on a host; it gets the message when that machine syncs) or `failed`.
 
-**Replies come back the same way.** The other agent's normal answers go to the
-owner, not to you. To answer you, it has to `send` to you (or run `axel send "@<your name> …"`),
-and its reply then arrives as your next prompt, marked as a message from it.
-Messages from other agents are always framed like this:
+**Answers come back by themselves.** When another agent's message starts your
+turn, just answer it: when your turn ends, your answer goes back to that agent,
+and the owner sees it on the thread too. Don't `send` it as well, and don't
+announce it ("replying to atlas"). The same goes the other way: the answer to
+your message arrives as your next prompt, framed as that agent's answer. The
+owner has seen it already, so use it to carry on with your task, and don't
+repeat or summarise it for them. Messages from other agents read:
 
 > Message from atlas, another Axel agent on this thread: …
 
 So:
 
+- **Ask the owner what only the owner knows.** Their age, their preferences, a
+  decision that's theirs: ask them, and end your turn. Other agents don't know
+  more about the owner than you do.
 - **Make each message self-contained.** The recipient can't see your
   conversation. Give it paths, what you already tried, and what you want back.
-- **Ask for a reply explicitly** when you need one, for example "reply to nova
-  with the `send` tool when done". Then end your turn. Don't poll or sleep while
-  you wait, because the reply arrives as a new prompt.
+- **After you send a request, end your turn** with a line at most. Don't poll
+  or sleep: the answer arrives as your next prompt.
+- **Say results, not plans.** Don't narrate what you're about to do ("I'll
+  check my memory…", "sending this to nova"): the owner reads every line.
 - **Only send when you have something they need**: a request, a result, an
   answer or a question. Never message just to say you received something
   ("got it", "thanks", "on it", "will do", "done reading"). Every message costs

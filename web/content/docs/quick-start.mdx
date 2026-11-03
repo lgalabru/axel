@@ -48,8 +48,9 @@ a scratch thread), which agent, and whether to work in place or in a new git wor
 
 The prompt pane becomes the **thread view**: the conversation above, a composer below.
 
-- Write to steer the agent. While it's mid-turn your message queues; **Ctrl+S** sends it as a
-  steer instead.
+- Write to steer the agent. While it's mid-turn, your message goes into its turn, and it reads
+  it at its next step. Until then you can still edit it (**Option+↑**). **Ctrl+S** interrupts
+  the agent instead.
 - Tool calls fold into one line; **Space** expands them.
 - Questions and permission requests appear inline. Answer with **Enter**, or **1–9** to pick.
 - Mention another agent, `@nova can you review this?`, to bring it onto the thread.

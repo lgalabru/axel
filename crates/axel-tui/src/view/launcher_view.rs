@@ -127,28 +127,65 @@ fn prompt_input(frame: &mut Frame, area: Rect, l: &Launcher) {
         return;
     }
     let focused = l.title_focus == TitleFocus::Text;
-    let row = Rect { height: 1, ..area };
-    let (shown, col) = l.title.view(row.width.saturating_sub(2) as usize);
-    let mut spans = vec![Span::styled("› ", if focused { theme::accent() } else { theme::dim() })];
-    if shown.is_empty() {
-        spans.push(Span::styled(Step::Title.question(), theme::dim()));
-    } else {
-        let chars: Vec<char> = shown.chars().collect();
-        let styles = super::thread_view::mention_styles(&chars, &l.mention_names());
-        spans.extend(super::thread_view::styled_run(&chars, &styles));
+    let glyph = Span::styled("› ", if focused { theme::accent() } else { theme::dim() });
+    if l.title.is_empty() {
+        let line = Line::from(vec![glyph, Span::styled(Step::Title.question(), theme::dim())]);
+        frame.render_widget(Paragraph::new(line), Rect { height: 1, ..area });
+        if focused {
+            frame.set_cursor_position(Position::new(area.x + 2, area.y));
+        }
+        return;
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), row);
-    if focused {
-        frame.set_cursor_position(Position::new(row.x + 2 + col, row.y));
+    // Rows broken at line breaks and the width, as in the thread composer,
+    // scrolled so the cursor's row shows.
+    let chars: Vec<char> = l.title.text().chars().collect();
+    let styles = super::thread_view::mention_styles(&chars, &l.mention_names());
+    let body_w = (area.width as usize).saturating_sub(2).max(1);
+    let (rows, (cur_row, cur_col)) = super::thread_view::input_rows(&chars, body_w, l.title.cursor());
+    let height = area.height.max(1) as usize;
+    // While a growing pane catches up with a new line, keep the top in place
+    // (the new line appears as the pane grows); scroll only past the most
+    // rows it grows to, or when it can't grow.
+    let first = if l.pane_grows && rows.len() <= super::thread_view::MAX_INPUT_ROWS { 0 } else { cur_row.saturating_sub(height - 1) };
+    for (r, &(start, end)) in rows.iter().enumerate().skip(first).take(height) {
+        let lead = if r == 0 { glyph.clone() } else { Span::raw("  ") };
+        let mut spans = vec![lead];
+        spans.extend(super::thread_view::styled_run(&chars[start..end], &styles[start..end]));
+        frame.render_widget(Paragraph::new(Line::from(spans)), Rect { y: area.y + (r - first) as u16, height: 1, ..area });
     }
+    // The cursor's row may be the one the pane is still growing to show.
+    if focused && cur_row - first < height {
+        frame.set_cursor_position(Position::new(area.x + 2 + cur_col as u16, area.y + (cur_row - first) as u16));
+    }
+}
+
+/// Rows the prompt pane needs, `width` wide: the gap above, the text (up to
+/// [`super::thread_view::MAX_INPUT_ROWS`]) and the attachments row.
+pub fn prompt_pane_rows(l: &Launcher, width: u16) -> u16 {
+    let field = width.saturating_sub(PAD * 2);
+    let text = prompt_rows(l, field).min(super::thread_view::MAX_INPUT_ROWS as u16);
+    1 + text + u16::from(!l.attachments.is_empty())
+}
+
+/// Rows the prompt's text takes in a field `width` wide.
+fn prompt_rows(l: &Launcher, width: u16) -> u16 {
+    let chars: Vec<char> = l.title.text().chars().collect();
+    let body_w = (width as usize).saturating_sub(2).max(1);
+    super::thread_view::input_rows(&chars, body_w, l.title.cursor()).0.len().max(1) as u16
 }
 
 /// The first screen: just the input (placeholder `What are we building?`),
 /// with who and where dim at the right of it, and any attachments under it.
 fn render_prompt(frame: &mut Frame, l: &Launcher, full: Rect) {
     let area = Rect { x: full.x + PAD, y: full.y, width: full.width.saturating_sub(PAD * 2), height: full.height };
-    let gap = u16::from(area.height >= 3);
-    let [_, input, chips] = Layout::vertical([Constraint::Length(gap), Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    // As many rows as the prompt needs, within the pane (chips keep a row).
+    // A pane that grows to fit keeps its blank row (it is asked for), so
+    // nothing moves while it grows; one that can't, gives the row up first.
+    let chip_row = u16::from(!l.attachments.is_empty());
+    let needed = prompt_rows(l, area.width);
+    let gap = u16::from(area.height >= 3 && (l.pane_grows || area.height > needed + chip_row));
+    let rows = needed.min(area.height.saturating_sub(gap + chip_row).max(1));
+    let [_, input, chips] = Layout::vertical([Constraint::Length(gap), Constraint::Length(rows), Constraint::Min(0)]).areas(area);
     let right = match (&l.error, l.quick_target()) {
         (Some(e), _) => Line::from(Span::styled(e.clone(), theme::danger())),
         (None, Some((agent, place))) => Line::from(vec![
@@ -161,11 +198,11 @@ fn render_prompt(frame: &mut Frame, l: &Launcher, full: Rect) {
     let right_w = right.width() as u16;
     let typed = l.title.text().chars().count() as u16;
     let room = input.width.saturating_sub(right_w + 2);
-    let show_right = l.error.is_some() || (room >= 24 && typed + 3 < room);
+    let show_right = l.error.is_some() || (rows == 1 && !l.title.text().contains('\n') && room >= 24 && typed + 3 < room);
     let field = if show_right { Rect { width: room, ..input } } else { input };
     prompt_input(frame, field, l);
     if show_right {
-        frame.render_widget(Paragraph::new(right.right_aligned()), input);
+        frame.render_widget(Paragraph::new(right.right_aligned()), Rect { height: 1, ..input });
     }
     if chips.height > 0 && !l.attachments.is_empty() {
         let selected = (l.title_focus == TitleFocus::Attachments).then_some(l.attach_sel);

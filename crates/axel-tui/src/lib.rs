@@ -26,6 +26,15 @@ pub mod util;
 pub mod view;
 
 pub use compose::{run_answer, run_compose};
+
+/// How tall the launcher's prompt pane should be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptSize {
+    /// The prompt: this many rows, its text and the rows around it.
+    Rows(u16),
+    /// The full launch form, which takes most of the layer.
+    Form,
+}
 pub use stream::run_stream;
 pub use thread::{SendCommand, SendReply};
 pub use util::{relative_time, slugify};
@@ -111,9 +120,8 @@ pub struct Deps<'a> {
     /// Move keyboard focus to the paired pane (prompt ⇄ recent threads), when
     /// there is one.
     pub focus_peer: Option<&'a dyn Fn()>,
-    /// The prompt pane needs more room (`true`: the full launch form) or
-    /// less (`false`: just the prompt, recent threads below).
-    pub fit_prompt: Option<&'a dyn Fn(bool)>,
+    /// Size the prompt pane (the recent threads take the rest of the layer).
+    pub fit_prompt: Option<&'a dyn Fn(PromptSize)>,
     /// Settle, reopen, archive or delete a thread.  `None` hides those keys.
     pub manage_thread: Option<&'a ManageThreadFn<'a>>,
 }

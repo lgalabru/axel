@@ -94,13 +94,32 @@ pub struct CliRunner {
     server: Option<String>,
 }
 
+/// `name` is an executable on `PATH`.
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
+}
+
+/// The `rex` the Rex app installs, where it lives on macOS.
+fn installed_rex() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let candidates = [
+        std::path::Path::new(&home).join("Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex"),
+        std::path::PathBuf::from("/Applications/Rex.app/Contents/MacOS/rex"),
+        std::path::PathBuf::from("/Applications/Rex Beta.app/Contents/MacOS/rex"),
+    ];
+    candidates.iter().find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
+}
+
 impl CliRunner {
     /// Use `rex` from `PATH` (or `$AXEL_REX_BIN`), talking to `server` if given
     /// (exported to the child as `REX_SERVER`; the CLI reads it from there).
+    /// Outside a Rex terminal `rex` is usually not on `PATH` (Rex terminals add
+    /// it): then the one the Rex app installs.
     pub fn new(server: Option<String>) -> CliRunner {
         let program = std::env::var("AXEL_REX_BIN")
             .ok()
             .filter(|s| !s.is_empty())
+            .or_else(|| (!on_path("rex")).then(installed_rex).flatten())
             .unwrap_or_else(|| "rex".to_string());
         CliRunner { program, server }
     }
@@ -392,6 +411,24 @@ impl Rex {
             return Err(Error::Invalid(format!("session.new_split returned {} blocks, wanted 2", ids.len())));
         }
         Ok(ids)
+    }
+
+    /// Run `command` in a new terminal that isn't in any window (detached):
+    /// it runs, reports its status, and shows nowhere until it is moved into
+    /// a window (`session.move_block`).  Returns the block's id.
+    pub fn new_detached_terminal(
+        &self,
+        label: &str,
+        command: &[String],
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+    ) -> Result<String, Error> {
+        // `terminal_block` is a layout node (`{"block": {flavor, label, options}}`);
+        // `session.new_block` takes the block's fields themselves.
+        let node = payload::terminal_block(label, command, cwd, env)?;
+        let block = node.get("block").cloned().unwrap_or(node);
+        let result = self.api_call("session.new_block", block)?;
+        str_field(&result, "session.new_block", "block_id")
     }
 
     /// Run `command` in a new terminal right of `anchor` (a block or a split),
@@ -735,6 +772,19 @@ mod tests {
                     "options": {"shell": "none", "command": ["claude"], "exit": {"on_completion": true}}
                 }}
             })
+        );
+    }
+
+    #[test]
+    fn detached_terminal_payload_and_result() {
+        let (rex, fake) = client(vec![Ok(r#"{"block_id":"block:d","revision":2}"#.into())]);
+        assert_eq!(rex.new_detached_terminal("atlas · log", &["host".into()], None, &[]).unwrap(), "block:d");
+        let calls = fake.calls.borrow();
+        assert_eq!(calls[0][4], "session.new_block");
+        let sent: Value = serde_json::from_str(&calls[0][5]).unwrap();
+        assert_eq!(
+            sent,
+            json!({ "flavor": "com.superlogical.terminal.shell", "label": "atlas · log", "options": { "shell": "none", "command": ["host"], "exit": { "on_completion": true } } })
         );
     }
 

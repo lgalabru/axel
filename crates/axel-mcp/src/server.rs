@@ -62,8 +62,8 @@ impl AxelMcp {
             as the next prompt of its live session (queued if it is mid-turn), by being summoned onto the thread \
             if it isn't on it, or in its inbox if it runs in a terminal pane. Returns one outcome per recipient. \
             Write `name@host` (e.g. \"atlas@mini\") to summon the agent on a remote host when the owner asks for that. \
-            Their normal answers go to the owner, not to you: to hear back, ask them to reply with this tool, then \
-            end your turn; the reply arrives as your next prompt. Writing @name in your reply does nothing. \
+            Their answer comes back to you by itself when their turn ends (as your next prompt; the owner sees it \
+            too), so end your turn after sending a request. Writing @name in your reply does nothing. \
             Send only when you have a request, a result or an answer: never just to say you got a message, \
             thanks or \"on it\" (each message costs the recipient a turn). For news that needs no reply, set \
             fyi: it waits for the recipient's next turn instead of starting one, and never summons. A refusal names the command the owner can run to allow it; never retry \

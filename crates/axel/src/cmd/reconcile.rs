@@ -23,17 +23,16 @@ pub fn run(ctx: &Ctx) -> Result<usize> {
     if ours.is_empty() {
         return Ok(0);
     }
-    let view = rex.view()?;
-    let mut blocks = std::collections::HashSet::new();
-    for w in view.get("windows").and_then(|w| w.as_array()).into_iter().flatten() {
-        for l in w.get("layers").and_then(|l| l.as_array()).into_iter().flatten() {
-            for b in l.get("blocks").and_then(|b| b.as_array()).into_iter().flatten() {
-                if let Some(id) = b.get("block_id").and_then(|i| i.as_str()) {
-                    blocks.insert(id.to_string());
-                }
-            }
-        }
-    }
+    // Every block Rex has, placed or detached: an agent's session pane is
+    // detached (minimized) and still alive.
+    let listed = rex.api_call("session.list_blocks", serde_json::json!({}))?;
+    let blocks: std::collections::HashSet<String> = listed
+        .get("blocks")
+        .and_then(|b| b.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b.get("block_id").and_then(|i| i.as_str()).map(String::from))
+        .collect();
     let owner = ctx.owner()?;
     let mut ended = 0;
     for s in ours {

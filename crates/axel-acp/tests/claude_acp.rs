@@ -137,7 +137,7 @@ fn a_turn_streams_asks_permission_and_runs_the_tool() {
     let argv: Vec<String> = serde_json::from_value(log[0]["argv"].clone()).unwrap();
     let joined = argv.join(" ");
     for flag in [
-        "--output-format stream-json --verbose --input-format stream-json",
+        "--output-format stream-json --verbose --input-format stream-json --replay-user-messages",
         "--permission-prompt-tool stdio",
         "--tools default",
         "--setting-sources user,project,local",
@@ -288,4 +288,133 @@ fn load_replays_the_saved_conversation() {
 
     let (_, missing) = agent.call("session/load", json!({ "sessionId": "nope", "cwd": cwd_path, "mcpServers": [] }), |_| json!({}));
     assert_eq!(missing["error"]["message"], "Session not found");
+}
+
+/// Send a prompt without waiting for its reply; its request id.
+fn prompt_async(agent: &mut Agent, sid: &str, text: &str) -> u64 {
+    let id = agent.next;
+    agent.next += 1;
+    agent.send(json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt", "params": { "sessionId": sid, "prompt": [{ "type": "text", "text": text }] } }));
+    id
+}
+
+/// A request sent while a prompt runs: its reply, and what came before it.
+fn call_during(agent: &mut Agent, method: &str, params: Value, seen: &mut Vec<Value>) -> Value {
+    let id = agent.next;
+    agent.next += 1;
+    agent.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+    loop {
+        let m = agent.rx.recv_timeout(Duration::from_secs(10)).expect("a reply");
+        if m.get("id") == Some(&json!(id)) && m.get("method").is_none() {
+            return m["result"].clone();
+        }
+        seen.push(m);
+    }
+}
+
+/// Everything up to the reply to request `id`, and the reply.
+fn until_reply(agent: &mut Agent, id: u64, seen: &mut Vec<Value>) -> Value {
+    loop {
+        let m = agent.rx.recv_timeout(Duration::from_secs(10)).expect("the prompt's reply");
+        if m.get("id") == Some(&json!(id)) && m.get("method").is_none() {
+            return m;
+        }
+        seen.push(m);
+    }
+}
+
+fn steer_params(sid: &str, message_id: &str, text: &str) -> Value {
+    json!({ "sessionId": sid, "messageId": message_id, "prompt": [{ "type": "text", "text": text }] })
+}
+
+fn steered(seen: &[Value]) -> Vec<String> {
+    seen.iter().filter(|m| m["method"] == "_axel/steered").map(|m| m["params"]["messageId"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn a_message_sent_into_the_turn_lands_at_its_next_step() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let sid = new_session(&mut agent, cwd.path());
+    let _ = agent.notifications(Duration::from_millis(200));
+    // Not while no turn runs: the host sends it as a prompt.
+    let mut seen = Vec::new();
+    assert_eq!(call_during(&mut agent, "_axel/steer", steer_params(&sid, "m0", "hi"), &mut seen), json!({ "accepted": false }));
+
+    let id = prompt_async(&mut agent, &sid, "work");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(call_during(&mut agent, "_axel/steer", steer_params(&sid, "m1", "also this"), &mut seen), json!({ "accepted": true }));
+    assert!(steered(&seen).is_empty(), "waiting for the next step");
+    assert_eq!(call_during(&mut agent, "_axel/steer", steer_params(&sid, "m2", "fold"), &mut seen), json!({ "accepted": true }));
+    let reply = until_reply(&mut agent, id, &mut seen);
+    assert_eq!(reply["result"], json!({ "stopReason": "end_turn" }), "one turn for all of it");
+    assert_eq!(steered(&seen), vec!["m1", "m2"], "each reported as it landed");
+    let text: String = updates(&seen).iter().filter(|u| u["sessionUpdate"] == "agent_message_chunk").filter_map(|u| u["content"]["text"].as_str()).collect();
+    assert_eq!(text, "read: also this, fold");
+    assert!(!updates(&seen).iter().any(|u| u["sessionUpdate"] == "user_message_chunk"), "Claude's echoes aren't relayed");
+    // Each went to Claude with a uuid of its own.
+    let uuids: Vec<String> = claude_log(home.path()).iter().filter_map(|l| l["steer"]["uuid"].as_str().map(String::from)).collect();
+    assert_eq!(uuids.len(), 2);
+    assert!(uuids.iter().all(|u| u.len() == 36 && u.as_bytes()[14] == b'4') && uuids[0] != uuids[1], "{uuids:?}");
+}
+
+#[test]
+fn a_message_too_late_for_the_turn_runs_in_the_same_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let sid = new_session(&mut agent, cwd.path());
+    let _ = agent.notifications(Duration::from_millis(200));
+    let id = prompt_async(&mut agent, &sid, "work");
+    std::thread::sleep(Duration::from_millis(200));
+    let mut seen = Vec::new();
+    assert_eq!(call_during(&mut agent, "_axel/steer", steer_params(&sid, "m1", "late"), &mut seen), json!({ "accepted": true }));
+    let reply = until_reply(&mut agent, id, &mut seen);
+    assert_eq!(reply["result"], json!({ "stopReason": "end_turn" }));
+    assert_eq!(steered(&seen), vec!["m1"]);
+    let text: String = updates(&seen).iter().filter(|u| u["sessionUpdate"] == "agent_message_chunk").filter_map(|u| u["content"]["text"].as_str()).collect();
+    assert_eq!(text, "second turn", "the prompt waited for the turn the message started");
+}
+
+#[test]
+fn a_message_not_taken_in_yet_can_be_withdrawn() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let sid = new_session(&mut agent, cwd.path());
+    let _ = agent.notifications(Duration::from_millis(200));
+    let id = prompt_async(&mut agent, &sid, "work");
+    std::thread::sleep(Duration::from_millis(200));
+    let mut seen = Vec::new();
+    call_during(&mut agent, "_axel/steer", steer_params(&sid, "m1", "a typo"), &mut seen);
+    let unsteer = |agent: &mut Agent, seen: &mut Vec<Value>, m: &str| call_during(agent, "_axel/unsteer", json!({ "sessionId": sid, "messageId": m }), seen);
+    assert_eq!(unsteer(&mut agent, &mut seen, "m1"), json!({ "withdrawn": true }));
+    assert_eq!(unsteer(&mut agent, &mut seen, "m1"), json!({ "withdrawn": false }), "gone already");
+    // The edit, sent again: it's the one that lands.
+    call_during(&mut agent, "_axel/steer", steer_params(&sid, "m1", "fold"), &mut seen);
+    let reply = until_reply(&mut agent, id, &mut seen);
+    assert_eq!(reply["result"], json!({ "stopReason": "end_turn" }));
+    let text: String = updates(&seen).iter().filter(|u| u["sessionUpdate"] == "agent_message_chunk").filter_map(|u| u["content"]["text"].as_str()).collect();
+    assert_eq!(text, "read: fold", "the withdrawn text never reached Claude's turn");
+    assert!(claude_log(home.path()).iter().any(|l| l["subtype"] == "cancel_async_message"));
+}
+
+#[test]
+fn cancelling_withdraws_what_was_sent_in_and_says_so() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let sid = new_session(&mut agent, cwd.path());
+    let _ = agent.notifications(Duration::from_millis(200));
+    let id = prompt_async(&mut agent, &sid, "work");
+    std::thread::sleep(Duration::from_millis(200));
+    let mut seen = Vec::new();
+    call_during(&mut agent, "_axel/steer", steer_params(&sid, "m1", "next please"), &mut seen);
+    agent.send(json!({ "jsonrpc": "2.0", "method": "session/cancel", "params": { "sessionId": sid } }));
+    let reply = until_reply(&mut agent, id, &mut seen);
+    assert_eq!(reply["result"], json!({ "stopReason": "cancelled" }));
+    let unsteered: Vec<&Value> = seen.iter().filter(|m| m["method"] == "_axel/unsteered").collect();
+    assert_eq!(unsteered.len(), 1, "{seen:#?}");
+    assert_eq!(unsteered[0]["params"]["messageIds"], json!(["m1"]), "the host keeps it queued");
 }

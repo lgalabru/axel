@@ -85,6 +85,20 @@ pub fn open_launcher() -> Result<()> {
     Ok(())
 }
 
+/// The split ratio that gives the prompt pane `want` rows, from both panes'
+/// current rows (Rex sizes splits by ratio); the one-line default when the
+/// sizes can't be read.  Half a row past `want`, so rounding lands on it.
+fn prompt_ratio(rex: &axel_rex::Rex, prompt: &str, threads: &str, want: u16) -> f64 {
+    let (Ok(p), Ok(t)) = (rex.terminal_size(prompt), rex.terminal_size(threads)) else { return PROMPT_RATIO };
+    let total = f64::from(p.rows) + f64::from(t.rows);
+    if total < 4.0 {
+        return PROMPT_RATIO;
+    }
+    // Never smaller than the one-line size it opens at: growing only, so
+    // typing the first line doesn't move it.
+    ((f64::from(want) + 0.5) / total).clamp(PROMPT_RATIO, PROMPT_RATIO_EXPANDED)
+}
+
 /// Floating layers in the current window whose first block is one of ours.
 fn axel_layers(rex: &axel_rex::Rex) -> Result<Vec<String>> {
     let view = rex.view()?;
@@ -165,9 +179,12 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
             let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": peer }));
         }
     };
-    let fit_prompt = |expanded: bool| {
+    let fit_prompt = |size: axel_tui::PromptSize| {
         if let (Some(rex), Some((me, threads, true))) = (&ctx.rex, &peer) {
-            let ratio = if expanded { PROMPT_RATIO_EXPANDED } else { PROMPT_RATIO };
+            let ratio = match size {
+                axel_tui::PromptSize::Form => PROMPT_RATIO_EXPANDED,
+                axel_tui::PromptSize::Rows(want) => prompt_ratio(rex, me, threads, want),
+            };
             let _ = rex.api_call(
                 "session.resize_pane",
                 serde_json::json!({ "direction": "vertical", "before_block_id": me, "after_block_id": threads, "ratio": ratio }),
@@ -176,7 +193,7 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     };
     let manage_thread = |tid: &str, op: axel_tui::ThreadOp| -> Result<()> { super::thread::set_state(&ctx, tid, op) };
     let focus_peer_ref: Option<&dyn Fn()> = if peer.is_some() { Some(&focus_peer) } else { None };
-    let fit_prompt_ref: Option<&dyn Fn(bool)> = if matches!(peer, Some((_, _, true))) { Some(&fit_prompt) } else { None };
+    let fit_prompt_ref: Option<&dyn Fn(axel_tui::PromptSize)> = if matches!(peer, Some((_, _, true))) { Some(&fit_prompt) } else { None };
     // A launch turns the prompt into the agent or thread pane: the threads pane goes.
     let close_threads_pane = || {
         if let (Some(rex), Some((_, threads, true))) = (&ctx.rex, &peer) {
@@ -303,7 +320,7 @@ fn initial_screen(screen: Option<ScreenArg>) -> Result<Screen> {
 }
 
 /// If this process runs in a Rex floating layer, close that layer (which ends us).
-fn close_own_layer(ctx: &Ctx) {
+pub(crate) fn close_own_layer(ctx: &Ctx) {
     let Some(rex) = &ctx.rex else { return };
     let block = rex.env().block.clone();
     match layer_of_block(rex, &block) {
@@ -493,54 +510,6 @@ fn close_axel_layers(ctx: &Ctx, rex: &axel_rex::Rex) {
 
 /// An agent's session pane is labelled `<agent> · <thread> · log`.
 pub const AGENT_PANE_SUFFIX: &str = " · log";
-/// The thread keeps this share of the window's width; agents' panes stack in the rest.
-const AGENT_COLUMN_KEEP: f64 = 0.78;
-
-/// Where the next agent pane goes in the window of `block`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum AgentPaneSpot {
-    /// Under the last agent pane in the window's column of agents.
-    Below(String),
-    /// A new column on the right of everything (the tiled layout's root).
-    Right(String),
-}
-
-fn agent_pane_spot(view: &serde_json::Value, block: &str) -> Option<AgentPaneSpot> {
-    let layer = tiled_layer_of(view, block)?;
-    let last_agent = layer
-        .get("blocks")?
-        .as_array()?
-        .iter()
-        .rev()
-        .filter(|b| b.get("label").and_then(|l| l.as_str()).is_some_and(|l| l.ends_with(AGENT_PANE_SUFFIX)))
-        .find_map(|b| b.get("block_id").and_then(|i| i.as_str()));
-    match last_agent {
-        Some(b) => Some(AgentPaneSpot::Below(b.to_string())),
-        None => tiled_root(view, block).map(AgentPaneSpot::Right),
-    }
-}
-
-/// Open an agent's session pane in the window this process's pane is in, so
-/// a thread's agents sit together (and Rex's Activity lists them together):
-/// a column on the right, one pane per agent.  `None` when this pane's
-/// window can't be found; the caller opens a window instead.
-pub fn place_agent_pane(
-    rex: &axel_rex::Rex,
-    label: &str,
-    command: &[String],
-    cwd: Option<&std::path::Path>,
-    env: &[(String, String)],
-) -> Result<Option<(String, String)>> {
-    let me = rex.env().block.clone();
-    let Some(window) = window_of_block(rex, &me)? else { return Ok(None) };
-    let Some(spot) = agent_pane_spot(&rex.view()?, &me) else { return Ok(None) };
-    let block = match spot {
-        AgentPaneSpot::Below(anchor) => rex.split_below(&anchor, label, command, 0.5, cwd, env, false)?,
-        AgentPaneSpot::Right(root) => rex.split_right(&root, label, command, AGENT_COLUMN_KEEP, cwd, env, false)?,
-    };
-    Ok(Some((window, block)))
-}
-
 /// The window holding `block` and its tiled layer, from `session.view`.
 fn tiled_layer_of<'a>(view: &'a serde_json::Value, block: &str) -> Option<&'a serde_json::Value> {
     let has = |l: &serde_json::Value| l.get("blocks").and_then(|b| b.as_array()).is_some_and(|bs| bs.iter().any(|b| b.get("block_id").and_then(|i| i.as_str()) == Some(block)));
@@ -595,6 +564,8 @@ fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
 /// `axel thread stream`: the top pane.
 pub fn run_stream(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
+    // Its runs of tool calls are `axel-links://` links: make sure something opens them.
+    super::links::ensure_installed();
     let owner_pk = ctx.owner()?.public().to_string();
     axel_tui::run_stream(&ctx.store, &owner_pk, thread_id)
 }
@@ -642,11 +613,38 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
             open_question(rex, thread_id, item_id);
         }
     };
-    let res = axel_tui::run_compose(deps, thread_id, &fit, &ask);
+    // ^L: the agent's session log, minimized (detached) until asked for.
+    let toggle_log = |session_id: &str| {
+        if let (Some(rex), Ok(Some(session))) = (&ctx.rex, ctx.store.get_session(session_id))
+            && let Some(block) = session.rex_block_id.as_deref()
+        {
+            let beside = stream.clone().unwrap_or_else(|| rex.env().block.clone());
+            toggle_agent_pane(rex, block, &beside);
+        }
+    };
+    let res = axel_tui::run_compose(deps, thread_id, &fit, &ask, &toggle_log);
     if let Some(rex) = &ctx.rex {
         leave(rex, stream.as_deref());
     }
     res
+}
+
+/// Show an agent's session pane right of `beside` when it's minimized
+/// (detached), or minimize it again when it's showing.
+fn toggle_agent_pane(rex: &axel_rex::Rex, block: &str, beside: &str) {
+    let placed = rex
+        .api_call("session.describe_block", serde_json::json!({ "block_id": block }))
+        .ok()
+        .and_then(|d| d.pointer("/block/placement").and_then(|p| p.as_str()).map(|p| p == "placed"))
+        .unwrap_or(false);
+    let _ = if placed {
+        rex.api_call("session.detach_block", serde_json::json!({ "block_id": block }))
+    } else {
+        rex.api_call(
+            "session.move_block",
+            serde_json::json!({ "block_id": block, "anchor_block_id": beside, "direction": "horizontal", "side": "after", "ratio": 0.6 }),
+        )
+    };
 }
 
 /// Where a question floats: centered, a third of the window tall.
@@ -739,21 +737,68 @@ fn stream_block(rex: &axel_rex::Rex) -> Option<String> {
 }
 
 /// Move the border between the stream pane and this composer pane so the
-/// composer gets `want` rows.  Rex sizes splits by ratio, so the ratio comes
-/// from both panes' current rows.
+/// composer gets `want` rows.  Rex sizes splits by ratio, and each pane's
+/// title bar takes rows the terminal doesn't have, so the ratio comes from
+/// both panes' rows and their rectangles in the window (see [`split_ratio_for`]).
 fn fit_compose_pane(rex: &axel_rex::Rex, stream_id: &str, want: u16, now: u16) {
     let me = rex.env().block.clone();
     let Ok(sz) = rex.terminal_size(stream_id) else { return };
-    let total = f64::from(sz.rows) + f64::from(now);
-    if total < 4.0 || want == now {
+    // This pane's rows as Rex has them, read with the layout, so both come
+    // from the same moment (the composer's own size can lag a resize).
+    let now = rex.terminal_size(&me).map(|s| s.rows).unwrap_or(now);
+    if want == now {
         return;
     }
-    // Aim half a row past `want`, so rounding the split lands on it, not a row short.
-    let ratio = ((total - f64::from(want) - 0.5) / total).clamp(0.2, 0.95);
+    let rects = rex.view().ok().and_then(|v| Some((block_rect(&v, stream_id)?, block_rect(&v, &me)?)));
+    let ratio = match rects {
+        Some((above, below)) => split_ratio_for((above[3], sz.rows), (below[3], now), want),
+        None => None,
+    }
+    .unwrap_or_else(|| {
+        // No geometry: rows alone, aiming half a row past `want`.
+        let total = f64::from(sz.rows) + f64::from(now);
+        ((total - f64::from(want) - 0.5) / total).clamp(0.2, 0.95)
+    });
     let _ = rex.api_call(
         "session.resize_pane",
         serde_json::json!({ "direction": "vertical", "before_block_id": stream_id, "after_block_id": me, "ratio": ratio }),
     );
+}
+
+/// The split ratio (share of the pair's height for the pane above) that gives
+/// the pane below `want` rows, from each pane's height as a fraction of the
+/// window and its rows now.  Both panes lose the same rows to chrome, so two
+/// panes give the window's rows per fraction (`k`) and that chrome (`c`):
+/// `rows = k · height - c`.  `None` when the two can't tell them apart.
+fn split_ratio_for(above: (f64, u16), below: (f64, u16), want: u16) -> Option<f64> {
+    let ((ha, ra), (hb, rb)) = ((above.0, f64::from(above.1)), (below.0, f64::from(below.1)));
+    if (ha - hb).abs() < 1e-6 || ha <= 0.0 || hb <= 0.0 {
+        return None;
+    }
+    let k = (ra - rb) / (ha - hb);
+    let c = k * hb - rb;
+    // Readings taken mid-resize don't fit a window: a few rows of chrome per
+    // pane, at least a screenful of rows. Fall back rather than trust them.
+    if !(k.is_finite() && k >= 10.0 && (0.0..=8.0).contains(&c)) {
+        return None;
+    }
+    // Half a row past `want`, so Rex rounding the split lands on it.
+    let below_h = (f64::from(want) + c + 0.5) / k;
+    Some((1.0 - below_h / (ha + hb)).clamp(0.2, 0.95))
+}
+
+/// A block's rectangle `[x, y, w, h]` (fractions of its window), from `session.view`.
+fn block_rect(view: &serde_json::Value, block: &str) -> Option<[f64; 4]> {
+    fn walk(node: &serde_json::Value, block: &str) -> Option<[f64; 4]> {
+        if node.get("block_id").and_then(|b| b.as_str()) == Some(block) {
+            let r = node.get("rect")?.as_array()?;
+            let n = |i: usize| r.get(i).and_then(|v| v.as_f64());
+            return Some([n(0)?, n(1)?, n(2)?, n(3)?]);
+        }
+        let split = node.get("split")?;
+        walk(split.get("before")?, block).or_else(|| walk(split.get("after")?, block))
+    }
+    walk(tiled_layer_of(view, block)?.get("layout")?, block)
 }
 
 /// Environment the floating pane should inherit from the invoking shell.
@@ -781,6 +826,7 @@ fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<Send
         SendCommand::Prompt { text, attachments, steer } => axel_acp::socket::Command::Prompt { text, attachments, steer, from: None },
         SendCommand::Steer { item_id } => axel_acp::socket::Command::Steer { item_id },
         SendCommand::Dequeue { item_id } => axel_acp::socket::Command::Dequeue { item_id },
+        SendCommand::Edit { item_id, text } => axel_acp::socket::Command::Edit { item_id, text },
         SendCommand::SetMode { mode } => axel_acp::socket::Command::SetMode { mode },
         SendCommand::Cancel => axel_acp::socket::Command::Cancel,
         SendCommand::Answer { item_id, option_id } => axel_acp::socket::Command::Answer { item_id, option_id },
@@ -788,15 +834,73 @@ fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<Send
     let reply = if remote {
         super::host::relay(ctx, &session, &cmd)
     } else {
-        axel_acp::socket::send(sock.as_deref().unwrap(), &cmd).map_err(anyhow::Error::from)
+        match axel_acp::socket::send(sock.as_deref().unwrap(), &cmd) {
+            // Its host is gone (its pane closed, a crash): the session is over.
+            // A message brings the agent back, resuming its conversation.
+            Err(e) if host_gone(&e) => {
+                return match cmd {
+                    axel_acp::socket::Command::Prompt { text, attachments, .. } => revive(ctx, &session, &text, &attachments),
+                    _ => {
+                        end_dead_session(ctx, &session);
+                        Ok(SendReply::Error { message: "its session had stopped; send a message to resume it".into() })
+                    }
+                };
+            }
+            r => r.map_err(anyhow::Error::from),
+        }
     };
     Ok(match reply {
         Ok(axel_acp::socket::Reply::Ok) => SendReply::Ok,
         Ok(axel_acp::socket::Reply::Queued { item_id }) => SendReply::Queued { item_id },
+        Ok(axel_acp::socket::Reply::Steering { item_id }) => SendReply::Steering { item_id },
         Ok(axel_acp::socket::Reply::Status { .. }) => SendReply::Ok,
         Ok(axel_acp::socket::Reply::Error { message }) => SendReply::Error { message },
         Err(e) => SendReply::Error { message: format!("host unreachable: {e}") },
     })
+}
+
+/// The socket's host process is gone: nothing listens (refused), or the
+/// socket file is gone with it.
+fn host_gone(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound)
+}
+
+/// Mark a session whose host has died as ended.
+fn end_dead_session(ctx: &Ctx, session: &axel_store::Session) {
+    if let Ok(owner) = ctx.owner() {
+        let _ = ctx.store.end_session(&owner, &session.id, Some("its session host had stopped"));
+    }
+}
+
+/// A message for a session whose host has died: end that session, and
+/// resume the agent on the thread (its harness conversation, when it has
+/// one) with the message as the first prompt.
+fn revive(ctx: &Ctx, session: &axel_store::Session, text: &str, attachments: &[std::path::PathBuf]) -> Result<SendReply> {
+    end_dead_session(ctx, session);
+    let thread = ctx.store.get_thread(&session.thread_id)?.with_context(|| format!("no thread {}", session.thread_id))?;
+    let req = axel_tui::LaunchRequest {
+        title: thread.title.clone(),
+        projects: vec![],
+        agent_pubkey: session.agent_pubkey.clone(),
+        workspace: axel_store::WorkspaceKind::InPlace,
+        branch: None,
+        thread_id: Some(thread.id),
+        attachments: vec![],
+    };
+    let opts = launch::LaunchOptions {
+        target: launch::Target::NewWindow,
+        runtime: Some(SessionRuntime::Managed),
+        prompt: Some(text.to_string()),
+        attachments: attachments.to_vec(),
+        work_dir: None,
+        resume: session.harness_session_id.clone(),
+    };
+    match launch::launch(ctx, req, opts) {
+        Ok(launch::Launched::Managed { host_spec: Some(spec), session_id, .. }) => launch::spawn_detached(&spec, &session_id)?,
+        Ok(_) => {}
+        Err(e) => return Ok(SendReply::Error { message: format!("its session had stopped, and resuming it failed: {e:#}") }),
+    }
+    Ok(SendReply::Ok)
 }
 
 /// Start another agent on a thread with `text` as its first message.
@@ -812,6 +916,8 @@ pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, f
         return super::host::launch_remote(ctx, &h.label, thread_id, &agent.name, text, files);
     }
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
+    // Back on a thread it worked on: it picks up its own conversation there.
+    let resume = previous_conversation(ctx, &thread.id, &agent.pubkey);
     let req = axel_tui::LaunchRequest {
         title: thread.title.clone(),
         projects: vec![],
@@ -821,7 +927,7 @@ pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, f
         thread_id: Some(thread.id),
         attachments: vec![],
     };
-    let opts = launch::LaunchOptions { target: launch::Target::NewWindow, runtime: Some(SessionRuntime::Managed), prompt: Some(text.to_string()), attachments: files.to_vec(), work_dir: None, resume: None };
+    let opts = launch::LaunchOptions { target: launch::Target::NewWindow, runtime: Some(SessionRuntime::Managed), prompt: Some(text.to_string()), attachments: files.to_vec(), work_dir: None, resume };
     match launch::launch(ctx, req, opts)? {
         // No Rex to host it in (e.g. summoned from an agent's process): run detached.
         launch::Launched::Managed { session_id, host_spec: Some(spec), .. } => {
@@ -832,6 +938,16 @@ pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, f
         launch::Launched::RexWindow { session_id, .. } => Ok(session_id),
         launch::Launched::Inline { session_id, .. } => Ok(session_id),
     }
+}
+
+/// The harness conversation of the agent's last session on the thread, to
+/// resume when it comes back to the thread.
+fn previous_conversation(ctx: &Ctx, thread_id: &str, agent: &str) -> Option<String> {
+    ctx.store
+        .list_sessions(axel_store::SessionFilter { thread_id: Some(thread_id.to_string()), agent_pubkey: Some(agent.to_string()), ..Default::default() })
+        .ok()?
+        .into_iter()
+        .find_map(|s| s.harness_session_id)
 }
 
 /// Full id, unique id prefix, or case-insensitive title substring.
@@ -924,14 +1040,41 @@ mod dock_tests {
     }
 
     #[test]
-    fn agent_panes_stack_in_a_column_on_the_right() {
-        // No agent pane yet: a new column right of the whole layout.
-        assert_eq!(agent_pane_spot(&view(), "block:launcher"), Some(AgentPaneSpot::Right("split:root".into())));
-        // With one there, the next goes under the last one.
-        let mut v = view();
-        v["windows"][1]["layers"][0]["blocks"].as_array_mut().unwrap().push(json!({"block_id": "block:jude", "label": "atlas · Ship it · log"}));
-        assert_eq!(agent_pane_spot(&v, "block:compose"), Some(AgentPaneSpot::Below("block:jude".into())));
-        assert_eq!(agent_pane_spot(&v, "block:nowhere"), None);
+    fn the_split_ratio_accounts_for_each_panes_title_bar() {
+        // A 40-row window, title bars of a row per pane: the conversation has
+        // 0.8 of it (32 → 31 rows), the composer 0.2 (8 → 7 rows).
+        let r = split_ratio_for((0.8, 31), (0.2, 7), 9).unwrap();
+        // 9 rows + its title bar + half a row is 10.5 of 40: 0.2625 of the pair.
+        assert!((r - (1.0 - 10.5 / 40.0)).abs() < 1e-9, "{r}");
+        // Shrinking back: 7 rows asks for the 0.2 it has, give or take the half row.
+        let back = split_ratio_for((0.75, 29), (0.25, 9), 7).unwrap();
+        assert!((back - (1.0 - 8.5 / 40.0)).abs() < 1e-9, "{back}");
+        assert_eq!(split_ratio_for((0.5, 19), (0.5, 19), 5), None, "equal panes: can't tell rows from chrome");
+        assert_eq!(split_ratio_for((0.85, 54), (0.15, 54), 4), None, "a reading from mid-resize: not trusted");
+    }
+
+    #[test]
+    fn a_blocks_rect_comes_from_the_layout_tree() {
+        let v = json!({"windows": [{"window_id": "w", "layers": [{"kind": "tiled",
+            "layout": {"rect": [0, 0, 1, 1], "split": {"split_id": "s", "direction": "vertical", "ratio": 0.8,
+                "before": {"rect": [0, 0, 1, 0.8], "block_id": "block:stream"},
+                "after": {"rect": [0, 0.8, 1, 0.2], "block_id": "block:compose"}}},
+            "blocks": [{"block_id": "block:stream"}, {"block_id": "block:compose"}]}]}]});
+        assert_eq!(block_rect(&v, "block:compose"), Some([0.0, 0.8, 1.0, 0.2]));
+        assert_eq!(block_rect(&v, "block:stream"), Some([0.0, 0.0, 1.0, 0.8]));
+        assert_eq!(block_rect(&v, "block:nowhere"), None);
+    }
+
+    #[test]
+    fn a_host_is_gone_when_nothing_listens_or_its_socket_is_gone() {
+        use std::io::{Error, ErrorKind};
+        assert!(host_gone(&Error::from(ErrorKind::ConnectionRefused)), "os error 61");
+        assert!(host_gone(&Error::from(ErrorKind::NotFound)));
+        assert!(!host_gone(&Error::from(ErrorKind::TimedOut)), "busy, not gone: don't start a second one");
+        // A real socket path nobody serves.
+        let path = std::env::temp_dir().join(format!("axel-gone-{}.sock", std::process::id()));
+        let err = axel_acp::socket::send(&path, &axel_acp::socket::Command::Status).unwrap_err();
+        assert!(host_gone(&err), "{err}");
     }
 
     #[test]

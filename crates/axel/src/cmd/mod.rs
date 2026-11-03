@@ -13,6 +13,7 @@ mod reconcile;
 mod session;
 mod setup;
 mod skills;
+mod links;
 mod status;
 mod thread;
 mod ui;
@@ -91,10 +92,23 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Thread { command }) => thread::run(command),
         Some(Command::Hook { harness, guard_only }) => hook::run(harness, guard_only),
         Some(Command::Status { state, msg, kind }) => status::run(&state, msg.as_deref(), kind.as_deref()),
-        Some(Command::Send { text, fyi }) => inbox::send(&text.join(" "), if fyi { axel_mcp::MessageKind::Fyi } else { axel_mcp::MessageKind::Request }),
+        Some(Command::Send { text, fyi, to, reply }) => {
+            let kind = match (fyi, reply) {
+                (true, _) => axel_mcp::MessageKind::Fyi,
+                (_, true) => axel_mcp::MessageKind::Reply,
+                _ => axel_mcp::MessageKind::Request,
+            };
+            inbox::send(&text.join(" "), &to, kind)
+        }
         Some(Command::Inbox { agent, json }) => inbox::show(agent.as_deref(), json),
         Some(Command::Doctor) => doctor::run(),
         Some(Command::Mcp) => mcp::run(),
+        Some(Command::Links { command: crate::cli::LinksCommand::Install }) => {
+            let app = links::install()?;
+            println!("axel-links:// links open through {}", app.display());
+            Ok(())
+        }
+        Some(Command::OpenUrl { url }) => links::open_url(&url),
         Some(Command::Host { command }) => match command {
             crate::cli::HostCommand::Add { label, ssh, install } => host::add(&label, ssh.as_deref(), install),
             crate::cli::HostCommand::Ls => host::list(),

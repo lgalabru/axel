@@ -638,6 +638,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             body: decode_body(kind, &it.content),
             attachments: attachments_of(&it.content),
             relay_to,
+            steering: it.content.get("steering").and_then(|v| v.as_bool()).unwrap_or(false),
         });
     }
 
@@ -662,6 +663,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             body: ItemBody::Text(t.summary.user_text.clone()),
             attachments: Vec::new(),
             relay_to: None,
+            steering: false,
         });
         let mut text = t.summary.assistant_text.clone();
         if t.summary.tool_calls > 0 {
@@ -688,6 +690,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             body: ItemBody::Text(text),
             attachments: Vec::new(),
             relay_to: None,
+            steering: false,
         });
     }
     items.sort_by_key(|i| (i.at_ms, i.seq));

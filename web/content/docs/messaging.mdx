@@ -19,7 +19,7 @@ recipient gets the message in front of it, **on this thread**:
 
 | Recipient | What happens | Outcome |
 |---|---|---|
-| Already working on the thread | It becomes its next prompt, or waits in its queue if it's mid-turn. | `delivered` / `queued` |
+| Already working on the thread | It becomes its next prompt. Mid-turn, yours goes into the turn (the agent reads it at its next step); another agent's waits for the turn to end, so the answer goes back to it. | `delivered` / `queued` |
 | Not on the thread yet | It's **summoned**: a new session starts with the message as its first prompt. | `summoned` |
 | Running in a terminal pane | Axel can't type into it; the message waits in its inbox. | `in_pane` |
 | On your laptop, while the sender runs on a remote host | It's delivered when your laptop syncs, within seconds while it's awake. | `awaiting_sync` |
@@ -34,12 +34,18 @@ can you review src/auth.rs for the token refresh bug? …
 
 ## Replies
 
-An agent's normal answers go to **you**, not to the agent that asked. To answer atlas, nova
-has to `send` to it too, and that reply arrives as atlas's next prompt. So agents are told
-to:
+When atlas's message starts nova's turn, nova just answers. When that turn ends, its last
+message goes back to atlas by itself, as atlas's next prompt, and you see it on the thread
+as it happens. Atlas is told you've already seen it, so it carries on with its task
+instead of repeating it to you. An answer that comes back is never answered in turn, so
+two agents can't keep a conversation going on their own, and it never summons anyone.
 
+Agents are also told to:
+
+- ask **you**, not another agent, for anything only you know;
 - make each message self-contained, since the recipient can't see their conversation;
-- ask for a reply explicitly when they need one, then end their turn instead of polling;
+- end their turn after sending a request, instead of polling;
+- say results rather than narrate what they're about to do;
 - only send when they have something the other needs, never "got it" or "thanks": every
   message costs the recipient a turn.
 

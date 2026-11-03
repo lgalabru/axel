@@ -52,6 +52,10 @@ pub struct HostConfig {
     pub initial_attachments: Vec<PathBuf>,
     /// The agent that summoned this session with the initial prompt, if any.
     pub initial_from: Option<Sender>,
+    /// The `axel` binary: a turn another agent's message started ends by
+    /// returning its answer to that agent (`axel send --reply`). `None`
+    /// returns nothing.
+    pub reply_with: Option<PathBuf>,
     /// A native session id to `session/load` instead of `session/new`.
     pub resume_native_id: Option<String>,
     /// `_meta` sent with `session/new` / `session/load`.  For Claude this
@@ -120,7 +124,9 @@ pub fn native_mode(mode: RuntimeMode) -> &'static str {
 }
 
 /// Raw input / output stored on tool-call items is cut at this many bytes.
-const RAW_LIMIT: usize = 4096;
+/// Stored tool input and output stop at this many bytes (a read file, a
+/// command's output): enough to see it, not the store's whole size.
+const RAW_LIMIT: usize = 16 * 1024;
 /// `TurnSummary.assistant_text` keeps this many chars.
 const ASSISTANT_HEAD: usize = 2000;
 
@@ -180,6 +186,7 @@ pub async fn run_host(
     host.line(CYAN, "●", &format!("adapter: {}", host.adapter.join(" ")));
 
     let tx_notif = tx.clone();
+    let tx_ext = tx.clone();
     let tx_perm = tx.clone();
     let cwd = host.cfg.cwd.clone();
     let cwd2 = cwd.clone();
@@ -191,6 +198,15 @@ pub async fn run_host(
         .on_receive_notification(
             async move |n: acp::SessionNotification, _cx: ConnectionTo<Agent>| {
                 let _ = tx_notif.send(Event::Update(n));
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_notification(
+            async move |n: agent_client_protocol::UntypedMessage, _cx: ConnectionTo<Agent>| {
+                if n.method().starts_with("_axel/") {
+                    let _ = tx_ext.send(Event::Ext { method: n.method().to_string(), params: n.params().clone() });
+                }
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -268,6 +284,8 @@ enum Event {
     },
     Stderr(String),
     StdinClosed,
+    /// One of the adapter's own notifications (`_axel/…`).
+    Ext { method: String, params: Value },
 }
 
 type PromptFuture = Pin<Box<dyn Future<Output = Result<acp::PromptResponse, acp::Error>> + Send>>;
@@ -277,6 +295,11 @@ enum Action {
     None,
     StartPrompt(String, Vec<PathBuf>, Option<Sender>),
     SetMode(RuntimeMode),
+    /// Send this prompt (in `steering`) into the running turn.
+    Steer(String),
+    /// Withdraw a prompt sent into the turn; then put `edit` in, or drop it.
+    /// The reply waits for the adapter's answer.
+    Withdraw { item_id: String, edit: Option<String>, reply: oneshot::Sender<Reply> },
     Stop,
 }
 
@@ -314,6 +337,9 @@ const BLUE: &str = "\x1b[34m";
 const MAGENTA: &str = "\x1b[35m";
 const CYAN: &str = "\x1b[36m";
 
+/// A returned answer is cut to this many characters.
+const REPLY_MAX_CHARS: usize = 8000;
+
 /// `app` in this host's OSC 7501 reports: the program in the pane is Axel's
 /// session host, whatever harness it drives.
 const PROGRAM_STATUS_APP: &str = "axel";
@@ -330,6 +356,8 @@ struct Host<W: Write> {
     turn: i64,
     turn_started: Instant,
     turn_user_text: String,
+    /// The agent whose message started this turn, if it wasn't the owner.
+    turn_from: Option<Sender>,
     turn_assistant_text: String,
     turn_tool_calls: i64,
     turn_files_edited: i64,
@@ -339,6 +367,10 @@ struct Host<W: Write> {
     pending: HashMap<String, PendingPermission>,
     /// Prompts waiting for the running turn to end, next first.
     queue: VecDeque<Queued>,
+    /// The adapter can take prompts into a running turn (`_axel/steer`).
+    can_steer: bool,
+    /// Prompts sent into the running turn and not taken in yet, oldest first.
+    steering: VecDeque<Queued>,
     /// The runtime mode the fs handler reads (kept equal to `cfg.runtime_mode`).
     mode_cell: Arc<std::sync::Mutex<RuntimeMode>>,
     /// What `session/new` said about native modes, for later switches.
@@ -370,8 +402,11 @@ impl<W: Write> Host<W> {
             cur_text: None,
             pending: HashMap::new(),
             queue: VecDeque::new(),
+            can_steer: false,
+            steering: VecDeque::new(),
             mode_cell,
             native_modes: None,
+            turn_from: None,
             ended: false,
             seen_through: None,
         }
@@ -453,11 +488,23 @@ impl<W: Write> Host<W> {
                         Action::None => {}
                         Action::StartPrompt(text, files, from) => in_flight = Some(self.start_turn(cx, text, files, from)),
                         Action::SetMode(mode) => self.set_mode(cx, mode).await,
+                        Action::Steer(item_id) => self.send_steer(cx, &item_id).await,
+                        Action::Withdraw { item_id, edit, reply } => {
+                            let r = self.withdraw(cx, &item_id, edit).await;
+                            let _ = reply.send(r);
+                        }
                         Action::Stop => {
                             // Let the socket reply drain before the listener is torn down.
                             tokio::time::sleep(Duration::from_millis(50)).await;
                             return "stopped".into();
                         }
+                    }
+                    // A prompt the turn couldn't take (it ended meanwhile) waits
+                    // in the queue: start it.
+                    if in_flight.is_none()
+                        && let Some((text, files, from)) = self.take_queued(None)
+                    {
+                        in_flight = Some(self.start_turn(cx, text, files, from));
                     }
                 }
                 res = async { in_flight.as_mut().expect("guarded").await }, if in_flight.is_some() => {
@@ -468,7 +515,7 @@ impl<W: Write> Host<W> {
                     let mut deferred = Vec::new();
                     while let Ok(ev) = rx.try_recv() {
                         match ev {
-                            Event::Update(_) | Event::Permission { .. } | Event::Stderr(_) => {
+                            Event::Update(_) | Event::Permission { .. } | Event::Stderr(_) | Event::Ext { .. } => {
                                 let _ = self.handle_event(cx, ev, true);
                             }
                             other => deferred.push(other),
@@ -480,6 +527,11 @@ impl<W: Write> Host<W> {
                             Action::None => {}
                             Action::StartPrompt(text, files, from) => in_flight = Some(self.start_turn(cx, text, files, from)),
                             Action::SetMode(mode) => self.set_mode(cx, mode).await,
+                            Action::Steer(item_id) => self.send_steer(cx, &item_id).await,
+                            Action::Withdraw { item_id, edit, reply } => {
+                                let r = self.withdraw(cx, &item_id, edit).await;
+                                let _ = reply.send(r);
+                            }
                             Action::Stop => {
                                 tokio::time::sleep(Duration::from_millis(50)).await;
                                 return "stopped".into();
@@ -519,6 +571,14 @@ impl<W: Write> Host<W> {
             .await
             .map_err(|e| anyhow::anyhow!("initialize: {e}"))?;
         self.prompt_caps = PromptCaps::from(&init.agent_capabilities.prompt_capabilities);
+        self.can_steer = init
+            .agent_capabilities
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("axel"))
+            .and_then(|a| a.get("steer"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let agent_name = init
             .agent_info
             .as_ref()
@@ -714,10 +774,22 @@ impl<W: Write> Host<W> {
                 }
                 Action::None
             }
+            // Changing or withdrawing a prompt sent into the turn asks the
+            // adapter first: the reply waits for its answer.
+            Event::Command { cmd: Command::Edit { item_id, text }, reply } if self.steering.iter().any(|q| q.item_id == item_id) => {
+                Action::Withdraw { item_id, edit: Some(text), reply }
+            }
+            Event::Command { cmd: Command::Dequeue { item_id }, reply } if self.steering.iter().any(|q| q.item_id == item_id) => {
+                Action::Withdraw { item_id, edit: None, reply }
+            }
             Event::Command { cmd, reply } => {
                 let (r, action) = self.on_command(cx, cmd, in_turn);
                 let _ = reply.send(r);
                 action
+            }
+            Event::Ext { method, params } => {
+                self.on_ext(&method, &params);
+                Action::None
             }
             Event::Stderr(line) => {
                 let shown: String = line.chars().take(200).collect();
@@ -751,6 +823,14 @@ impl<W: Write> Host<W> {
                 }
                 if !in_turn {
                     return (Reply::Ok, Action::StartPrompt(text, attachments, from));
+                }
+                // The owner's message goes into the running turn. Another
+                // agent's waits for its own turn, so its answer goes back to it.
+                if !steer && self.can_steer && from.is_none() {
+                    return match self.record_steer(text, attachments) {
+                        Ok(item_id) => (Reply::Steering { item_id: item_id.clone() }, Action::Steer(item_id)),
+                        Err(e) => (Reply::Error { message: format!("store: {e}") }, Action::None),
+                    };
                 }
                 match self.enqueue(text, attachments, steer, from) {
                     Ok(item_id) => {
@@ -793,6 +873,14 @@ impl<W: Write> Host<W> {
                     let (text, files, from) = self.take_queued(Some(pos)).expect("position checked");
                     return (Reply::Ok, Action::StartPrompt(text, files, from));
                 }
+                // Into the running turn, rather than cancelling it.
+                if self.can_steer && self.queue[pos].from.is_none() {
+                    let q = self.queue.remove(pos).expect("position checked");
+                    self.patch_item(&q.item_id, json!({ "steering": true }));
+                    let id = q.item_id.clone();
+                    self.steering.push_back(q);
+                    return (Reply::Steering { item_id: id.clone() }, Action::Steer(id));
+                }
                 let q = self.queue.remove(pos).expect("position checked");
                 self.queue.push_front(q);
                 match self.cancel_turn(cx) {
@@ -814,6 +902,18 @@ impl<W: Write> Host<W> {
                     self.line(RED, "✖", &format!("store: {e}"));
                 }
                 self.dim(&format!("dequeued {item_id}"));
+                (Reply::Ok, Action::None)
+            }
+            Command::Edit { item_id, text } => {
+                if text.trim().is_empty() {
+                    return (Reply::Error { message: "empty message: remove it instead".into() }, Action::None);
+                }
+                let Some(q) = self.queue.iter_mut().find(|q| q.item_id == item_id) else {
+                    return (Reply::Error { message: "the agent has read that message already".into() }, Action::None);
+                };
+                q.text = text.clone();
+                self.patch_item(&item_id, json!({ "text": text }));
+                self.dim(&format!("edited {item_id}"));
                 (Reply::Ok, Action::None)
             }
             Command::SetMode { mode } => (Reply::Ok, Action::SetMode(mode)),
@@ -838,7 +938,7 @@ impl<W: Write> Host<W> {
                     state: self.state,
                     turn: self.turn,
                     pending: self.pending.len(),
-                    queued: self.queue.len(),
+                    queued: self.queue.len() + self.steering.len(),
                 },
                 Action::None,
             ),
@@ -885,6 +985,124 @@ impl<W: Write> Host<W> {
         Ok(item.id)
     }
 
+    /// Record a prompt sent into the running turn, as a pending `UserMessage`
+    /// (it shows as not read yet until the agent takes it in). Its item id.
+    fn record_steer(&mut self, text: String, files: Vec<PathBuf>) -> Result<String> {
+        let paths = attach::attachment_paths(&files);
+        let content = json!({ "text": text, "attachments": paths, "queued": true, "steering": true });
+        let item = self.push(ItemKind::UserMessage, Some(ItemStatus::Pending), None, content)?;
+        self.line(BLUE, "↳", &format!("into the turn  {DIM}{}{RESET}", head(&text, 100)));
+        self.steering.push_back(Queued { item_id: item.id.clone(), text, files, from: None });
+        Ok(item.id)
+    }
+
+    /// Hand a prompt in `steering` to the adapter for the running turn. If it
+    /// can't take it (the turn just ended), it waits in the queue instead.
+    async fn send_steer(&mut self, cx: &ConnectionTo<Agent>, item_id: &str) {
+        let Some(q) = self.steering.iter().find(|q| q.item_id == item_id) else { return };
+        let mut warnings = Vec::new();
+        let blocks = attach::build_prompt_blocks(&q.text, &q.files, self.prompt_caps, &mut |w| warnings.push(w));
+        for w in warnings {
+            self.line(YELLOW, "!", &w);
+        }
+        let Some(sid) = self.native_session_id.clone() else { return };
+        let params = json!({ "sessionId": sid.to_string(), "messageId": item_id, "prompt": blocks });
+        let accepted = match self.raw_request(cx, "_axel/steer", params).await {
+            Ok(v) => v.get("accepted").and_then(Value::as_bool).unwrap_or(false),
+            Err(e) => {
+                self.line(YELLOW, "!", &format!("{e}"));
+                false
+            }
+        };
+        if !accepted {
+            self.unsteer_to_queue(item_id, false);
+        }
+    }
+
+    /// A prompt sent into the turn goes back to waiting in the queue (first
+    /// when `front`, as for the turn that was cancelled under it).
+    fn unsteer_to_queue(&mut self, item_id: &str, front: bool) {
+        let Some(pos) = self.steering.iter().position(|q| q.item_id == item_id) else { return };
+        let q = self.steering.remove(pos).expect("position checked");
+        self.patch_item(item_id, json!({ "steering": null }));
+        if front {
+            self.queue.push_front(q);
+        } else {
+            self.queue.push_back(q);
+        }
+    }
+
+    /// Withdraw a prompt sent into the turn, if the agent hasn't taken it in;
+    /// with `edit`, send the new text in its place.
+    async fn withdraw(&mut self, cx: &ConnectionTo<Agent>, item_id: &str, edit: Option<String>) -> Reply {
+        if edit.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return Reply::Error { message: "empty message: remove it instead".into() };
+        }
+        let Some(sid) = self.native_session_id.clone() else {
+            return Reply::Error { message: "no session".into() };
+        };
+        let withdrawn = self
+            .raw_request(cx, "_axel/unsteer", json!({ "sessionId": sid.to_string(), "messageId": item_id }))
+            .await
+            .ok()
+            .and_then(|v| v.get("withdrawn").and_then(Value::as_bool))
+            .unwrap_or(false);
+        // Taken in meanwhile (its `_axel/steered` may still be on its way).
+        if !withdrawn || !self.steering.iter().any(|q| q.item_id == item_id) {
+            return Reply::Error { message: "the agent has read that message already".into() };
+        }
+        match edit {
+            Some(text) => {
+                if let Some(q) = self.steering.iter_mut().find(|q| q.item_id == item_id) {
+                    q.text = text.clone();
+                }
+                self.patch_item(item_id, json!({ "text": text }));
+                self.dim(&format!("edited {item_id}"));
+                self.send_steer(cx, item_id).await;
+            }
+            None => {
+                self.steering.retain(|q| q.item_id != item_id);
+                if let Err(e) = self.store.delete_item(item_id) {
+                    self.line(RED, "✖", &format!("store: {e}"));
+                }
+                self.dim(&format!("withdrew {item_id}"));
+            }
+        }
+        Reply::Ok
+    }
+
+    /// The adapter's own notifications: a prompt sent into the turn landed
+    /// (`_axel/steered`), or went back unread when the turn was cancelled
+    /// (`_axel/unsteered`).
+    fn on_ext(&mut self, method: &str, params: &Value) {
+        match method {
+            "_axel/steered" => {
+                let Some(id) = params.get("messageId").and_then(Value::as_str) else { return };
+                let Some(pos) = self.steering.iter().position(|q| q.item_id == id) else { return };
+                let q = self.steering.remove(pos).expect("position checked");
+                if let Err(e) = self.store.update_item(id, Some(ItemStatus::Completed), Some(json!({ "queued": null, "steering": null }))) {
+                    self.line(RED, "✖", &format!("store: {e}"));
+                }
+                self.line(BLUE, "↳", &format!("read  {DIM}{}{RESET}", head(&q.text, 100)));
+            }
+            "_axel/unsteered" => {
+                let ids: Vec<String> = params.get("messageIds").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+                // Oldest first, ahead of what was queued.
+                for id in ids.iter().rev() {
+                    self.unsteer_to_queue(id, true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Merge `patch` into an item's content.
+    fn patch_item(&mut self, item_id: &str, patch: Value) {
+        if let Err(e) = self.store.update_item(item_id, None, Some(patch)) {
+            self.line(RED, "✖", &format!("store: {e}"));
+        }
+    }
+
     /// Pop a queued prompt (the first, or the one at `pos`) and drop its
     /// placeholder item: `start_turn` records the message again at its real
     /// place in the timeline.
@@ -894,6 +1112,46 @@ impl<W: Write> Host<W> {
             self.line(RED, "✖", &format!("store: {e}"));
         }
         Some((q.text, q.files, q.from))
+    }
+
+    /// Return this turn's answer to the agent whose message started it, with
+    /// `axel send --reply` (signed, policy-checked and delivered like any
+    /// message).  Not for the owner's prompts, and not for a turn an answer
+    /// started, so two agents can't keep answering each other.
+    fn return_answer(&mut self) {
+        let (Some(from), Some(exe)) = (self.turn_from.take(), self.cfg.reply_with.clone()) else { return };
+        if from.reply {
+            return;
+        }
+        // The turn's last message is the answer; what came before a tool call
+        // was working out loud.
+        self.finalize_text();
+        let last = self
+            .store
+            .items(&self.cfg.session_id, 0, 100_000)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|i| i.turn == self.turn && i.kind == ItemKind::AssistantMessage)
+            .and_then(|i| i.content.get("text").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default();
+        let answer = last.trim();
+        if answer.is_empty() {
+            return;
+        }
+        let answer: String = answer.chars().take(REPLY_MAX_CHARS).collect();
+        match std::process::Command::new(exe)
+            .args(["send", "--reply", "--to", &from.name, "--"])
+            .arg(&answer)
+            // As this agent, on this thread (the adapter's environment says who).
+            .envs(self.cfg.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(o) if o.status.success() => self.line(DIM, "↩", &format!("answer returned to {}", from.name)),
+            Ok(o) => self.line(RED, "✖", &format!("returning the answer to {}: {}", from.name, String::from_utf8_lossy(&o.stderr).trim())),
+            Err(e) => self.line(RED, "✖", &format!("returning the answer to {}: {e}", from.name)),
+        }
     }
 
     /// What this agent missed on its thread since its last turn, and who
@@ -959,6 +1217,7 @@ impl<W: Write> Host<W> {
         self.turn += 1;
         self.turn_started = Instant::now();
         self.turn_user_text = text.clone();
+        self.turn_from = from.clone();
         // The thread shows the message as written; the agent also reads who
         // wrote it, and first what it missed on the thread.
         let framed = from.as_ref().map_or_else(|| text.clone(), |f| f.frame(&text));
@@ -1024,6 +1283,12 @@ impl<W: Write> Host<W> {
     fn end_turn(&mut self, res: Result<acp::PromptResponse, acp::Error>) {
         self.finalize_text();
         self.cancel_pending("turn ended");
+        self.close_open_tool_calls();
+        // Sent into the turn and never taken in: they wait for the next one.
+        let unread: Vec<String> = self.steering.iter().map(|q| q.item_id.clone()).collect();
+        for id in unread.iter().rev() {
+            self.unsteer_to_queue(id, true);
+        }
         let duration_ms = self.turn_started.elapsed().as_millis() as i64;
         let (stop_reason, status) = match &res {
             Ok(resp) => {
@@ -1090,15 +1355,27 @@ impl<W: Write> Host<W> {
             _ if head.is_empty() => format!("{who} finished"),
             _ => format!("{who} finished: {head}"),
         });
+        // Finished: a result the owner hasn't seen (done, which Rex marks until
+        // they look); stopped by them: at rest (idle); failed: error.
+        let turn_state = match stop_reason.as_str() {
+            "error" => StatusState::Error,
+            "cancelled" => StatusState::Idle,
+            _ => StatusState::Done,
+        };
         let _ = self.store.record_status(
             &self.signer,
             &self.cfg.session_id,
             &StatusReport {
-                state: StatusState::Idle,
+                state: turn_state,
                 title: Some(format!("turn {} {}", self.turn, stop_reason)),
+                msg: (turn_state == StatusState::Done && !head.is_empty()).then(|| head.clone()),
                 ..Default::default()
             },
         );
+        // Another agent's message started this turn: its answer goes back.
+        if stop_reason == "end_turn" {
+            self.return_answer();
+        }
         // A finished turn is a result to look at (done); a cancelled one is at
         // rest (idle); a failed one stopped (error).
         let (osc_state, osc_msg) = match stop_reason.as_str() {
@@ -1548,6 +1825,25 @@ impl<W: Write> Host<W> {
     }
 
     /// Reject every pending permission (dropping the reply answers `cancelled`).
+    /// Tool calls of this turn that never got a result (the turn was cancelled
+    /// mid-call, or the harness never reported one) can't finish any more:
+    /// close them, or the thread would show them running for ever.
+    fn close_open_tool_calls(&mut self) {
+        let open = match self.store.open_tool_calls(&self.cfg.session_id, self.turn) {
+            Ok(open) => open,
+            Err(e) => return self.line(RED, "✖", &format!("store: {e}")),
+        };
+        for item in open {
+            if let Err(e) = self.store.update_item(
+                &item.id,
+                Some(ItemStatus::Cancelled),
+                Some(json!({ "reason": "the turn ended before it finished" })),
+            ) {
+                self.line(RED, "✖", &format!("store: {e}"));
+            }
+        }
+    }
+
     fn cancel_pending(&mut self, why: &str) {
         if self.pending.is_empty() {
             return;
@@ -1804,16 +2100,28 @@ fn item_title(item: &ConversationItem) -> Option<String> {
 }
 
 /// Keep `v` if it serialises within `limit` bytes; otherwise its serialised head as a string.
+/// `v`, cut to about `limit` bytes. Text stays text: a string, or text
+/// blocks (`[{type: text, text}]`), is cut as text and stays readable; only
+/// other JSON is cut as its serialization (stored as a string).
 fn truncate_json(v: &Value, limit: usize) -> Value {
-    let s = v.to_string();
-    if s.len() <= limit {
+    if v.to_string().len() <= limit {
         return v.clone();
     }
-    let mut end = limit;
-    while !s.is_char_boundary(end) {
-        end -= 1;
+    let cut = |s: &str| {
+        let mut end = limit.min(s.len());
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    };
+    match v {
+        Value::String(s) => Value::String(cut(s)),
+        Value::Array(blocks) if !blocks.is_empty() && blocks.iter().all(|b| b.get("text").and_then(Value::as_str).is_some()) => {
+            let text = blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
+            Value::String(cut(&text))
+        }
+        other => Value::String(cut(&other.to_string())),
     }
-    Value::String(format!("{}…", &s[..end]))
 }
 
 /// First line of `s`, at most `n` chars.
@@ -1851,6 +2159,18 @@ fn input_summary(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_text_is_cut_as_text_not_as_its_json() {
+        let long = format!("line one\n{}", "x".repeat(100));
+        let cut = truncate_json(&Value::String(long.clone()), 20);
+        assert_eq!(cut, Value::String(format!("{}…", &long[..20])), "no quotes, no \\n escapes");
+        let blocks = serde_json::json!([{ "type": "text", "text": "first\nsecond" }, { "type": "text", "text": "y".repeat(100) }]);
+        assert_eq!(truncate_json(&blocks, 15), Value::String("first\nsecond\nyy…".into()), "text blocks become their text");
+        let small = serde_json::json!({ "a": 1 });
+        assert_eq!(truncate_json(&small, 100), small, "under the limit: as it was");
+        assert_eq!(truncate_json(&Value::String("é".repeat(20)), 5), Value::String("éé…".into()), "cut on a character boundary");
+    }
 
     #[test]
     fn truncation_and_heads() {

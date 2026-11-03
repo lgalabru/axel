@@ -88,6 +88,7 @@ fn fixture(mode: RuntimeMode, harness: Harness, initial_prompt: Option<&str>) ->
         initial_attachments: vec![],
         resume_native_id: None,
         initial_from: None,
+        reply_with: None,
         mcp_servers: Vec::new(),
         session_meta: None,
         model: None,
@@ -794,7 +795,7 @@ fn prompts_from_another_agent_are_framed_for_the_agent_and_tagged_on_the_item() 
     wait_until("idle after setup", Duration::from_secs(10), || {
         f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
     });
-    let from = axel_acp::socket::Sender { pubkey: "PKnova".into(), name: "nova".into() };
+    let from = axel_acp::socket::Sender::new("PKnova", "nova");
     send_ok(
         &sock,
         Command::Prompt { text: "can you check auth.rs?".into(), attachments: vec![], steer: false, from: Some(from) },
@@ -813,7 +814,7 @@ fn prompts_from_another_agent_are_framed_for_the_agent_and_tagged_on_the_item() 
     // The agent reads who wrote it and how to answer.
     let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
     assert!(log.contains("Message from nova, another Axel agent"), "{log}");
-    assert!(log.contains(r#"axel send \"@nova <your reply>\""#), "{log}");
+    assert!(log.contains("your answer goes back to nova by itself"), "{log}");
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }
@@ -889,7 +890,7 @@ fn each_turn_starts_with_what_the_agent_missed_and_notes_wait_for_it() {
     assert!(user_texts(&f).iter().any(|(t, _)| t == "@atlas what do you think?"), "{:?}", user_texts(&f));
 
     // A note from nova starts no turn; it shows on the thread.
-    let from = axel_acp::socket::Sender { pubkey: nova.public().to_base58(), name: "nova".into() };
+    let from = axel_acp::socket::Sender::new(nova.public().to_base58(), "nova");
     send_ok(&sock, Command::Note { text: "FYI: the QEDIT build passes now.".into(), from });
     wait_until("the note on the thread", Duration::from_secs(5), || {
         user_texts(&f).iter().any(|(t, _)| t == "FYI: the QEDIT build passes now.")
@@ -921,6 +922,10 @@ fn the_host_reports_program_status_to_its_pane_as_osc_7501() {
     });
     send_ok(&sock, Command::Prompt { text: "fix the login bug".into(), attachments: vec![], steer: false, from: None });
     wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    // Finished: done, a result the owner hasn't seen, with the reply's first line.
+    let st = f.store.status(&f.session_id).unwrap().unwrap();
+    assert_eq!(st.state, axel_store::StatusState::Done);
+    assert_eq!(st.msg.as_deref(), Some("Hello, world.Tests pass."));
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 
@@ -963,6 +968,135 @@ fn a_question_waits_for_the_owner_even_in_autopilot() {
     assert_eq!(question().unwrap().status, Some(ItemStatus::Answered));
     let said = f.store.items(&f.session_id, 0, 1000).unwrap().into_iter().filter(|i| i.kind == ItemKind::AssistantMessage).map(|i| i.content["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
     assert!(said.iter().any(|t| t.contains("picked answer:1")), "the agent got the pick: {said:?}");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+/// A stand-in `axel` that records how `send --reply` was called.
+fn reply_recorder(dir: &Path) -> (PathBuf, PathBuf) {
+    let log = dir.join("reply.log");
+    let exe = dir.join("axel-stub");
+    std::fs::write(&exe, format!("#!/bin/sh\nprintf '%s|' \"$@\" >> '{}'\necho \" thread=$AXEL_THREAD agent=$AXEL_AGENT\" >> '{}'\n", log.display(), log.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (exe, log)
+}
+
+#[test]
+fn a_turn_another_agent_started_returns_its_answer_to_that_agent() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let (exe, log) = reply_recorder(f._dir.path());
+    f.cfg.reply_with = Some(exe);
+    f.cfg.env = vec![("AXEL_THREAD".into(), f.thread_id.clone()), ("AXEL_AGENT".into(), "PKatlas".into())];
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    // The owner's prompt: nothing to return.
+    send_ok(&sock, Command::Prompt { text: "hi".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    assert!(!log.exists(), "the owner reads the answer on the thread");
+    // nova's message: the answer goes back to nova, as this agent, on this thread.
+    let nova = axel_acp::socket::Sender::new("PKnova", "nova");
+    send_ok(&sock, Command::Prompt { text: "can you check?".into(), attachments: vec![], steer: false, from: Some(nova.clone()) });
+    wait_until("the answer returned", Duration::from_secs(20), || log.exists());
+    let called = std::fs::read_to_string(&log).unwrap();
+    // The turn's last message, not the working-out-loud before its tool call.
+    assert!(called.starts_with("send|--reply|--to|nova|--|Tests pass.|"), "{called}");
+    assert!(called.contains(&format!("thread={}", f.thread_id)) && called.contains("agent=PKatlas"), "{called}");
+    // nova's answer starts a turn: nothing goes back, or they'd answer each other forever.
+    std::fs::remove_file(&log).unwrap();
+    let answer = axel_acp::socket::Sender { reply: true, ..nova };
+    send_ok(&sock, Command::Prompt { text: "here you go".into(), attachments: vec![], steer: false, from: Some(answer) });
+    wait_until("turn 3", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 3);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!log.exists(), "an answer isn't answered");
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+/// The host on Axel's own Claude adapter, with `fake_claude` as Claude Code.
+fn claude_fixture(initial_prompt: Option<&str>) -> (Fixture, PathBuf) {
+    let mut f = fixture(RuntimeMode::Autopilot, Harness::Custom(env!("CARGO_BIN_EXE_claude_acp").to_string()), initial_prompt);
+    let home = f._dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let log = home.join("claude.log");
+    f.cfg.env = vec![
+        ("CLAUDE_CODE_EXECUTABLE".into(), env!("CARGO_BIN_EXE_fake_claude").into()),
+        ("FAKE_CLAUDE_LOG".into(), log.display().to_string()),
+        ("HOME".into(), home.display().to_string()),
+        ("CLAUDE_CONFIG_DIR".into(), home.join(".claude").display().to_string()),
+    ];
+    (f, log)
+}
+
+fn item_of(f: &Fixture, id: &str) -> Option<axel_store::ConversationItem> {
+    f.store.item(id).unwrap()
+}
+
+fn running_turn(sock: &Path, turn: i64) {
+    wait_until(&format!("turn {turn} running"), Duration::from_secs(20), || {
+        matches!(socket::send(sock, &Command::Status), Ok(Reply::Status { state: SessionState::Running, turn: t, .. }) if t == turn)
+    });
+}
+
+#[test]
+fn a_message_sent_mid_turn_goes_into_it_and_can_be_edited_until_read() {
+    let (f, claude_log) = claude_fixture(Some("work"));
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    running_turn(&sock, 1);
+    let prompt = |text: &str| socket::send(&sock, &Command::Prompt { text: text.into(), attachments: vec![], steer: false, from: None }).unwrap();
+
+    // Into the running turn, not after it: pending until the agent reads it.
+    let Reply::Steering { item_id: first } = prompt("also this") else { panic!("expected steering") };
+    let it = item_of(&f, &first).unwrap();
+    assert_eq!((it.status, it.content["steering"].clone()), (Some(ItemStatus::Pending), serde_json::json!(true)));
+    assert!(matches!(socket::send(&sock, &Command::Status), Ok(Reply::Status { turn: 1, queued: 1, .. })), "no new turn");
+
+    // Not read yet: it can be edited, in place.
+    send_ok(&sock, Command::Edit { item_id: first.clone(), text: "also this, edited".into() });
+    assert_eq!(item_of(&f, &first).unwrap().content["text"], "also this, edited");
+    assert!(std::fs::read_to_string(&claude_log).unwrap().contains("cancel_async_message"), "withdrawn from Claude's queue, then sent again");
+
+    // The agent reads both at its next step; one turn for all of it.
+    let Reply::Steering { item_id: second } = prompt("fold") else { panic!("expected steering") };
+    wait_until("turn 1 ended", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    assert_eq!(turns[0].summary.stop_reason, "end_turn");
+    assert!(turns[0].summary.assistant_text.contains("read: also this, edited, fold"), "{:?}", turns[0].summary.assistant_text);
+    for id in [&first, &second] {
+        let it = item_of(&f, id).unwrap();
+        assert_eq!(it.status, Some(ItemStatus::Completed), "read: {:?}", it.content);
+        assert_eq!(it.content.get("steering"), None);
+        assert_eq!(it.content.get("queued"), None);
+    }
+    // Read: too late to edit.
+    assert!(matches!(socket::send(&sock, &Command::Edit { item_id: first, text: "x".into() }), Ok(Reply::Error { .. })));
+
+    // Withdrawn before it's read: gone.
+    let Reply::Ok = prompt("work") else { panic!("a new turn") };
+    running_turn(&sock, 2);
+    let Reply::Steering { item_id: oops } = prompt("oops") else { panic!("expected steering") };
+    send_ok(&sock, Command::Dequeue { item_id: oops.clone() });
+    assert!(item_of(&f, &oops).is_none());
+
+    // Cancelled with one not read yet: it runs next, as a turn of its own.
+    let Reply::Steering { item_id: next } = prompt("next please") else { panic!("expected steering") };
+    send_ok(&sock, Command::Cancel);
+    wait_until("turn 3 ended", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 3);
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    assert_eq!(turns[1].summary.stop_reason, "cancelled");
+    assert_eq!(turns[2].summary.user_text, "next please");
+    assert!(item_of(&f, &next).is_none(), "its placeholder gave way to the turn's own message");
+
+    // Another agent's message mid-turn still waits for its own turn, so its answer goes back to it.
+    let Reply::Ok = prompt("work") else { panic!("a new turn") };
+    running_turn(&sock, 4);
+    let from = axel_acp::socket::Sender::new("PKnova", "nova");
+    let reply = socket::send(&sock, &Command::Prompt { text: "from nova".into(), attachments: vec![], steer: false, from: Some(from) }).unwrap();
+    assert!(matches!(reply, Reply::Queued { .. }), "{reply:?}");
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }

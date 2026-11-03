@@ -174,7 +174,9 @@ impl Agent {
                 "agentCapabilities": {
                     "promptCapabilities": { "image": true, "embeddedContext": true },
                     "mcpCapabilities": { "http": true },
-                    "loadSession": true
+                    "loadSession": true,
+                    // Messages can be sent into a running turn (`_axel/steer`).
+                    "_meta": { "axel": { "steer": true } }
                 },
                 "agentInfo": { "name": "axel-codex-acp", "title": "Codex", "version": env!("CARGO_PKG_VERSION") },
                 "authMethods": [{ "id": "codex-login", "name": "Log in with Codex", "description": "Run `codex login` in the terminal" }]
@@ -187,6 +189,26 @@ impl Agent {
                 Ok(json!({ "modes": reply.get("modes"), "models": reply.get("models") }))
             }
             "session/prompt" => self.prompt(&params),
+            // A message into the running turn: Codex adds it to the turn's
+            // input (`turn/steer`), so it has landed once accepted.
+            "_axel/steer" => {
+                let s = self.session(&params)?;
+                let Some(turn) = s.turn.lock().expect("turn lock").clone() else {
+                    return Ok(json!({ "accepted": false }));
+                };
+                let message_id = params.get("messageId").and_then(Value::as_str).unwrap_or("").to_string();
+                let steer = json!({ "threadId": s.id, "expectedTurnId": turn, "input": prompt_input(&params), "clientUserMessageId": message_id });
+                match s.codex.request("turn/steer", steer, Duration::from_secs(30)) {
+                    Ok(_) => {
+                        self.client.notify("_axel/steered", json!({ "sessionId": s.id, "messageId": message_id }));
+                        Ok(json!({ "accepted": true }))
+                    }
+                    // The turn ended (or another started) in the meantime.
+                    Err(_) => Ok(json!({ "accepted": false })),
+                }
+            }
+            // Codex takes a steer in at once: there's nothing left to withdraw.
+            "_axel/unsteer" => Ok(json!({ "withdrawn": false })),
             "session/cancel" => {
                 let s = self.session(&params)?;
                 let turn = s.turn.lock().expect("turn lock").clone();

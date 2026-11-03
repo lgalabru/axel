@@ -88,11 +88,28 @@ pub enum MessageKind {
     /// Nothing to act on and no reply needed: the recipient reads it with its
     /// next turn. It never starts a turn or summons anyone.
     Fyi,
+    /// An answer to the recipient's message, returned when the sender's turn
+    /// ended: it starts the recipient's turn, but never summons it.
+    Reply,
 }
 
 impl MessageKind {
     /// The tag a signed message carries when it is [`MessageKind::Fyi`].
     pub const FYI_TAG: &'static str = "fyi";
+    /// The tag a signed message carries when it is [`MessageKind::Reply`].
+    pub const REPLY_TAG: &'static str = "reply";
+
+    /// The kind a signed message's tags say it is.
+    pub fn of_tags(tags: &[Vec<String>]) -> MessageKind {
+        let has = |t: &str| tags.iter().any(|x| x.first().map(String::as_str) == Some(t));
+        if has(Self::FYI_TAG) {
+            MessageKind::Fyi
+        } else if has(Self::REPLY_TAG) {
+            MessageKind::Reply
+        } else {
+            MessageKind::Request
+        }
+    }
 }
 
 /// What `send` did: the signed message, then one outcome per recipient.

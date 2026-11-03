@@ -66,6 +66,20 @@ struct Session {
     tool_uses: Mutex<HashMap<String, Value>>,
     /// Tool uses whose PostToolUse hook should send the tool response.
     hooked: Mutex<HashSet<String>>,
+    /// The turn's steering: whether a prompt is running, and the messages
+    /// sent into it that Claude hasn't taken in yet (our uuid → the host's
+    /// message id). One lock, so a steer can't slip in as the turn ends.
+    steering: Mutex<Steering>,
+}
+
+/// Messages sent into a running turn (`_axel/steer`). Claude takes each in
+/// at the turn's next step and echoes it back (`--replay-user-messages`);
+/// one that arrives after the turn's last step starts a turn of its own,
+/// which the same prompt waits for.
+#[derive(Default)]
+struct Steering {
+    prompting: bool,
+    pending: HashMap<String, String>,
 }
 
 impl Session {
@@ -165,7 +179,9 @@ impl Agent {
                     "agentCapabilities": {
                         "promptCapabilities": { "image": true, "embeddedContext": true },
                         "mcpCapabilities": { "http": true, "sse": true },
-                        "loadSession": true
+                        "loadSession": true,
+                        // Messages can be sent into a running turn (`_axel/steer`).
+                        "_meta": { "axel": { "steer": true } }
                     },
                     "agentInfo": { "name": "axel-claude-acp", "title": "Claude Code", "version": env!("CARGO_PKG_VERSION") },
                     "authMethods": [{ "id": "claude-login", "name": "Log in with Claude Code", "description": "Run `claude /login` in the terminal" }]
@@ -195,8 +211,21 @@ impl Agent {
             "session/cancel" => {
                 let s = self.session(&params)?;
                 s.cancelled.store(true, Ordering::SeqCst);
+                // Messages sent into the turn and not taken in yet would start a
+                // turn of their own after the interrupt: withdraw them, and tell
+                // the host, which keeps them queued.
+                let withdrawn = self.withdraw_all(&s);
+                if !withdrawn.is_empty() {
+                    self.client.notify("_axel/unsteered", json!({ "sessionId": s.id, "messageIds": withdrawn }));
+                }
                 s.control(json!({ "subtype": "interrupt" }), Duration::from_secs(30)).map_err(RpcError::invalid)?;
                 Ok(Value::Null)
+            }
+            "_axel/steer" => self.steer(&params),
+            "_axel/unsteer" => {
+                let s = self.session(&params)?;
+                let id = params.get("messageId").and_then(Value::as_str).unwrap_or("");
+                Ok(json!({ "withdrawn": self.withdraw(&s, id) }))
             }
             "session/set_model" => {
                 let s = self.session(&params)?;
@@ -268,7 +297,10 @@ impl Agent {
             None => (None, None),
         };
 
-        let mut args: Vec<String> = ["--output-format", "stream-json", "--verbose", "--input-format", "stream-json"].map(String::from).to_vec();
+        // `--replay-user-messages`: Claude echoes each user message as it takes
+        // it in, which is how a steer is known to have landed.
+        let mut args: Vec<String> =
+            ["--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--replay-user-messages"].map(String::from).to_vec();
         if let Some(n) = std::env::var("MAX_THINKING_TOKENS").ok().and_then(|v| v.trim().parse::<i64>().ok()) {
             args.extend(["--max-thinking-tokens".into(), n.to_string()]);
         }
@@ -334,6 +366,7 @@ impl Agent {
             cancelled: AtomicBool::new(false),
             tool_uses: Mutex::new(HashMap::new()),
             hooked: Mutex::new(HashSet::new()),
+            steering: Mutex::new(Steering::default()),
         });
         self.spawn_reader(session.clone(), stdout, tx);
         self.sessions.lock().expect("sessions lock").insert(session_id.clone(), session.clone());
@@ -623,11 +656,61 @@ impl Agent {
         json!({ "continue": true })
     }
 
+    /// `_axel/steer`: send a message into the running turn, for Claude to take
+    /// in at its next step. `accepted: false` when no turn is running (the
+    /// host sends it as a prompt instead).
+    fn steer(&self, params: &Value) -> RpcResult {
+        let s = self.session(params)?;
+        let message_id = params.get("messageId").and_then(Value::as_str).unwrap_or("").to_string();
+        let mut steering = s.steering.lock().expect("steering lock");
+        if !steering.prompting || s.cancelled.load(Ordering::SeqCst) {
+            return Ok(json!({ "accepted": false }));
+        }
+        let uuid = new_uuid();
+        let mut message = prompt_to_claude(params);
+        message["uuid"] = json!(uuid);
+        steering.pending.insert(uuid, message_id);
+        s.stdin.send(&message);
+        Ok(json!({ "accepted": true }))
+    }
+
+    /// Withdraw a message sent into the turn that Claude hasn't taken in yet
+    /// (`cancel_async_message`). False when it already has, or isn't ours.
+    fn withdraw(&self, s: &Session, message_id: &str) -> bool {
+        let uuid = s.steering.lock().expect("steering lock").pending.iter().find(|(_, m)| *m == message_id).map(|(u, _)| u.clone());
+        let Some(uuid) = uuid else { return false };
+        let cancelled = s
+            .control(json!({ "subtype": "cancel_async_message", "message_uuid": uuid }), Duration::from_secs(10))
+            .ok()
+            .and_then(|r| r.get("cancelled").and_then(Value::as_bool))
+            .unwrap_or(false);
+        if cancelled {
+            s.steering.lock().expect("steering lock").pending.remove(&uuid);
+        }
+        cancelled
+    }
+
+    /// Withdraw every message still waiting to be taken in; their message ids.
+    fn withdraw_all(&self, s: &Session) -> Vec<String> {
+        let ids: Vec<String> = s.steering.lock().expect("steering lock").pending.values().cloned().collect();
+        ids.into_iter().filter(|id| self.withdraw(s, id)).collect()
+    }
+
     /// `prompt` from the adapter: send the user message, relay Claude's
-    /// stream until its `result`.
+    /// stream until its `result` (and, when messages were sent into the turn
+    /// too late for it, until the turn they start ends too).
     fn prompt(&self, params: &Value) -> RpcResult {
         let session = self.session(params)?;
         session.cancelled.store(false, Ordering::SeqCst);
+        session.steering.lock().expect("steering lock").prompting = true;
+        let result = self.relay_prompt(&session, params);
+        let mut steering = session.steering.lock().expect("steering lock");
+        steering.prompting = false;
+        steering.pending.clear();
+        result
+    }
+
+    fn relay_prompt(&self, session: &Arc<Session>, params: &Value) -> RpcResult {
         session.stdin.send(&prompt_to_claude(params));
         let rx = session.messages.lock().expect("messages lock");
         let sid = session.id.clone();
@@ -644,6 +727,11 @@ impl Agent {
                 "result" => {
                     if session.cancelled.load(Ordering::SeqCst) {
                         return Ok(json!({ "stopReason": "cancelled" }));
+                    }
+                    // A message sent in after the turn's last step: Claude runs
+                    // it as a turn of its own. Its result ends this prompt.
+                    if !session.steering.lock().expect("steering lock").pending.is_empty() {
+                        continue;
                     }
                     let is_error = message.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                     let errors = || {
@@ -689,6 +777,15 @@ impl Agent {
                         for u in to_acp(&Value::Array(vec![block]), "assistant", &mut cache, Some(&session.hooked)) {
                             self.client.update(&sid, u);
                         }
+                    }
+                }
+                // Claude's echo of a user message it took in: a steer that
+                // landed, or the prompt itself. Neither is relayed.
+                "user" if message.get("isReplay").and_then(Value::as_bool) == Some(true) => {
+                    let uuid = message.get("uuid").and_then(Value::as_str).unwrap_or("");
+                    let landed = session.steering.lock().expect("steering lock").pending.remove(uuid);
+                    if let Some(message_id) = landed {
+                        self.client.notify("_axel/steered", json!({ "sessionId": sid, "messageId": message_id }));
                     }
                 }
                 kind @ ("user" | "assistant") => {
@@ -924,6 +1021,23 @@ fn to_acp(content: &Value, role: &str, cache: &mut HashMap<String, Value>, hooks
 }
 
 /// A Claude user message for an ACP prompt: `promptToClaude`.
+/// A random (v4) UUID, the id Claude takes for a user message.
+fn new_uuid() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
+        // No randomness to be had: a clock and a counter are unique enough here.
+        static N: AtomicU64 = AtomicU64::new(0);
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        b[..8].copy_from_slice(&(t as u64).to_le_bytes());
+        b[8..].copy_from_slice(&N.fetch_add(1, Ordering::SeqCst).to_le_bytes());
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
 fn prompt_to_claude(params: &Value) -> Value {
     let mut content = Vec::new();
     let mut context = Vec::new();

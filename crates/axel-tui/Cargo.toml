@@ -6,11 +6,14 @@ license.workspace = true
 description = "ratatui launcher and inbox for Axel"
 
 [dependencies]
+axel-rex.workspace = true
+base64.workspace = true
 axel-store.workspace = true
 axel-identity.workspace = true
 axel-inbox.workspace = true
 axel-config.workspace = true
 ratatui.workspace = true
+unicode-width = "0.2"
 crossterm.workspace = true
 anyhow.workspace = true
 chrono.workspace = true

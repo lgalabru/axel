@@ -61,6 +61,10 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
             drop(ctx);
             super::ui::run_compose(&t.id)
         }
+        ThreadCommand::Tools { thread, fold } => {
+            drop(ctx);
+            super::links::show_tools(&thread, &fold)
+        }
         ThreadCommand::Answer { thread, item } => {
             let t = resolve(&ctx, &thread)?;
             drop(ctx);
@@ -246,7 +250,7 @@ pub fn set_state(ctx: &Ctx, thread_id: &str, op: ThreadOp) -> Result<()> {
 pub fn record_thread(ctx: &Ctx, title: &str, projects: &[std::path::PathBuf]) -> Result<Thread> {
     let owner = ctx.owner()?;
     let env = ctx.store.local_environment()?;
-    let t = ctx.store.create_thread(&owner, title, title, None)?;
+    let t = ctx.store.create_thread(&owner, &axel_tui::util::title_line(title), title, None)?;
     for p in projects {
         let path = std::fs::canonicalize(p).unwrap_or(p.clone());
         let key = launch::repo_key(&path);

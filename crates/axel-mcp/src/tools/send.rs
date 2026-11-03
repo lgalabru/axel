@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn the_owner_is_asked_in_plain_words_and_the_answer_maps_to_a_grant() {
-        assert_eq!(reach_question("jude", &["atlas".into()]), "jude wants to message atlas on this thread, but isn't allowed to reach it. Allow it?");
+        assert_eq!(reach_question("lyra", &["atlas".into()]), "lyra wants to message atlas on this thread, but isn't allowed to reach it. Allow it?");
         let a: ReachAnswer = serde_json::from_value(serde_json::json!({ "answer": "Always allow" })).unwrap();
         assert_eq!(grant_for(ReachChoice::parse(&a.answer)), Some(Grant::Always));
         assert_eq!(ReachChoice::parse("something else"), ReachChoice::No, "only an explicit yes grants");

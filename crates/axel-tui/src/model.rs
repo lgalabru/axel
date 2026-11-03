@@ -277,6 +277,9 @@ pub struct ThreadItem {
     pub attachments: Vec<PathBuf>,
     /// For a message one agent sent another: the recipient's name.
     pub relay_to: Option<String>,
+    /// A prompt sent into the running turn that the agent hasn't read yet
+    /// (pending, `content.steering`); a queued one waits for the turn to end.
+    pub steering: bool,
 }
 
 /// A session of the thread that has not ended.

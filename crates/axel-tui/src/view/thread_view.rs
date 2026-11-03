@@ -365,7 +365,8 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                     // Agent: header line (badge + time), the response starts below
                     // it. Right after its own message, the same agent goes on under it.
                     let mut lines: Vec<Line<'static>> = if continues_speaker(items, *i) { Vec::new() } else { speaker_header(it, base, width).into_iter().collect() };
-                    lines.extend(prose_lines(Vec::new(), &clean_text(t), width, base));
+                    // Agents write Markdown: show it styled, its markers dropped.
+                    lines.extend(super::markdown::md_lines(&clean_text(t), width, base));
                     lines
                 }
                 _ => vec![Line::from(Span::styled("·", dim))],
@@ -579,7 +580,9 @@ fn render_timeline(frame: &mut Frame, v: &ThreadView, area: Rect, _now: i64) {
     }
 }
 
-/// Queued prompts, oldest first: `⧗ queued  text…` with the selection when focused.
+/// Prompts not read yet, oldest first: `↳ sent` (into the running turn, read
+/// at the agent's next step), `⧗ next` / `⧗ queued` (after the turn),
+/// `✎ editing`; with the selection when focused.
 pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
     let q = v.queued();
     let focused = v.focus == Focus::Queue;
@@ -598,7 +601,17 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
         };
         let selected = focused && idx == v.queue_sel;
         let style = if selected { Style::default().bg(SELECTED_BG) } else { Style::default() };
-        let label = if idx == 0 { "⧗ next  " } else { "⧗ queued" };
+        // Sent into the turn: read at the agent's next step. Queued: after the turn.
+        let editing = v.editing.as_deref() == Some(it.id.as_str());
+        let label = if editing {
+            "✎ editing"
+        } else if it.steering {
+            "↳ sent   "
+        } else if idx == 0 {
+            "⧗ next   "
+        } else {
+            "⧗ queued "
+        };
         let files = if it.attachments.is_empty() { String::new() } else { format!("  +{} file(s)", it.attachments.len()) };
         let room = width.saturating_sub(label.chars().count() + 2 + files.chars().count());
         let line = Line::from(vec![
@@ -618,18 +631,67 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
 
 /// The prompt's leading glyph; continuation rows are indented by its width.
 const PROMPT: &str = "› ";
+/// The most rows a message being typed takes before it scrolls.
+pub const MAX_INPUT_ROWS: usize = 8;
 
-/// Rows the composer text takes: the input wrapped (by characters) beside the
-/// prompt glyph, with room for the cursor after the last character.
+/// Rows the composer text takes: the input laid out beside the prompt glyph
+/// (see [`input_rows`]), with room for the cursor after the last character.
 pub fn composer_text_rows(v: &ThreadView, width: u16, max: usize) -> usize {
     let w = (width as usize).saturating_sub(PROMPT.chars().count()).max(1);
-    let n = v.composer.text().chars().count();
-    (n / w + 1).clamp(1, max.max(1))
+    let chars: Vec<char> = v.composer.text().chars().collect();
+    input_rows(&chars, w, v.composer.cursor()).0.len().clamp(1, max.max(1))
+}
+
+/// The composer's text as screen rows of at most `width` characters, broken
+/// at line breaks (which no row shows) and at the width; and the cursor's
+/// (row, column).  Each row is a `(start, end)` range of `chars`.  A cursor
+/// right after a full row gets a row of its own.
+pub fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(usize, usize)>, (usize, usize)) {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    loop {
+        let line_end = chars[start..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| start + i);
+        let mut s = start;
+        loop {
+            let e = (s + width).min(line_end);
+            rows.push((s, e));
+            if e >= line_end {
+                break;
+            }
+            s = e;
+        }
+        if line_end >= chars.len() {
+            break;
+        }
+        start = line_end + 1;
+    }
+    let mut at = None;
+    for (r, &(s, e)) in rows.iter().enumerate() {
+        let last_of_line = rows.get(r + 1).is_none_or(|&(ns, _)| ns != e);
+        if cursor >= s && (cursor < e || (cursor == e && (last_of_line || e == s))) {
+            at = Some((r, cursor - s));
+            break;
+        }
+    }
+    let at = match at {
+        Some((r, c)) if c >= width => {
+            // After a full row: the next row, which may not exist yet.
+            rows.insert(r + 1, (cursor, cursor));
+            (r + 1, 0)
+        }
+        Some(p) => p,
+        None => (rows.len().saturating_sub(1), 0),
+    };
+    (rows, at)
 }
 
 /// Composer height: rule · text rows · chips row · rule · footer.
 pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
-    let max = if area.height >= 20 { 6 } else { 2 };
+    // The composer pane is sized to its text (see `compose::desired_height`):
+    // it always takes up to the most rows, so the size it asks for and the
+    // size it draws agree. In the full view, a short screen keeps two.
+    let max = if v.compose_only || area.height >= 20 { MAX_INPUT_ROWS } else { 2 };
     let chips = u16::from(!v.attachments.is_empty());
     2 + composer_text_rows(v, area.width, max) as u16 + chips + 1
 }
@@ -757,7 +819,7 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
         let hint = if v.awaiting_answer() {
             "send a message to decline and redirect the agent · Tab to answer"
         } else if v.is_working() {
-            "agent is working · Enter queues a message · ^S steers it in now"
+            "agent is working · Enter sends into its turn · ^S interrupts"
         } else {
             if v.compose_only {
                 "message the thread · @name for someone else"
@@ -773,29 +835,27 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
             frame.set_cursor_position(Position::new(text_area.x + indent as u16, text_area.y));
         }
     } else {
-        // Wrap the single-line input by characters, keeping the cursor row visible.
+        // Rows broken at line breaks and the width, keeping the cursor row visible.
         let chars: Vec<char> = v.composer.text().chars().collect();
         let styles = mention_styles(&chars, &mention_names(&v.data));
-        let cursor = v.composer.cursor();
-        let cursor_row = cursor / body_w;
-        let first_row = cursor_row.saturating_sub(text_rows - 1);
-        for r in 0..text_rows {
-            let row = first_row + r;
-            let start = row * body_w;
-            if start > chars.len() || (start == chars.len() && row > cursor_row) {
-                break;
-            }
-            let end = (start + body_w).min(chars.len());
-            let lead = if row == 0 { glyph.clone() } else { Span::raw(" ".repeat(indent)) };
+        let (rows, (cursor_row, cursor_col)) = input_rows(&chars, body_w, v.composer.cursor());
+        // The composer pane grows to fit its text: while it catches up with a
+        // new line, keep the top in place rather than scrolling the first line
+        // away and back. Scroll past the most rows it grows to, or in the full
+        // view, whose layout has no pane to grow.
+        let first_row = if v.compose_only && rows.len() <= MAX_INPUT_ROWS { 0 } else { cursor_row.saturating_sub(text_rows - 1) };
+        for (r, &(start, end)) in rows.iter().enumerate().skip(first_row).take(text_rows) {
+            let lead = if r == 0 { glyph.clone() } else { Span::raw(" ".repeat(indent)) };
             let mut spans = vec![lead];
             spans.extend(styled_run(&chars[start..end], &styles[start..end]));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
-                Rect::new(text_area.x, text_area.y + r as u16, text_area.width, 1),
+                Rect::new(text_area.x, text_area.y + (r - first_row) as u16, text_area.width, 1),
             );
         }
-        if focused {
-            let cx = (indent + cursor % body_w) as u16;
+        // The cursor's row may be the one the pane is still growing to show.
+        if focused && cursor_row - first_row < text_rows {
+            let cx = (indent + cursor_col) as u16;
             let cy = (cursor_row - first_row) as u16;
             frame.set_cursor_position(Position::new(text_area.x + cx, text_area.y + cy));
         }

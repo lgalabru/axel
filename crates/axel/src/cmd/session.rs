@@ -173,8 +173,9 @@ fn host(session_id: &str) -> Result<()> {
         initial_attachments,
         initial_from: std::env::var("AXEL_PROMPT_FROM").ok().filter(|pk| !pk.is_empty()).and_then(|pk| {
             let name = ctx.store.agent_by_pubkey(&pk).ok().flatten()?.name;
-            Some(axel_acp::socket::Sender { pubkey: pk, name })
+            Some(axel_acp::socket::Sender::new(pk, name))
         }),
+        reply_with: std::env::current_exe().ok(),
         resume_native_id: session.harness_session_id.clone(),
         session_meta: meta,
         // The workspace profile's model wins over the agent's, as for pane sessions.

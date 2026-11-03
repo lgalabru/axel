@@ -6,15 +6,19 @@ use axel_mcp::{Delivery, MessageKind, Outcome, SendReport};
 
 use super::Ctx;
 
-pub fn send(text: &str, kind: MessageKind) -> Result<()> {
+pub fn send(text: &str, to: &[String], kind: MessageKind) -> Result<()> {
     let ctx = Ctx::open()?;
     let agents = ctx.store.list_agents()?;
-    let profiles: Vec<Profile> = agents.iter().map(|a| Profile { pubkey: a.pubkey.clone(), name: a.name.clone() }).collect();
-    let recipients = resolve_mentions(text, &profiles);
+    // `--to` names the recipients; otherwise the text's `@name`s do.
+    let (recipients, hosts) = if to.is_empty() {
+        let profiles: Vec<Profile> = agents.iter().map(|a| Profile { pubkey: a.pubkey.clone(), name: a.name.clone() }).collect();
+        (resolve_mentions(text, &profiles), host_hints(text, &agents))
+    } else {
+        resolve_names(&ctx, to)?
+    };
     if recipients.is_empty() {
-        bail!("no recipients: mention at least one agent with @name");
+        bail!("no recipients: mention at least one agent with @name, or pass --to NAME");
     }
-    let hosts = host_hints(text, &agents);
     let report = send_message(&ctx, &recipients, &hosts, text, kind)?;
     let names: Vec<&str> = report.deliveries.iter().map(|d| d.to.as_str()).collect();
     println!("sent {} to {}", &report.message_id[..12.min(report.message_id.len())], names.join(", "));
@@ -108,12 +112,14 @@ pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)]
     if let Some(s) = super::policy::caller_session() {
         b = b.session(&s);
     }
-    if kind == MessageKind::Fyi {
-        b = b.tag(vec![MessageKind::FYI_TAG.to_string()]);
+    match kind {
+        MessageKind::Fyi => b = b.tag(vec![MessageKind::FYI_TAG.to_string()]),
+        MessageKind::Reply => b = b.tag(vec![MessageKind::REPLY_TAG.to_string()]),
+        MessageKind::Request => {}
     }
     let env = ctx.store.sign_with_attestation(&signer, b, thread_id.as_deref())?;
     ctx.store.post(&env)?;
-    let sender = from_agent.as_ref().map(|pk| axel_acp::socket::Sender { pubkey: pk.clone(), name: super::policy::name_of(ctx, pk) });
+    let sender = from_agent.as_ref().map(|pk| axel_acp::socket::Sender { reply: kind == MessageKind::Reply, ..axel_acp::socket::Sender::new(pk.clone(), super::policy::name_of(ctx, pk)) });
     // An agent working here for another machine (its key isn't here) can
     // reach the sessions on this host; others get it when that machine syncs.
     let on_remote_host = from_agent.as_ref().is_some_and(|pk| pk.parse().ok().and_then(|k| ctx.keystore.agent(&k).ok().flatten()).is_none());
@@ -224,8 +230,8 @@ fn deliver(
         // A pane session: Axel can't type into a harness it doesn't drive.
         return Ok(Outcome::InPane);
     }
-    if kind == MessageKind::Fyi {
-        // Nothing to act on: not worth starting an agent for.
+    if kind != MessageKind::Request {
+        // A note or an answer: not worth starting an agent for.
         return Ok(Outcome::NotOnThread);
     }
     let name = super::policy::name_of(ctx, recipient);
@@ -267,8 +273,9 @@ pub fn deliver_from_host(ctx: &Ctx, host: &axel_store::Environment, env: &axel_i
         }
         let name = super::policy::name_of(ctx, r);
         let outcome = super::policy::check_message(ctx, &[r.to_string()]).and_then(|()| {
-            let from = axel_acp::socket::Sender { pubkey: author.clone(), name: sender_name.clone() };
-            let kind = if env.tags.iter().any(|t| t.first().map(String::as_str) == Some(MessageKind::FYI_TAG)) { MessageKind::Fyi } else { MessageKind::Request };
+            let from = axel_acp::socket::Sender::new(author.clone(), sender_name.clone());
+            let kind = MessageKind::of_tags(&env.tags);
+            let from = axel_acp::socket::Sender { reply: kind == MessageKind::Reply, ..from };
             deliver(ctx, thread_id, r, None, false, &env.content, Some(from), kind)
         });
         out.push(match outcome {

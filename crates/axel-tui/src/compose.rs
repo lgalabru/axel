@@ -32,7 +32,8 @@ const RETRY_FIT: Duration = Duration::from_millis(400);
 /// grows), so the host can move the split border; Rex sizes splits by ratio.
 /// `on_question(item_id)` is called once for each question an agent asks
 /// (an `AskUserQuestion` waiting for you), so it can be put in front of you.
-pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_question: &dyn Fn(&str)) -> Result<()> {
+/// `toggle_log(session_id)` shows or minimizes that session's log pane (^L).
+pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_question: &dyn Fn(&str), toggle_log: &dyn Fn(&str)) -> Result<()> {
     let owner_pk = glue::owner_pubkey(deps.keystore)?;
     let data = glue::load_thread(deps.store, &owner_pk, thread_id, now_secs())?;
     let mut v = ThreadView::new(thread_id, data);
@@ -48,35 +49,27 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
 
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableBracketedPaste);
+    // Tell Shift+Enter (a line break) apart from Enter (send).
+    let keys = crate::util::enhance_keys();
     let result = (|| -> Result<()> {
         let mut last = Instant::now();
-        // Fit the pane when the wanted height changes, or when the pane is
-        // short or more than a row tall.  A resize can land a row short (Rex
-        // splits by ratio and rounds), so each retry asks for one row more; a
-        // single spare row is left alone so the split doesn't flip-flop.
-        let mut fitted_for: Option<u16> = None;
-        let mut retries = 0u16;
-        let mut fitted_at = Instant::now().checked_sub(RETRY_FIT).unwrap_or_else(Instant::now);
+        // Keep the pane as tall as the composer wants (see `PaneFit`).
+        let mut pane = PaneFit::default();
         loop {
             let size = terminal.size()?;
             let want = desired_height(&v, size.width);
-            if fitted_for != Some(want) {
-                retries = 0;
-            }
-            let off = size.height < want || size.height > want + 1;
-            if (fitted_for != Some(want) || off) && retries < 4 && fitted_at.elapsed() >= RETRY_FIT {
-                let extra = if size.height < want { retries } else { 0 };
-                fit(want + extra, size.height);
-                retries = if fitted_for == Some(want) { retries + 1 } else { 1 };
-                fitted_for = Some(want);
-                fitted_at = Instant::now();
+            if let Some(ask) = pane.next(want, size.height, Instant::now()) {
+                fit(ask, size.height);
             }
             terminal.draw(|f| render(f, &v))?;
             if event::poll(POLL)? {
-                match event::read()? {
+                let ev = event::read()?;
+                crate::util::log_key(&ev);
+                match ev {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         match v.handle_compose_key(key) {
-                            ThreadAction::None | ThreadAction::OpenLog(_) => {}
+                            ThreadAction::None => {}
+                            ThreadAction::OpenLog(session_id) => toggle_log(&session_id),
                             ThreadAction::Quit | ThreadAction::Back => return Ok(()),
                             ThreadAction::Send { session_id, cmd } => {
                                 let reply = (deps.send)(&session_id, cmd).map_err(|e| format!("{e:#}"));
@@ -103,6 +96,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
             }
         }
     })();
+    crate::util::restore_keys(keys);
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
@@ -211,6 +205,48 @@ fn render_answer(frame: &mut Frame, v: &ThreadView) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Asking Rex for the composer pane's rows: at once when the composer's height
+/// changes (the host works out the exact split from the panes' geometry),
+/// then, should it still come out short or tall, correcting it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneFit {
+    /// Rows the composer wants now.
+    want: Option<u16>,
+    /// Rows last asked.
+    asked: u16,
+    tries: u8,
+    at: Option<Instant>,
+}
+
+impl PaneFit {
+    /// The rows to ask for, if any, given the rows the composer wants and
+    /// the pane's height now.
+    pub fn next(&mut self, want: u16, height: u16, now: Instant) -> Option<u16> {
+        if self.want != Some(want) {
+            self.want = Some(want);
+            self.tries = 0;
+            self.asked = want;
+            self.at = Some(now);
+            return Some(self.asked);
+        }
+        // Give the last ask time to land before reading anything into the size.
+        if self.at.is_some_and(|t| now.duration_since(t) < RETRY_FIT) {
+            return None;
+        }
+        // One spare row is fine: Rex rounds, and chasing it would flip-flop.
+        if height == want || height == want + 1 || self.tries >= 4 {
+            return None;
+        }
+        // Ask for the same rows again: the host works the split out afresh
+        // from the panes as they are now. (Adjusting by the miss compounds a
+        // bad reading instead.)
+        self.asked = want;
+        self.tries += 1;
+        self.at = Some(now);
+        Some(self.asked)
+    }
+}
+
 /// Rows the pane wants: composer, queue and (when pending) the approval card.
 pub fn desired_height(v: &ThreadView, width: u16) -> u16 {
     // `composer_height` picks its text rows from the area height; ask as a tall pane.
@@ -316,6 +352,76 @@ mod tests {
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn the_pane_is_asked_at_once_per_change_and_corrected_if_it_misses() {
+        let t0 = Instant::now();
+        let later = |ms| t0 + Duration::from_millis(ms);
+        let mut f = PaneFit::default();
+        // A change: asked at once, for exactly what's wanted.
+        assert_eq!(f.next(6, 5, t0), Some(6));
+        assert_eq!(f.next(6, 5, later(10)), None, "the resize may not have landed yet");
+        // It missed by a row: asked again, worked out afresh.
+        assert_eq!(f.next(6, 5, later(500)), Some(6));
+        assert_eq!(f.next(6, 6, later(1_000)), None, "it fits");
+        // Growing and shrinking ask for exactly what they need.
+        assert_eq!(f.next(7, 6, later(1_010)), Some(7));
+        assert_eq!(f.next(7, 7, later(1_500)), None);
+        assert_eq!(f.next(6, 7, later(1_510)), Some(6), "no extra row carried into a shrink");
+        // A spare row is left alone.
+        assert_eq!(f.next(6, 7, later(3_000)), None);
+        // Way too tall (a bad split): asked again for what's wanted, not
+        // "wanted minus the miss", which would ask for nothing.
+        let mut f = PaneFit::default();
+        assert_eq!(f.next(4, 8, t0), Some(4));
+        assert_eq!(f.next(4, 8, later(500)), Some(4));
+    }
+
+    #[test]
+    fn a_new_line_doesnt_scroll_the_first_away_while_the_pane_grows() {
+        // No approval card waiting: just the composer.
+        let mut d = fixtures::data();
+        for it in &mut d.items {
+            if it.status == Some(crate::model::ItemStatus::Pending) {
+                it.status = Some(crate::model::ItemStatus::Allowed);
+            }
+        }
+        let mut v = ThreadView::new("T1", d);
+        v.compose_only = true;
+        v.composer.paste("1\n2\n3");
+        let h = desired_height(&v, 60);
+        let draw = |v: &ThreadView, h: u16| {
+            let mut term = Terminal::new(TestBackend::new(60, h)).unwrap();
+            term.draw(|f| render(f, v)).unwrap();
+            text(&term)
+        };
+        let before = draw(&v, h);
+        assert!(before.contains("› 1"), "{before}");
+        // A fourth line, before the pane has grown: 1, 2 and 3 stay put.
+        v.composer.insert_newline();
+        v.composer.insert_char('4');
+        assert_eq!(draw(&v, h), before, "nothing moves until the pane grows");
+        // Grown: all four show.
+        let after = draw(&v, h + 1);
+        assert!(after.contains("› 1") && after.lines().any(|l| l.trim() == "4"), "{after}");
+    }
+
+    #[test]
+    fn the_pane_it_asks_for_shows_every_line_of_the_message() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        let one = desired_height(&v, 90);
+        v.composer.paste("first line\nsecond line\nthird line");
+        let three = desired_height(&v, 90);
+        assert_eq!(three, one + 2, "two more lines, two more rows");
+        // Drawn at exactly that size, all three lines show (it used to keep two).
+        let mut term = Terminal::new(TestBackend::new(90, three)).unwrap();
+        term.draw(|f| render(f, &v)).unwrap();
+        let t = text(&term);
+        assert!(t.contains("first line") && t.contains("second line") && t.contains("third line"), "{t}");
+        // And the size it asks for doesn't change once it has it: no back and forth.
+        assert_eq!(desired_height(&v, 90), three);
     }
 
     #[test]

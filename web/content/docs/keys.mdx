@@ -30,14 +30,33 @@ description: Keys in the launcher, the recent threads and the thread view.
 
 | Key | |
 |---|---|
-| **Enter** | Send. While the agent is mid-turn, the message queues. |
-| **Ctrl+S** | Send as a steer instead of queuing. |
-| **↑ ↓** | Prompt history. While a question is open: choose an answer. |
+| **Enter** | Send. While the agent is mid-turn, the message goes into its turn: it reads it at its next step, without stopping what it's doing. |
+| **Shift+Enter** | A new line (Option+Enter works too). |
+| **Ctrl+S** | Interrupt the agent and send this instead. |
+| **Option+↑** | With an empty composer: edit your latest message the agent hasn't read yet. **Enter** saves it, **Esc** leaves it as it was. |
+| **↑ ↓** | Move between the lines of your message; past the first or last line, prompt history. While a question is open: choose an answer. |
+| **Ctrl+L** | Show the session log of the agent you're talking to, or hide it again. |
 | **1–9** | Pick an answer. |
-| **Tab** | Move between the composer, attachments, the queue and the timeline. |
+| **Tab** | Move between the composer, attachments, the messages not read yet and the timeline. There, **Enter** sends one now, **e** edits it and **x** removes it. |
 | **Space** | With an empty composer: expand or fold the tool calls under the cursor. |
 | **PgUp / PgDn** | Scroll the conversation. |
 | `@name` | Message or summon another agent on this thread. |
+
+### Editing your message
+
+| Key | |
+|---|---|
+| **Option+← →** (or **Ctrl+← →**) | Move by word. |
+| **Cmd+← →**, **Home / End**, **Ctrl+A / E** | Start or end of the line. |
+| **Cmd+↑ ↓** | Start or end of the message. |
+| **Option+Backspace**, **Ctrl+W** | Delete the word before the cursor. |
+| **Option+Delete**, **Option+D** | Delete the word after it. |
+| **Cmd+Backspace**, **Ctrl+U** | Delete to the start of the line. |
+| **Ctrl+K** | Delete to the end of the line. |
+| **Ctrl+Y** | Put back what you last deleted by word or line. |
+| **Cmd+Z**, **Ctrl+Z** | Undo, a word at a time. **Shift+Cmd+Z** redoes. |
+
+Pasted text keeps its line breaks.
 
 ## Dashboard
 

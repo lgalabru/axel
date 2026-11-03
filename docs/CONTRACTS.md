@@ -273,8 +273,11 @@ pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_id
 //   - exits when socket `stop`, adapter exits, or stdin closes; then store.end_session(reason)
 
 pub mod socket {  // JSON lines over a unix socket
-    pub enum Command { Prompt { text: String }, Cancel, Answer { item_id: String, option_id: String }, Status, Stop }
-    pub enum Reply { Ok, Status { state: axel_store::SessionState, turn: i64, pending: usize }, Error { message: String } }
+    pub enum Command { Prompt { text: String, attachments, steer: bool, from: Option<Sender> }, Note { .. }, Steer { item_id }, Dequeue { item_id }, Edit { item_id, text }, SetMode { mode }, Cancel, Answer { item_id: String, option_id: String }, Status, Stop }
+    pub enum Reply { Ok, Queued { item_id }, Steering { item_id }, Status { state: axel_store::SessionState, turn: i64, pending: usize, queued: usize }, Error { message: String } }
+    // Prompt mid-turn: the owner's goes into the turn (`Steering`, pending until read; see
+    // DESIGN "A message sent while the agent works"), another agent's waits (`Queued`).
+    // Edit / Dequeue work on either until the agent reads it; `steer: true` interrupts.
     pub fn send(socket_path: &Path, cmd: &Command) -> std::io::Result<Reply>;   // sync, for the TUI/CLI
 }
 pub mod policy {

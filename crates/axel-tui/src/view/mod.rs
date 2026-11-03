@@ -4,6 +4,7 @@ pub mod dashboard_view;
 pub mod inbox_view;
 pub mod launcher_view;
 pub mod picker_view;
+pub mod markdown;
 pub mod thread_view;
 
 use ratatui::layout::Rect;
@@ -184,6 +185,66 @@ mod tests {
 
     fn sizes() -> Vec<(u16, u16)> {
         vec![(80, 24), (60, 18), (140, 40), (100, 30), (40, 10)]
+    }
+
+    #[test]
+    fn the_launcher_prompt_shows_its_lines_and_scrolls_to_the_cursor() {
+        let mut l = launcher();
+        l.title.paste("fix the login bug\nit fails on token refresh");
+        let mut term = Terminal::new(TestBackend::new(60, 5)).unwrap();
+        term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+        let t = text(&term);
+        assert!(t.contains("› fix the login bug") && t.contains("  it fails on token refresh"), "{t}");
+        assert!(!t.contains("atlas ·"), "who/where step aside for a multi-line prompt: {t}");
+        // A pane with fewer rows than lines shows the ones up to the cursor.
+        l.title.paste("\nand logout too\nand signup");
+        let mut term = Terminal::new(TestBackend::new(60, 3)).unwrap();
+        term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+        let t = text(&term);
+        assert!(t.contains("and signup") && !t.contains("fix the login bug"), "four lines in three rows: the cursor's last three: {t}");
+    }
+
+    #[test]
+    fn a_pane_one_row_short_drops_the_blank_row_not_line_one() {
+        let mut l = launcher();
+        l.title.paste("1\n2\n3\n4\n5\n6\n7");
+        // Seven lines, seven rows (the blank row above doesn't fit).
+        let mut term = Terminal::new(TestBackend::new(60, 7)).unwrap();
+        term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+        let t = text(&term);
+        let lines: Vec<&str> = t.lines().map(str::trim).collect();
+        assert_eq!(lines, vec!["› 1", "2", "3", "4", "5", "6", "7"], "{t}");
+    }
+
+    #[test]
+    fn a_growing_launcher_keeps_its_lines_in_place_while_the_pane_catches_up() {
+        let mut l = launcher();
+        l.pane_grows = true;
+        l.title.paste("1\n2\n3\n4");
+        let draw = |l: &Launcher, h: u16| {
+            let mut term = Terminal::new(TestBackend::new(40, h)).unwrap();
+            term.draw(|f| super::launcher_view::render(f, l, 5_000)).unwrap();
+            text(&term).lines().map(|x| x.trim().to_string()).collect::<Vec<_>>()
+        };
+        // The pane fits four lines (and the blank row above them).
+        let before = draw(&l, 5);
+        assert_eq!(before, vec!["", "› 1", "2", "3", "4"]);
+        // Shift+Enter: a fifth line, before the pane has grown. Nothing moves.
+        l.title.insert_newline();
+        l.title.insert_char('5');
+        assert_eq!(draw(&l, 5), before, "the lines stay where they were");
+        // The pane grows: the new line appears under them.
+        assert_eq!(draw(&l, 6), vec!["", "› 1", "2", "3", "4", "5"]);
+    }
+
+    #[test]
+    fn the_launcher_pane_asks_for_a_row_per_line() {
+        let mut l = launcher();
+        let one = super::launcher_view::prompt_pane_rows(&l, 80);
+        l.title.paste("a\nb\nc");
+        assert_eq!(super::launcher_view::prompt_pane_rows(&l, 80), one + 2);
+        l.title.paste(&"\nmore".repeat(20));
+        assert_eq!(super::launcher_view::prompt_pane_rows(&l, 80), 1 + super::thread_view::MAX_INPUT_ROWS as u16, "then it scrolls");
     }
 
     #[test]
@@ -458,7 +519,7 @@ mod tests {
         assert!(lines[next + 3].contains("+2 more"), "collapsed to three rows {t}");
         assert!(lines[next + 4].starts_with('─'), "composer's top rule right below {t}");
         assert!(t.lines().filter(|l| l.contains("check logout too")).all(|l| l.contains('⧗')), "queued prompts are not timeline rows {t}");
-        assert!(t.contains("Enter queues a message") && t.contains("^S"), "{t}");
+        assert!(t.contains("Enter sends into its turn") && t.contains("^S interrupts"), "{t}");
         // Tab focuses the strip: every row shows, with the selection marker.
         v.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         v.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -467,9 +528,9 @@ mod tests {
         if std::env::var_os("AXEL_PRINT").is_some() {
             println!("{t}");
         }
-        assert!(t.contains("▸ ⧗ queued  then update the docs"), "{t}");
+        assert!(t.contains("▸ ⧗ queued   then update the docs"), "{t}");
         assert!(t.contains("and tag it") && !t.contains("more"), "{t}");
-        assert!(t.contains("steer now"), "{t}");
+        assert!(t.contains("send now"), "{t}");
     }
 
     #[test]
@@ -810,16 +871,16 @@ mod tests {
     fn a_mention_in_your_message_takes_the_agents_colour_even_before_punctuation() {
         use crate::thread::{Row, ThreadView, fixtures};
         let mut d = fixtures::data();
-        d.known_agents = vec![("aaron".into(), Some(AgentColor::Yellow))];
-        let mut msg = fixtures::item("u9", ItemKind::UserMessage, ItemBody::Text("would love to hear more about @aaron's take".into()), 9_000);
+        d.known_agents = vec![("orion".into(), Some(AgentColor::Yellow))];
+        let mut msg = fixtures::item("u9", ItemKind::UserMessage, ItemBody::Text("would love to hear more about @orion's take".into()), 9_000);
         msg.agent = None;
         d.items.push(msg);
         let v = ThreadView::new("T1", d);
         let i = v.data.items.len() - 1;
         let lines = super::thread_view::row_lines(&v, &Row::Prose(i), 80, false);
-        let mention = lines.iter().flat_map(|l| l.spans.iter()).find(|s| s.content == "@aaron").expect("the mention is its own span");
-        assert_eq!(mention.style.fg, Some(crate::theme::agent_color(Some(AgentColor::Yellow))), "aaron isn't on the thread yet, but is a local agent");
-        assert!(plain(&lines).iter().any(|l| l.contains("@aaron's take")), "the text is unchanged");
+        let mention = lines.iter().flat_map(|l| l.spans.iter()).find(|s| s.content == "@orion").expect("the mention is its own span");
+        assert_eq!(mention.style.fg, Some(crate::theme::agent_color(Some(AgentColor::Yellow))), "orion isn't on the thread yet, but is a local agent");
+        assert!(plain(&lines).iter().any(|l| l.contains("@orion's take")), "the text is unchanged");
     }
 
     #[test]
@@ -827,20 +888,37 @@ mod tests {
         use crate::thread::{Row, ThreadView, fixtures};
         let mut d = fixtures::data();
         d.items.clear();
-        let mut relay = fixtures::item("r1", ItemKind::UserMessage, ItemBody::Text("Hi aaron, what would you build first?".into()), 1_000);
-        relay.relay_to = Some("Aaron".into());
+        let mut relay = fixtures::item("r1", ItemKind::UserMessage, ItemBody::Text("Hi orion, what would you build first?".into()), 1_000);
+        relay.relay_to = Some("Orion".into());
         d.items.push(relay);
-        d.items.push(fixtures::item("a1", ItemKind::AssistantMessage, ItemBody::Text("I've asked aaron.".into()), 2_000));
+        d.items.push(fixtures::item("a1", ItemKind::AssistantMessage, ItemBody::Text("I've asked orion.".into()), 2_000));
         d.items.push(fixtures::item("a2", ItemKind::AssistantMessage, ItemBody::Text("Later, on its own.".into()), 3_000));
         d.items[2].agent = Some(("Nova".into(), None));
         let v = ThreadView::new("T1", d);
         let relay = plain(&super::thread_view::row_lines(&v, &Row::Prose(0), 80, false));
         assert!(relay[0].contains(" atlas "), "the sender's badge first: {relay:?}");
-        assert_eq!(relay[1], "→ aaron");
-        assert_eq!(relay[2], "│ Hi aaron, what would you build first?");
+        assert_eq!(relay[1], "→ orion");
+        assert_eq!(relay[2], "│ Hi orion, what would you build first?");
         let reply = plain(&super::thread_view::row_lines(&v, &Row::Prose(1), 80, false));
-        assert_eq!(reply, vec!["I've asked aaron.".to_string()], "no second atlas badge");
+        assert_eq!(reply, vec!["I've asked orion.".to_string()], "no second atlas badge");
         let other = plain(&super::thread_view::row_lines(&v, &Row::Prose(2), 80, false));
         assert!(other[0].contains(" nova "), "a different agent gets its own badge: {other:?}");
+    }
+
+    #[test]
+    fn the_composer_breaks_rows_at_line_breaks_and_the_width() {
+        use super::thread_view::input_rows;
+        let c = |s: &str| s.chars().collect::<Vec<_>>();
+        // "ab\ncd": two rows, the break itself on neither.
+        assert_eq!(input_rows(&c("ab\ncd"), 10, 5), (vec![(0, 2), (3, 5)], (1, 2)));
+        assert_eq!(input_rows(&c("ab\ncd"), 10, 2), (vec![(0, 2), (3, 5)], (0, 2)), "before the break: end of the first row");
+        // A trailing break: the cursor sits on the new, empty row.
+        assert_eq!(input_rows(&c("ab\n"), 10, 3), (vec![(0, 2), (3, 3)], (1, 0)));
+        // Wrapping at the width: "abcdef" at 4 is "abcd" / "ef".
+        assert_eq!(input_rows(&c("abcdef"), 4, 6), (vec![(0, 4), (4, 6)], (1, 2)));
+        assert_eq!(input_rows(&c("abcdef"), 4, 4), (vec![(0, 4), (4, 6)], (1, 0)), "at the wrap: the next row");
+        // A full last row: the cursor after it gets a row of its own.
+        assert_eq!(input_rows(&c("abcd"), 4, 4), (vec![(0, 4), (4, 4)], (1, 0)));
+        assert_eq!(input_rows(&[], 4, 0), (vec![(0, 0)], (0, 0)));
     }
 }

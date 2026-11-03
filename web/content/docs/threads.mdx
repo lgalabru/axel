@@ -74,9 +74,14 @@ the history.
   it's two panes: the conversation streaming as plain terminal output (native scrollback)
   above, the composer below. Opened from the launcher, they take the place of the shell you
   typed `axel` in, so nothing else in the window moves; closing the composer (Esc, or the
-  pane's ×) brings that shell back, scrollback and all. Each agent's session log sits in a
-  narrow column on the right of the same window, so Rex's Activity (⌘.) shows every agent
-  on the thread.
+  pane's ×) brings that shell back, scrollback and all. Each agent's session log stays out of
+  sight; **^L** in the composer shows the log of the agent you're talking to, and hides it
+  again. Rex's Activity (⌘.) still lists every agent on the thread, with its state.
+- **Tool calls**: each `▸ 5 tool calls` line is a link. Click it (⌘-click if Rex asks)
+  to open every call in it in a pane down the right of the window: who ran it and when,
+  how long each call took, commands with what they're for, edits as diffs, files read and
+  searches, and their output. Scroll it as usual; Esc closes it. The first click asks whether
+  Rex may open links with Axel's link handler.
 - **Questions**: when an agent asks you to choose (Claude's multiple-choice questions), the
   question floats in the middle of the window. Pick with ↑↓ and Enter, or type its number;
   Esc leaves it for the composer. Questions always wait for you, even in autopilot.
