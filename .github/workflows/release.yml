@@ -1,7 +1,7 @@
 name: Release
 
 # Every commit on main that passes CI ships: a GitHub release `v<version>` with
-# macOS binaries, and the formula in scarce/homebrew-axel moved to it, so
+# macOS binaries, and the formula in scarce/homebrew-taps moved to it, so
 # `brew upgrade` always lands on the newest main.
 #
 # The version is the workspace's major.minor plus the commit count on main
@@ -106,7 +106,7 @@ jobs:
             git log -1 --format='%B' "$GITHUB_SHA"
             echo
             echo '```'
-            echo 'brew install scarce/axel/axel   # or: brew upgrade axel'
+            echo 'brew install scarce/taps/axel   # or: brew upgrade axel'
             echo '```'
           } > notes.md
           gh release create "v$VERSION" dist/* \
@@ -125,7 +125,7 @@ jobs:
           sparse-checkout: .github/scripts
       - uses: actions/checkout@v5
         with:
-          repository: scarce/homebrew-axel
+          repository: scarce/homebrew-taps
           ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
           path: tap
       - uses: actions/download-artifact@v4
@@ -143,4 +143,10 @@ jobs:
           git config user.email "release@axel.md"
           git add Formula/axel.rb
           git commit -m "axel $VERSION"
-          git push
+          # The tap is shared (other projects release into it too): take theirs
+          # first if they pushed meanwhile.
+          for attempt in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1

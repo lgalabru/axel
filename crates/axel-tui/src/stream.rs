@@ -346,7 +346,8 @@ impl Stream {
 /// stop), wrapped. An empty line still takes its row.
 fn screen_rows(line: &str, cols: usize) -> usize {
     use unicode_width::UnicodeWidthChar;
-    let mut width = 0;
+    let mut width: usize = 0;
+    let mut breaks: usize = 0;
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -370,10 +371,15 @@ fn screen_rows(line: &str, cols: usize) -> usize {
                 }
             },
             '\t' => width += 8 - width % 8,
+            // A row of its own (to_ansi never prints one; this is the safety net).
+            '\n' => {
+                breaks += width.div_ceil(cols.max(1)).max(1);
+                width = 0;
+            }
             c => width += c.width().unwrap_or(0),
         }
     }
-    width.div_ceil(cols.max(1)).max(1)
+    width.div_ceil(cols.max(1)).max(1) + breaks
 }
 
 /// A row can go to scrollback once nothing in it will change: not the last row
@@ -449,10 +455,14 @@ pub fn to_ansi(line: &Line) -> String {
     for span in &line.spans {
         let st = line.style.patch(span.style);
         let sgr = sgr(st);
+        // A line is one row: a line break inside one (a multi-line command in
+        // a title) would print a row the live tail doesn't count.
+        let content: std::borrow::Cow<str> =
+            if span.content.contains(['\n', '\r']) { span.content.replace(['\n', '\r'], " ").into() } else { span.content.as_ref().into() };
         if sgr.is_empty() {
-            s.push_str(&span.content);
+            s.push_str(&content);
         } else {
-            s.push_str(&format!("\x1b[{sgr}m{}\x1b[0m", span.content));
+            s.push_str(&format!("\x1b[{sgr}m{content}\x1b[0m"));
         }
     }
     s
@@ -708,6 +718,28 @@ mod tests {
     }
 
     #[test]
+    fn a_running_command_with_a_heredoc_redraws_in_place() {
+        // The repeat bug, again: the fold line of a running `python3 - <<'PY'`
+        // carried the command's line breaks, printing rows the tail didn't count.
+        let mut d = fixtures::data();
+        d.items[7].status = Some(ItemStatus::Allowed);
+        d.agents[0].2 = crate::model::StatusState::Working;
+        let mut cmd = fixtures::tool("t9", "cd ~/w && python3 - <<'PY'\np=\"main.rs\"; s=open(p).read()\nPY", "execute", 8_000);
+        cmd.status = Some(ItemStatus::Running);
+        d.items.push(cmd);
+        let v = ThreadView::new("T1", d);
+        let mut s = Stream::default();
+        let first = s.frame(&v, 120, 40);
+        let tail_start = first.rfind("1 tool call").expect("the fold line is in the tail");
+        let line = &first[first[..tail_start].rfind("\r\n").map_or(0, |i| i + 2)..];
+        assert_eq!(line.matches('\n').count(), s.live_lines, "one row per counted row: {line:?}");
+        assert!(plain(line).contains("python3 - <<'PY' …"), "the command's first line: {line:?}");
+        s.tick += 1;
+        let again = s.frame(&v, 120, 40);
+        assert!(again.starts_with(&format!("\x1b[{}F\x1b[J", s.live_lines)), "{again:?}");
+    }
+
+    #[test]
     fn a_line_wider_than_the_pane_is_counted_in_rows() {
         assert_eq!(screen_rows("", 80), 1, "an empty line still takes its row");
         assert_eq!(screen_rows("abc", 80), 1);
@@ -717,6 +749,11 @@ mod tests {
         assert_eq!(screen_rows(&crate::util::hyperlink("axel-links://tools?x=1", &"x".repeat(80)), 80), 1, "nor do links");
         assert_eq!(screen_rows("\t\tx", 10), 2, "a tab runs to the next stop");
         assert_eq!(screen_rows(&"字".repeat(41), 80), 2, "wide characters take two columns");
+        assert_eq!(screen_rows("a\nb", 80), 2, "a line break inside a line is a row");
+        let multi = to_ansi(&Line::from(vec![Span::raw("▸ "), Span::styled("cd x && python3 - <<'PY'\np=1", Style::default().bold())]));
+        assert!(!multi.contains('\n'), "a line prints as one row: {multi:?}");
+        assert_eq!(crate::view::thread_view::one_line("cd x && python3 - <<'PY'\np=1\nPY"), "cd x && python3 - <<'PY' …");
+        assert_eq!(crate::view::thread_view::one_line("ls -la"), "ls -la");
     }
 
     #[test]

@@ -107,7 +107,7 @@ curl -fsSL https://axel.md/install | sh
 or with Homebrew:
 
 ```sh
-brew install scarce/axel/axel
+brew install scarce/taps/axel
 ```
 
 Then run `axel` in a Rex terminal. The first run checks your machine and helps you create

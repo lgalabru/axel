@@ -271,6 +271,14 @@ fn duration_label(ms: i64) -> String {
     }
 }
 
+/// A title on one row: its first line, `…` when there was more.
+pub fn one_line(s: &str) -> String {
+    let trimmed = s.trim();
+    let mut lines = trimmed.lines();
+    let first = lines.next().unwrap_or("").trim_end();
+    if lines.next().is_some() { format!("{first} …") } else { first.to_string() }
+}
+
 /// `read ×2, edit, execute` from the tool kinds (titles' first word when kinds are unknown).
 pub fn fold_summary(items: &[&ThreadItem]) -> String {
     let mut counts: Vec<(String, usize)> = Vec::new();
@@ -399,7 +407,8 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
             if n == 1
                 && let ItemBody::Tool { title, .. } = &tools[0].body
             {
-                text.push_str(&format!(" · {title}"));
+                // A command's title is the command: its first line, on one row.
+                text.push_str(&format!(" · {}", one_line(title)));
             } else {
                 text.push_str(&format!(" · {}", fold_summary(&tools)));
             }

@@ -923,6 +923,10 @@ fn the_host_reports_program_status_to_its_pane_as_osc_7501() {
     send_ok(&sock, Command::Prompt { text: "fix the login bug".into(), attachments: vec![], steer: false, from: None });
     wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
     // Finished: done, a result the owner hasn't seen, with the reply's first line.
+    // (Recorded just after the turn: wait for it.)
+    wait_until("done", Duration::from_secs(10), || {
+        f.store.status(&f.session_id).unwrap().is_some_and(|st| st.state == axel_store::StatusState::Done)
+    });
     let st = f.store.status(&f.session_id).unwrap().unwrap();
     assert_eq!(st.state, axel_store::StatusState::Done);
     assert_eq!(st.msg.as_deref(), Some("Hello, world.Tests pass."));
