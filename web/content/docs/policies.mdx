@@ -9,7 +9,7 @@ permissions, a **guard** for the things that are never routine, and a **budget**
 ## Runtime modes
 
 ```bash
-axel agent edit atlas --runtime-mode edits
+axel agent edit opus --runtime-mode edits
 ```
 
 | Mode | |
@@ -31,7 +31,7 @@ the agent why. Autopilot means "don't ask about the routine", not "anything goes
 ## Budgets
 
 ```bash
-axel agent edit atlas --daily-usd 20       # or `unlimited`, the default
+axel agent edit opus --daily-usd 20       # or `unlimited`, the default
 ```
 
 Axel counts every session's input, output and cache tokens and estimates their cost. An
@@ -47,5 +47,5 @@ Which agents an agent may message and summon is a policy too. See
 ## Where these apply
 
 Policies are enforced by Axel on your machine, and travel with every job sent to a
-[remote host](/docs/remote-hosts), so atlas has the same permissions and budget on the Mac mini
+[remote host](/docs/remote-hosts), so opus has the same permissions and budget on the Mac mini
 as on your laptop.

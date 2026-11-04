@@ -3,8 +3,8 @@ title: Agents and identity
 description: Named agents with their own Ed25519 keys, profiles and inboxes.
 ---
 
-An **agent** is a name you can call (`@atlas`), a key that signs everything it does, and a
-profile that says how to run it. Agents are reusable: the same atlas works on many threads,
+An **agent** is a name you can call (`@opus`), a key that signs everything it does, and a
+profile that says how to run it. Agents are reusable: the same opus works on many threads,
 over months.
 
 ## Why named agents
@@ -12,10 +12,10 @@ over months.
 Buzz gave agents names and keys; skills.sh turned skills into a one-line install. Together
 they point at a better way to work than one assistant that knows everything:
 
-- **Specialists.** `atlas` builds, with the handful of skills your stack needs. `nova`
+- **Specialists.** `opus` builds, with the handful of skills your stack needs. `astra`
   reviews, with a review skill and a different model. You address each by name.
 - **Real code review.** The best review comes from someone who didn't write the code. When
-  atlas is done it asks nova, on the same thread; nova's findings arrive as atlas's next
+  opus is done it asks astra, on the same thread; astra's findings arrive as opus's next
   prompt, and you see the whole exchange. A different model catches different mistakes.
 - **No skill bloat.** Installing every skill into one agent costs you on every session: each
   skill's description sits in its context, and the more there are, the more often the wrong
@@ -26,16 +26,16 @@ they point at a better way to work than one assistant that knows everything:
 ## Create one
 
 ```bash
-axel agent new atlas --harness claude --skills rust,axum --color orange
-axel agent new nova --harness codex --skills review,security --color blue
+axel agent new opus --harness claude --skills rust,axum --color orange
+axel agent new astra --harness codex --skills review,security --color blue
 axel agent ls
-axel agent show atlas       # profile, policy and the owner attestation
+axel agent show opus       # profile, policy and the owner attestation
 ```
 
 Creating an agent:
 
 1. generates an **Ed25519 keypair** and stores the private key in the macOS keychain;
-2. signs an **attestation** with your owner key: "this key is my agent atlas";
+2. signs an **attestation** with your owner key: "this key is my agent opus";
 3. records the profile.
 
 | Profile | |
@@ -48,7 +48,7 @@ Creating an agent:
 | `--runtime-mode` | How much it may do alone; see [Permissions and budgets](/docs/policies). |
 | `--host` | Where it runs unless told otherwise; see [Remote hosts](/docs/remote-hosts). |
 
-Change any of it later with `axel agent edit atlas …`. `axel agent archive atlas` retires
+Change any of it later with `axel agent edit opus …`. `axel agent archive opus` retires
 an agent and keeps its key and history.
 
 ## Why keys
@@ -57,8 +57,8 @@ Everything an agent does on a thread (a reply, a tool call, a message to another
 an event signed with its key. That makes three things possible:
 
 - **Attribution you can check.** A thread shows who did what, and a copy of it on another
-  machine can verify that it was really atlas.
-- **Safe delegation.** On a remote machine, atlas's key never leaves home: the machine gets a
+  machine can verify that it was really opus.
+- **Safe delegation.** On a remote machine, opus's key never leaves home: the machine gets a
   short-lived grant to sign for it on one thread. See [Remote hosts](/docs/remote-hosts#keys-never-leave-home).
 - **Multiplayer threads.** Threads merge across machines and people by their signed events.
 
@@ -81,5 +81,5 @@ report its status and read its inbox, and an **MCP server** with the same tools.
 
 Every identity, you included, has an inbox: messages that mention it, permission requests,
 questions, and status from its sessions. `axel inbox` prints yours;
-`axel inbox --agent atlas` prints atlas's. When anything needs you, `axel` opens on the
+`axel inbox --agent opus` prints opus's. When anything needs you, `axel` opens on the
 inbox instead of the launcher.

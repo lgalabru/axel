@@ -18,11 +18,11 @@ import { DOCS, REPO } from "@/lib/site";
 /* ---------------------------------------------------------------- terminal */
 
 type Agent = { name: string; color: string; dot: string };
-const ATLAS: Agent = { name: "atlas", color: "text-tangerine", dot: "bg-tangerine" };
-const NOVA: Agent = { name: "nova", color: "text-sky", dot: "bg-sky" };
-const AGENTS = [ATLAS, NOVA];
+const OPUS: Agent = { name: "opus", color: "text-tangerine", dot: "bg-tangerine" };
+const ASTRA: Agent = { name: "astra", color: "text-sky", dot: "bg-sky" };
+const AGENTS = [OPUS, ASTRA];
 
-const PROMPT = "@atlas add retries to the webhook sender, then ask @nova@mini to review it";
+const PROMPT = "@opus add retries to the webhook sender, then ask @astra@mini for a review";
 
 /** Text with `@name` (and `@name@host`) in the agent's colour, the host in violet. */
 function Mentions({ text }: { text: string }) {
@@ -55,19 +55,19 @@ type State = "idle" | "working" | "done";
 
 /** The scene, one line at a time: [line, ms before it appears, agent states after it]. */
 const SCENE: [Line, number, Partial<Record<string, State>>][] = [
-  [{ kind: "head", agent: ATLAS, where: "laptop" }, 500, { atlas: "working" }],
+  [{ kind: "head", agent: OPUS, where: "laptop" }, 500, { opus: "working" }],
   [{ kind: "tool", glyph: "✎", text: "edit   src/webhooks.rs", note: "+42 −6" }, 900, {}],
   [{ kind: "tool", glyph: "$", text: "cargo test", note: "128 passed", ok: true }, 1100, {}],
-  [{ kind: "say", text: "Retries with exponential backoff are in. Asking nova to review." }, 900, {}],
-  [{ kind: "event", text: "atlas → summoned @nova on mini" }, 800, { atlas: "idle", nova: "working" }],
-  [{ kind: "head", agent: NOVA, where: "mini" }, 700, {}],
+  [{ kind: "say", text: "Retries with exponential backoff are in. Asking astra for a review." }, 900, {}],
+  [{ kind: "event", text: "opus → summoned @astra on mini" }, 800, { opus: "idle", astra: "working" }],
+  [{ kind: "head", agent: ASTRA, where: "mini" }, 700, {}],
   [{ kind: "tool", glyph: "◎", text: "read   src/webhooks.rs" }, 900, {}],
   [{ kind: "say", text: "Backoff looks right. One catch: no jitter, so every worker retries at the same instant under load." }, 1300, {}],
-  [{ kind: "event", text: "nova → replied to @atlas" }, 800, { nova: "done", atlas: "working" }],
-  [{ kind: "head", agent: ATLAS, where: "laptop" }, 600, {}],
+  [{ kind: "event", text: "astra → replied to @opus" }, 800, { astra: "done", opus: "working" }],
+  [{ kind: "head", agent: OPUS, where: "laptop" }, 600, {}],
   [{ kind: "tool", glyph: "✎", text: "edit   src/webhooks.rs", note: "+9 −2" }, 900, {}],
   [{ kind: "tool", glyph: "$", text: "cargo test", note: "129 passed", ok: true }, 1000, {}],
-  [{ kind: "say", text: "Added full jitter, with a test for it. Ready to merge." }, 900, { atlas: "done" }],
+  [{ kind: "say", text: "Added full jitter, with a test for it. Ready to merge." }, 900, { opus: "done" }],
   [{ kind: "done", text: "done · 2 agents · laptop + mini · 58k tokens · $0.84" }, 700, {}],
 ];
 
@@ -118,7 +118,7 @@ function useScene() {
 }
 
 function stateAt(shown: number): Record<string, State> {
-  const st: Record<string, State> = { atlas: "idle", nova: "idle" };
+  const st: Record<string, State> = { opus: "idle", astra: "idle" };
   for (let i = 0; i < shown; i++) Object.assign(st, SCENE[i][2]);
   return st;
 }
@@ -225,8 +225,8 @@ function HeroTerminal() {
             <span className="truncate text-white/70">add retries to the webhook sender</span>
           </div>
           <div className="hidden shrink-0 items-center gap-4 sm:flex">
-            <StateChip agent={ATLAS} state={st.atlas} where="laptop" />
-            <StateChip agent={NOVA} state={st.nova} where="mini" />
+            <StateChip agent={OPUS} state={st.opus} where="laptop" />
+            <StateChip agent={ASTRA} state={st.astra} where="mini" />
           </div>
         </div>
       </div>
@@ -316,13 +316,13 @@ function Lifecycle() {
       <div className="mb-4 text-muted">thread · Add retries to the webhook sender</div>
       <div className="space-y-1 text-muted">
         <div>
-          <span className="text-tangerine">atlas</span> · session 1 · laptop · <span className="text-dim">ended</span>
+          <span className="text-tangerine">opus</span> · session 1 · laptop · <span className="text-dim">ended</span>
         </div>
         <div>
-          <span className="text-sky">nova</span> · session 2 · laptop · <span className="text-dim">ended</span>
+          <span className="text-sky">astra</span> · session 2 · laptop · <span className="text-dim">ended</span>
         </div>
         <div>
-          <span className="text-tangerine">atlas</span> · session 3 · mini · <span className="text-pink">working</span>
+          <span className="text-tangerine">opus</span> · session 3 · mini · <span className="text-pink">working</span>
         </div>
       </div>
       <div className="mt-6 flex flex-wrap items-center gap-2">
@@ -350,7 +350,7 @@ function Hosts() {
         <div className="flex-1 rounded-lg border border-line bg-ink p-4">
           <Laptop className="mb-2 h-6 w-6 text-fg" />
           <div className="font-semibold text-fg">laptop</div>
-          <div className="text-xs text-muted">atlas&apos;s key stays here</div>
+          <div className="text-xs text-muted">opus&apos;s key stays here</div>
         </div>
         <div className="flex flex-col items-center justify-center gap-1 text-xs text-dim">
           <span>thread + code →</span>
@@ -360,12 +360,12 @@ function Hosts() {
         <div className="flex-1 rounded-lg border border-pink/50 bg-ink p-4">
           <Server className="mb-2 h-6 w-6 text-pink" />
           <div className="font-semibold text-fg">mini</div>
-          <div className="text-xs text-muted">signs for atlas: one thread, 7 days</div>
+          <div className="text-xs text-muted">signs for opus: one thread, 7 days</div>
         </div>
       </div>
       <div className="mt-5 space-y-1 text-muted">
         <div>
-          <span className="text-dim">$</span> axel agent edit atlas --host mini
+          <span className="text-dim">$</span> axel agent edit opus --host mini
         </div>
         <div>
           <span className="text-dim">$</span> axel session move 01j9… --to local
@@ -392,9 +392,9 @@ function Guardrails() {
       ))}
       <div className="mt-4 border-t border-line pt-4 text-muted">
         <div>
-          atlas · 41k tokens · <span className="text-fg">$0.62</span> today
+          opus · 41k tokens · <span className="text-fg">$0.62</span> today
         </div>
-        <div className="text-dim">refused: nova has spent $20.00 today and reached its daily budget</div>
+        <div className="text-dim">refused: astra has spent $20.00 today and reached its daily budget</div>
       </div>
     </Card>
   );
@@ -406,8 +406,8 @@ const REX = "https://www.superlogical.com/rex";
 /** Two specialists instead of one agent that knows everything. */
 function Specialists() {
   const agents = [
-    { name: "atlas", color: "text-tangerine", dot: "bg-tangerine", role: "builds", model: "claude", skills: ["rust", "axum", "sqlx"] },
-    { name: "nova", color: "text-sky", dot: "bg-sky", role: "reviews", model: "codex", skills: ["review", "security"] },
+    { name: "opus", color: "text-tangerine", dot: "bg-tangerine", role: "builds", model: "claude", skills: ["rust", "axum", "sqlx"] },
+    { name: "astra", color: "text-sky", dot: "bg-sky", role: "reviews", model: "codex", skills: ["review", "security"] },
   ];
   return (
     <Card className="space-y-4">
@@ -431,9 +431,9 @@ function Specialists() {
         </div>
       ))}
       <div className="rounded-lg border border-line bg-ink p-3">
-        <div className="text-xs text-dim">Message from atlas, another Axel agent on this thread:</div>
+        <div className="text-xs text-dim">Message from opus, another Axel agent on this thread:</div>
         <div className="mt-1">
-          <span className="font-semibold text-sky">@nova</span> the retry backoff is in src/webhooks.rs, tests pass. Review it and reply to atlas.
+          <span className="font-semibold text-sky">@astra</span> the retry backoff is in src/webhooks.rs, tests pass. Review it and reply to opus.
         </div>
       </div>
     </Card>
@@ -554,25 +554,25 @@ export default function Home() {
         <Section id="agents" eyebrow="Named agents" title="Specialists, not one agent that knows everything" aside={<Specialists />}>
           <p>
             Buzz gave agents names and keys; skills.sh made skills a one-line install. Put together, you stop prompting a generic assistant and start working with a team:
-            atlas builds, nova reviews.
+            opus builds, astra reviews.
           </p>
           <div className="space-y-3 pt-2">
             <Point icon={MessagesSquare} title="A second pair of eyes.">
-              The best review comes from someone who didn&apos;t write the code. atlas asks nova, a different agent with a different model and a review skill, and gets the
+              The best review comes from someone who didn&apos;t write the code. opus asks astra, a different agent with a different model and a review skill, and gets the
               answer as its next prompt. You see every message.
             </Point>
             <Point icon={Coins} title="No skill bloat.">
               Install sixty skills into one agent and every session pays for their descriptions, and picks the wrong one. Each named agent carries only its own.
             </Point>
             <Point icon={KeyRound} title="Its own key, permissions and budget.">
-              Everything atlas does is signed by atlas. It reaches only the agents you allowed, can&apos;t loop, and stops at its daily budget.
+              Everything opus does is signed by opus. It reaches only the agents you allowed, can&apos;t loop, and stops at its daily budget.
             </Point>
           </div>
         </Section>
 
         <Section id="hosts" eyebrow="Remote hosts" title="Ask, then close the laptop" aside={<Hosts />}>
           <p>
-            Your Mac mini at home is on your tailnet, and Rex is on it. <code className="rounded bg-raised px-1.5 py-0.5 text-base">@atlas@mini</code> runs atlas there, in the
+            Your Mac mini at home is on your tailnet, and Rex is on it. <code className="rounded bg-raised px-1.5 py-0.5 text-base">@opus@mini</code> runs opus there, in the
             mini&apos;s own Rex session, or make the mini its default.
           </p>
           <p>
@@ -581,7 +581,7 @@ export default function Home() {
           </p>
           <div className="space-y-3 pt-2">
             <Point icon={ShieldCheck} title="Keys never leave home.">
-              The host gets a short-lived grant to sign for atlas, on one thread only.
+              The host gets a short-lived grant to sign for opus, on one thread only.
             </Point>
           </div>
         </Section>

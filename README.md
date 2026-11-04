@@ -29,11 +29,11 @@
 
 ```sh
 # Two agents: one builds, one reviews with another model
-axel agent new atlas --harness claude
-axel agent new nova --harness codex --skills review
+axel agent new opus --harness claude
+axel agent new astra --harness codex --skills review
 
-# A thread: atlas does the work, then hands the diff to nova
-axel thread new --agent atlas "add retries to the webhook sender, then ask @nova to review it"
+# A thread: opus does the work, then hands the diff to astra
+axel thread new --agent opus "add retries to the webhook sender, then ask @astra for a review"
 ```
 
 Or run `axel` in Rex and type the same thing into the launcher that floats over your window.
@@ -49,13 +49,13 @@ change is a signed event, so copies on other machines merge.
 
 ### 🪪 Named agents
 
-A team of specialists instead of one assistant that knows everything. `atlas` builds with a
-few skills for your stack; `nova` reviews with another model. Each has its own Ed25519 key,
+A team of specialists instead of one assistant that knows everything. `opus` builds with a
+few skills for your stack; `astra` reviews with another model. Each has its own Ed25519 key,
 permissions, budget and inbox, and loads only its own skills.
 
 ```sh
-axel agent new nova --harness codex --skills review
-axel send "@nova please review the diff"
+axel agent new astra --harness codex --skills review
+axel send "@astra please review the diff"
 ```
 
 ### 🖥️ The terminal, fixed by Rex
