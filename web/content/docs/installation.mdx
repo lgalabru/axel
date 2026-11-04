@@ -8,8 +8,9 @@ description: Rex, Axel, and the harness your agents run.
 - **macOS** (Linux works for the CLI; the floating panes need Rex).
 - **[Rex](https://www.superlogical.com/rex)**, the terminal Axel lives in. Outside Rex, Axel
   runs the same interface inline in your terminal.
-- **A harness**: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex) or
-  [OpenCode](https://opencode.ai), installed and logged in.
+- **A harness**, installed and logged in: [Claude Code](https://claude.ai/code),
+  [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), or one of the
+  [others](#harnesses).
 
 ## Install Axel
 
@@ -48,7 +49,7 @@ the Homebrew one until you remove `~/.local/bin/axel`.
 
 The first time, `axel` runs **`axel setup`** before anything else:
 
-- it checks this machine: Rex, git, and which harnesses (Claude Code, Codex, OpenCode) and
+- it checks this machine: Rex, git, and which harnesses and
   ACP adapters are installed, and offers to install a missing adapter;
 - it creates your first agent: a name, its harness, a few skills, a colour and a runtime
   mode;
@@ -70,6 +71,30 @@ rather than by a dialog in some pane.
 - **Codex:** nothing to install either. Axel's adapter drives your `codex` through
   `codex app-server`, so it always runs your Codex version, config and login.
 - **OpenCode:** ACP is built into OpenCode itself (`opencode acp`).
+- **The others** speak ACP themselves, or through an adapter you install next to them.
+
+## Harnesses
+
+| Harness | Name | Axel runs | Install |
+|---|---|---|---|
+| Claude Code | `claude` | built-in adapter | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| Codex | `codex` | built-in adapter | `npm i -g @openai/codex` |
+| OpenCode | `opencode` | `opencode acp` | `npm i -g opencode-ai` |
+| Goose | `goose` | `goose acp` | [goose-docs.ai](https://goose-docs.ai/docs/getting-started/installation/) |
+| Cursor | `cursor` | `cursor-agent acp` | `curl https://cursor.com/install -fsS \| bash` |
+| Pi | `pi` | `pi-acp` | `npm i -g @earendil-works/pi-coding-agent pi-acp` |
+| Oh My Pi | `omp` | `omp acp` | [omp.sh](https://omp.sh) |
+| Devin | `devin` | `devin acp` | [docs.devin.ai/cli](https://docs.devin.ai/cli) |
+| Grok Build | `grok` | `grok agent stdio` | [docs.x.ai](https://docs.x.ai/build/overview) |
+| Kimi Code | `kimi` | `kimi acp` | [kimi.ai](https://kimi.ai/download) |
+| Amp | `amp` | `amp-acp` | `npm i -g @sourcegraph/amp amp-acp` |
+| Hermes Agent | `hermes` | `hermes-acp` | [hermes-agent.nousresearch.com](https://hermes-agent.nousresearch.com) |
+| OpenClaw | `openclaw` | `openclaw acp` | [docs.openclaw.ai](https://docs.openclaw.ai/start/getting-started) |
+
+Name it when you create an agent, with its model after a `/` if you like:
+`axel agent new gus goose`, `axel agent new opus claude/opus`. `AXEL_ACP_<NAME>` replaces the
+command Axel runs (`AXEL_ACP_PI="npx pi-acp"`). Skills are installed for Claude Code, Codex
+and OpenCode; the others get your `AXEL.md` in their prompt.
 
 Without an adapter, an agent runs as its normal CLI in a Rex pane, and reports its status
 through hooks that Axel installs at launch.

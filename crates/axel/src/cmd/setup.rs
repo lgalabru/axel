@@ -70,37 +70,6 @@ fn wordmark() -> String {
         .collect()
 }
 
-/// A harness Axel can run, and what it needs.
-struct HarnessInfo {
-    harness: Harness,
-    label: &'static str,
-    program: &'static str,
-    install: &'static str,
-}
-
-fn harnesses() -> Vec<HarnessInfo> {
-    vec![
-        HarnessInfo {
-            harness: Harness::Claude,
-            label: "Claude Code",
-            program: "claude",
-            install: "npm i -g @anthropic-ai/claude-code",
-        },
-        HarnessInfo {
-            harness: Harness::Codex,
-            label: "Codex",
-            program: "codex",
-            install: "npm i -g @openai/codex",
-        },
-        HarnessInfo {
-            harness: Harness::Opencode,
-            label: "OpenCode",
-            program: "opencode",
-            install: "npm i -g opencode-ai",
-        },
-    ]
-}
-
 /// The program behind the ACP adapter that lets Axel drive a harness (its
 /// thread view, policies).  Claude's and Codex's are built in.
 fn adapter(h: &Harness) -> Option<String> {
@@ -169,21 +138,16 @@ pub fn run() -> Result<Next> {
             .unwrap_or_else(|| "not found".into()),
     );
 
-    let mut installed: Vec<&HarnessInfo> = Vec::new();
-    let all = harnesses();
+    // Every harness Axel knows, but only the ones on this machine are listed:
+    // the rest show up only when there's none at all.
+    let mut installed: Vec<&Harness> = Vec::new();
+    let all = Harness::BUILTIN;
     for h in &all {
-        let found = which(h.program);
-        let acp = adapter(&h.harness);
-        let managed = acp.as_deref().and_then(which).is_some();
-        let detail = match (&found, managed) {
-            (Some(p), true) => format!("{}  {}", tilde(p), dim("· managed")),
-            (Some(p), false) => format!("{}  {}", tilde(p), dim("· in a pane (no ACP adapter)")),
-            (None, _) => dim(&format!("not found  ({})", h.install)),
-        };
-        check(found.is_some(), h.label, detail);
-        if found.is_some() {
-            installed.push(h);
-        }
+        let Some(found) = which(h.program()) else { continue };
+        let managed = adapter(h).as_deref().and_then(which).is_some();
+        let how = if managed { "· managed" } else { "· in a pane (no ACP adapter)" };
+        check(true, h.label(), format!("{}  {}", tilde(&found), dim(how)));
+        installed.push(h);
     }
     if installed.is_empty() {
         eprintln!();
@@ -196,7 +160,7 @@ pub fn run() -> Result<Next> {
             dim("Install one of them, log in once, then run `axel` again:")
         );
         for h in &all {
-            eprintln!("    {}  {}", style(h.label).bold(), dim(h.install));
+            eprintln!("    {:<13} {}", style(h.label()).bold(), dim(h.install()));
         }
         return Ok(Next::Quit);
     }
@@ -253,17 +217,17 @@ pub fn run() -> Result<Next> {
                 style("✓").color256(OK),
                 style("Harness").bold(),
                 dim("·"),
-                style(h.label).color256(YOU)
+                style(h.label()).color256(YOU)
             );
-            h.harness.clone()
+            h.clone()
         } else {
-            let labels: Vec<String> = installed.iter().map(|h| h.label.to_string()).collect();
+            let labels: Vec<String> = installed.iter().map(|h| h.label().to_string()).collect();
             let i = Select::with_theme(&theme)
                 .with_prompt("Harness")
                 .items(&labels)
                 .default(0)
                 .interact()?;
-            installed[i].harness.clone()
+            installed[i].clone()
         };
 
         let skills = pick_skills(&ctx, &theme)?;

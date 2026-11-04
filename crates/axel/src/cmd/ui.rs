@@ -35,9 +35,12 @@ pub const PROMPT_LABEL: &str = "why not today?";
 const USAGE_LABEL: &str = "usage";
 pub const THREADS_LABEL: &str = "threads";
 
-/// Harness names the new-agent form cycles through: the builtin kinds, in order.
-pub fn harnesses() -> Vec<&'static str> {
-    axel_config::HarnessKind::BUILTIN.iter().map(|k| k.as_str()).collect()
+/// Harness names the new-agent form cycles through: the builtins installed on
+/// this machine, in order (all of them when none is, so the form still offers some).
+pub fn harnesses() -> Vec<String> {
+    let all = axel_store::Harness::BUILTIN;
+    let installed: Vec<String> = all.iter().filter(|h| super::launch::which(h.program()).is_some()).map(|h| h.to_string()).collect();
+    if installed.is_empty() { all.iter().map(|h| h.to_string()).collect() } else { installed }
 }
 
 /// `axel` with no arguments.

@@ -164,8 +164,13 @@ pub enum AgentCommand {
     #[command(aliases = ["create", "add"])]
     New {
         name: String,
-        #[arg(long, default_value = "claude")]
-        harness: String,
+        /// The harness, and optionally its model: `claude`, `claude/opus`,
+        /// `codex/gpt-5.5`, `goose`, `cursor`… (default: claude, its default model).
+        #[arg(value_name = "HARNESS[/MODEL]")]
+        runs: Option<String>,
+        /// The harness alone, as a flag (same as the argument without a model).
+        #[arg(long, conflicts_with = "runs")]
+        harness: Option<String>,
         #[arg(long)]
         model: Option<String>,
         /// Comma-separated skill names, or `*`.
@@ -184,9 +189,15 @@ pub enum AgentCommand {
         #[command(flatten)]
         policy: PolicyArgs,
     },
-    /// Change an agent's permissions, budget, runtime mode or default host.
+    /// Change an agent's harness, model, permissions, budget, runtime mode or default host.
     Edit {
         name: String,
+        /// Switch it to this harness, and optionally model: `codex`, `claude/fable`.
+        #[arg(value_name = "HARNESS[/MODEL]")]
+        runs: Option<String>,
+        /// Switch its model only (`default` for the harness's own).
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long, value_enum)]
         runtime_mode: Option<RuntimeModeArg>,
         /// Run it on this host unless told otherwise; `local` runs it here again.
@@ -476,6 +487,21 @@ mod alias_tests {
         assert!(matches!(parses(&["skill", "list"]), Command::Skills { command: SkillsCommand::Ls }));
         assert!(matches!(parses(&["logs", "s1"]), Command::Log { .. }));
         assert!(matches!(parses(&["msg", "@nova", "hi"]), Command::Send { .. }));
+    }
+
+    #[test]
+    fn an_agent_is_named_then_given_what_it_runs() {
+        let Command::Agent { command: AgentCommand::New { name, runs, harness, model, .. } } = parses(&["agent", "new", "opus", "claude/opus"]) else { panic!() };
+        assert_eq!((name.as_str(), runs.as_deref(), harness, model), ("opus", Some("claude/opus"), None, None));
+        let Command::Agent { command: AgentCommand::New { runs, .. } } = parses(&["agent", "new", "opus"]) else { panic!() };
+        assert_eq!(runs, None, "the harness is optional");
+        let Command::Agent { command: AgentCommand::New { runs, harness, model, .. } } = parses(&["agent", "new", "astra", "--harness", "codex", "--model", "gpt-5.5"]) else { panic!() };
+        assert_eq!((runs, harness.as_deref(), model.as_deref()), (None, Some("codex"), Some("gpt-5.5")), "the flags still work");
+        assert!(Cli::try_parse_from(["axel", "agent", "new", "astra", "codex", "--harness", "claude"]).is_err(), "a harness given twice");
+        let Command::Agent { command: AgentCommand::Edit { runs, model, .. } } = parses(&["agent", "edit", "astra", "goose/gpt-5.5"]) else { panic!() };
+        assert_eq!((runs.as_deref(), model), (Some("goose/gpt-5.5"), None));
+        let Command::Agent { command: AgentCommand::Edit { runs, model, .. } } = parses(&["agent", "edit", "opus", "--model", "fable"]) else { panic!() };
+        assert_eq!((runs, model.as_deref()), (None, Some("fable")));
     }
 
     #[test]

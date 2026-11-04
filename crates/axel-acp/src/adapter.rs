@@ -7,8 +7,9 @@ use axel_store::Harness;
 /// Overridable with `AXEL_ACP_<HARNESS>` (harness name upper-cased, non
 /// alphanumerics as `_`; e.g. `AXEL_ACP_CLAUDE="npx -y @zed-industries/claude-code-acp"`).
 /// Defaults: claude → `axel claude-acp`, codex → `axel codex-acp` (both built in), opencode →
-/// `opencode acp`, custom `goose` → `goose acp`, any other custom command is
-/// split like a shell would (quotes honoured, no expansion).
+/// [`Harness::acp_command`] for the other builtins (`opencode acp`, `goose acp`,
+/// `cursor-agent acp`, …); a custom command is split like a shell would (quotes
+/// honoured, no expansion).
 pub fn adapter_command(harness: &Harness) -> Vec<String> {
     if let Ok(v) = std::env::var(env_var_name(harness))
         && !v.trim().is_empty()
@@ -49,14 +50,9 @@ fn default_command(harness: &Harness) -> Vec<String> {
             Ok(exe) => vec![exe.to_string_lossy().into_owned(), "codex-acp".into()],
             Err(_) => vec!["axel".into(), "codex-acp".into()],
         },
-        Harness::Opencode => vec!["opencode".into(), "acp".into()],
-        Harness::Custom(cmd) => {
-            let parts = shell_split(cmd);
-            match parts.as_slice() {
-                [only] if only == "goose" => vec!["goose".into(), "acp".into()],
-                _ => parts,
-            }
-        }
+        Harness::Custom(cmd) => shell_split(cmd),
+        // The rest speak ACP themselves, or through an adapter of their own.
+        builtin => builtin.acp_command().unwrap_or_default().iter().map(|w| w.to_string()).collect(),
     }
 }
 
@@ -121,10 +117,14 @@ mod tests {
         assert_eq!(claude[1], "claude-acp", "the built-in adapter: this binary's `claude-acp`");
         assert_eq!(adapter_command(&Harness::Codex)[1], "codex-acp", "built in");
         assert_eq!(adapter_command(&Harness::Opencode), vec!["opencode", "acp"]);
-        assert_eq!(
-            adapter_command(&Harness::Custom("goose".into())),
-            vec!["goose", "acp"]
-        );
+        assert_eq!(adapter_command(&Harness::Goose), vec!["goose", "acp"]);
+        assert_eq!(adapter_command(&Harness::Cursor), vec!["cursor-agent", "acp"]);
+        assert_eq!(adapter_command(&Harness::Pi), vec!["pi-acp"]);
+        assert_eq!(adapter_command(&Harness::Amp), vec!["amp-acp"]);
+        assert_eq!(adapter_command(&Harness::Grok), vec!["grok", "agent", "stdio"]);
+        for h in Harness::BUILTIN {
+            assert!(!adapter_command(&h).is_empty(), "{h} has an adapter");
+        }
         assert_eq!(
             adapter_command(&Harness::Custom("python my_agent.py --flag".into())),
             vec!["python", "my_agent.py", "--flag"]
@@ -135,7 +135,7 @@ mod tests {
     fn env_names() {
         assert_eq!(env_var_name(&Harness::Claude), "AXEL_ACP_CLAUDE");
         assert_eq!(
-            env_var_name(&Harness::Custom("goose".into())),
+            env_var_name(&Harness::Goose),
             "AXEL_ACP_GOOSE"
         );
         assert_eq!(

@@ -33,12 +33,24 @@ pub fn osc_kind(k: BlockedKind) -> osc::Kind {
     }
 }
 
-/// The config-side kind of a stored harness; any custom command is `Custom`.
+/// The config-side kind of a stored harness.  The pane launcher and skill
+/// drivers know Claude, Codex and OpenCode; every other harness runs its CLI
+/// as is there (`Custom`, with [`pane_command`]).
 pub fn harness_kind(h: &Harness) -> HarnessKind {
     match h {
         Harness::Claude => HarnessKind::Claude,
         Harness::Codex => HarnessKind::Codex,
         Harness::Opencode => HarnessKind::Opencode,
-        Harness::Custom(_) => HarnessKind::Custom,
+        _ => HarnessKind::Custom,
+    }
+}
+
+/// What a `Custom`-kind harness runs in a pane: the command, or the CLI of a
+/// harness the pane launcher has no flags for.
+pub fn pane_command(h: &Harness) -> Option<String> {
+    match h {
+        Harness::Claude | Harness::Codex | Harness::Opencode => None,
+        Harness::Custom(cmd) => Some(cmd.clone()),
+        other => Some(other.program().to_string()),
     }
 }

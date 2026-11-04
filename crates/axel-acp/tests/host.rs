@@ -626,7 +626,7 @@ fn real_goose_smoke() {
     }
     let f = fixture(
         RuntimeMode::Plan,
-        Harness::Custom("goose".into()),
+        Harness::Goose,
         Some("Reply with exactly the word pong and nothing else."),
     );
     let host = spawn_host(&f);

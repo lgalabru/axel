@@ -234,6 +234,20 @@ fn project_upsert_touches_last_opened_at_and_repo_key() {
 }
 
 #[test]
+fn an_agent_can_switch_harness_and_model() {
+    let s = store();
+    let kp = Keypair::generate();
+    s.insert_agent(&agent_spec("astra", &kp, None)).unwrap();
+    s.set_agent_harness(&pk(&kp), &Harness::Goose, Some("gpt-5.5")).unwrap();
+    let a = s.agent_by_name("astra").unwrap().unwrap();
+    assert_eq!((a.harness, a.model.as_deref()), (Harness::Goose, Some("gpt-5.5")));
+    s.set_agent_harness(&pk(&kp), &Harness::Codex, None).unwrap();
+    let a = s.agent_by_name("astra").unwrap().unwrap();
+    assert_eq!((a.harness, a.model), (Harness::Codex, None), "no model is the harness's default");
+    assert!(matches!(s.set_agent_harness("nobody", &Harness::Claude, None), Err(Error::NotFound(_))));
+}
+
+#[test]
 fn agent_registry() {
     let s = store();
     let owner = Keypair::generate();
@@ -1433,6 +1447,33 @@ fn enum_strings_roundtrip() {
     assert!(kind::is_thread_kind(kind::USAGE) && kind::is_thread_kind(kind::SESSION_END));
     assert!(!kind::is_thread_kind(kind::NOTE));
     assert!(kind::is_own_agent_kind(kind::STATUS) && !kind::is_own_agent_kind(kind::THREAD_UPDATE));
+}
+
+#[test]
+fn harness_and_model_are_one_argument() {
+    use crate::parse_harness_model as p;
+    assert_eq!(p("claude"), (Harness::Claude, None));
+    assert_eq!(p("claude/opus"), (Harness::Claude, Some("opus".into())));
+    assert_eq!(p(" Codex/gpt-5.5 "), (Harness::Codex, Some("gpt-5.5".into())));
+    assert_eq!(p("opencode/anthropic/claude-opus"), (Harness::Opencode, Some("anthropic/claude-opus".into())), "the model keeps its own slashes");
+    assert_eq!(p("claude/"), (Harness::Claude, None), "an empty model is the default");
+    assert_eq!(p("cursor-agent/sonnet"), (Harness::Cursor, Some("sonnet".into())), "a CLI's own name works");
+    assert_eq!(p("/usr/local/bin/agent"), (Harness::Custom("/usr/local/bin/agent".into()), None), "a path is a command");
+    assert_eq!(p("./my-agent/x"), (Harness::Custom("./my-agent/x".into()), None));
+}
+
+#[test]
+fn every_builtin_harness_says_how_to_run_and_install_it() {
+    for h in &Harness::BUILTIN {
+        assert!(!h.label().is_empty() && !h.program().is_empty() && !h.install().is_empty(), "{h}");
+        match h {
+            Harness::Claude | Harness::Codex => assert!(h.acp_command().is_none(), "{h}: adapter built into axel"),
+            _ => assert!(h.acp_command().is_some(), "{h} has an ACP command"),
+        }
+    }
+    assert_eq!(Harness::parse("goose"), Harness::Goose, "an agent stored as the custom command goose is now the builtin");
+    assert_eq!(Harness::Cursor.program(), "cursor-agent");
+    assert_eq!(Harness::Custom("python agent.py".into()).program(), "python");
 }
 
 #[test]

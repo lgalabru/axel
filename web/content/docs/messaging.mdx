@@ -11,10 +11,10 @@ piece of the work. You decide who may reach whom, and you see every message.
 From an agent, with the `send` tool of its `axel` MCP server, or the CLI:
 
 ```bash
-axel send "@astra can you review src/auth.rs for the token refresh bug? Reply to opus when done."
+axel send "@opus can you review src/auth.rs for the token refresh bug? Reply to terra when done."
 ```
 
-You can send the same way, from a terminal or by mentioning `@astra` in the composer. Each
+You can send the same way, from a terminal or by mentioning `@opus` in the composer. Each
 recipient gets the message in front of it, **on this thread**:
 
 | Recipient | What happens | Outcome |
@@ -27,16 +27,16 @@ recipient gets the message in front of it, **on this thread**:
 The receiving agent reads:
 
 ```text
-Message from opus, another Axel agent on this thread:
+Message from terra, another Axel agent on this thread:
 
 can you review src/auth.rs for the token refresh bug? …
 ```
 
 ## Replies
 
-When opus's message starts astra's turn, astra just answers. When that turn ends, its last
-message goes back to opus by itself, as opus's next prompt, and you see it on the thread
-as it happens. Opus is told you've already seen it, so it carries on with its task
+When terra's message starts opus's turn, opus just answers. When that turn ends, its last
+message goes back to terra by itself, as terra's next prompt, and you see it on the thread
+as it happens. Terra is told you've already seen it, so it carries on with its task
 instead of repeating it to you. An answer that comes back is never answered in turn, so
 two agents can't keep a conversation going on their own, and it never summons anyone.
 
@@ -55,7 +55,7 @@ Not everything needs an answer. An agent sends news as a **note** with `send` an
 `fyi: true`, or `axel send --fyi`:
 
 ```bash
-axel send --fyi "@astra FYI: the QEDIT build passes now"
+axel send --fyi "@opus FYI: the QEDIT build passes now"
 ```
 
 A note shows on the thread, but it doesn't start the recipient's turn: the recipient reads
@@ -65,13 +65,13 @@ can't wake anyone up.
 ## What each agent knows
 
 Agents can't see each other's turns; only you see the whole thread. So when you turn to an
-agent (`@astra what do you think?`), its prompt starts with what it missed since its last
+agent (`@opus what do you think?`), its prompt starts with what it missed since its last
 turn: the other agents' replies (the newest in full), your messages to them, notes left for
 it, and who else is working on the thread and on what. Your message comes last. The thread
-still shows it as you typed it, `@astra` included.
+still shows it as you typed it, `@opus` included.
 
 Without an `@name`, a message goes to the agent that replied last. The composer's footer
-shows where it will go before you press Enter: `→ astra`, or `→ +vega` when vega would be
+shows where it will go before you press Enter: `→ opus`, or `→ +vega` when vega would be
 summoned onto the thread.
 
 Messages an agent already got as a prompt or a note are marked `handled` in its inbox, so
@@ -82,18 +82,18 @@ it treats them as history rather than requests to act on again.
 Agents start with **no reach**. You grant it per agent:
 
 ```bash
-axel agent edit opus --allow astra,vega     # opus may message and summon astra and vega
-axel agent edit opus --reach anyone       # …or any agent
-axel agent edit opus --disallow vega
+axel agent edit terra --allow opus,vega     # terra may message and summon opus and vega
+axel agent edit terra --reach anyone       # …or any agent
+axel agent edit terra --disallow vega
 ```
 
 When an agent tries to message one it may not reach, Axel asks you then and there, in
 the middle of the window: **Allow this message**, **Always allow** (the same as
-`axel agent edit opus --allow astra`), or **Don't allow**. The agent never decides this
+`axel agent edit terra --allow opus`), or **Don't allow**. The agent never decides this
 itself: only your answer grants reach.
 
-An agent that may reach you may always be answered: if opus may ask astra, astra may reply
-to opus, but only while opus is on the thread. Replying never starts a session.
+An agent that may reach you may always be answered: if terra may ask opus, opus may reply
+to terra, but only while terra is on the thread. Replying never starts a session.
 
 Axel also refuses:
 

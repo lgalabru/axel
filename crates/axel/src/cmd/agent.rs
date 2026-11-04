@@ -11,7 +11,7 @@ use crate::cli::{AgentCommand, PolicyArgs, ReachArg};
 pub fn run(cmd: AgentCommand) -> Result<()> {
     let ctx = Ctx::open()?;
     match cmd {
-        AgentCommand::New { name, harness, model, skills, prompt, color, runtime_mode, host, policy } => {
+        AgentCommand::New { name, runs, harness, model, skills, prompt, color, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't create agents; ask the owner to run this");
             }
@@ -19,15 +19,16 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             let mut p = AgentPolicy::default();
             apply_policy(&ctx, &name, &mut p, &policy)?;
             let host_id = host.as_deref().map(|h| host_choice(&ctx, h)).transpose()?.flatten();
-            let agent = create(&ctx, &name, Harness::parse(&harness), model, parse_skills(&skills), prompt, color.map(AgentColor::from), runtime_mode.into())?;
+            let (harness, model) = harness_and_model(runs.as_deref().or(harness.as_deref()), model)?;
+            let agent = create(&ctx, &name, harness, model, parse_skills(&skills), prompt, color.map(AgentColor::from), runtime_mode.into())?;
             ctx.store.set_agent_policy(&agent.pubkey, &p)?;
             ctx.store.set_agent_host(&agent.pubkey, host_id.as_deref())?;
-            println!("{}  {}  {}", agent.name, agent.harness, agent.pubkey);
+            println!("{}  {}  {}", agent.name, runs_label(&agent.harness, agent.model.as_deref()), agent.pubkey);
             print_policy(&ctx, &p);
             print_host(&ctx, &agent.pubkey)?;
             Ok(())
         }
-        AgentCommand::Edit { name, runtime_mode, host, policy } => {
+        AgentCommand::Edit { name, runs, model, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't edit agents; ask the owner to run this");
             }
@@ -38,11 +39,19 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             if let Some(m) = runtime_mode {
                 ctx.store.set_agent_runtime_mode(&a.pubkey, m.into())?;
             }
+            if runs.is_some() || model.is_some() {
+                let (harness, model) = match runs.as_deref() {
+                    Some(spec) => harness_and_model(Some(spec), model)?,
+                    // A new model, same harness.
+                    None => (a.harness.clone(), model.filter(|m| m != "default")),
+                };
+                ctx.store.set_agent_harness(&a.pubkey, &harness, model.as_deref())?;
+            }
             if let Some(h) = &host {
                 ctx.store.set_agent_host(&a.pubkey, host_choice(&ctx, h)?.as_deref())?;
             }
             let a = ctx.store.agent_by_pubkey(&a.pubkey)?.context("agent vanished")?;
-            println!("{}  {}  mode {}", a.name, a.harness, a.runtime_mode);
+            println!("{}  {}  mode {}", a.name, runs_label(&a.harness, a.model.as_deref()), a.runtime_mode);
             print_policy(&ctx, &p);
             print_host(&ctx, &a.pubkey)?;
             Ok(())
@@ -134,6 +143,28 @@ pub fn create(
     Ok(agent)
 }
 
+/// The harness and model from `HARNESS[/MODEL]` (or `--harness`) and
+/// `--model`; claude when neither names one.  A model in both places must agree.
+fn harness_and_model(spec: Option<&str>, flag: Option<String>) -> Result<(Harness, Option<String>)> {
+    let (harness, from_spec) = spec.map(axel_store::parse_harness_model).unwrap_or_default();
+    let model = match (from_spec, flag) {
+        (Some(a), Some(b)) if a != b => bail!("two models: {a} (from {}) and --model {b}", spec.unwrap_or_default()),
+        (a, b) => a.or(b),
+    };
+    if !harness.is_builtin() && harness.program().is_empty() {
+        bail!("no harness named");
+    }
+    Ok((harness, model))
+}
+
+/// `claude/opus`, or `claude` with the harness's default model.
+fn runs_label(harness: &Harness, model: Option<&str>) -> String {
+    match model {
+        Some(m) => format!("{harness}/{m}"),
+        None => harness.to_string(),
+    }
+}
+
 /// Apply `agent new`/`agent edit` policy flags: `--reach` first (replaces the
 /// list), then `--allow`, then `--disallow`.
 fn apply_policy(ctx: &Ctx, me: &str, p: &mut AgentPolicy, args: &PolicyArgs) -> Result<()> {
@@ -210,4 +241,26 @@ fn print_policy(ctx: &Ctx, p: &AgentPolicy) {
 
 fn parse_skills(s: &str) -> Vec<String> {
     s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_and_model_come_from_the_argument_or_the_flags() {
+        assert_eq!(harness_and_model(None, None).unwrap(), (Harness::Claude, None), "claude, its default model");
+        assert_eq!(harness_and_model(Some("claude/opus"), None).unwrap(), (Harness::Claude, Some("opus".into())));
+        assert_eq!(harness_and_model(Some("codex"), Some("gpt-5.5".into())).unwrap(), (Harness::Codex, Some("gpt-5.5".into())));
+        assert_eq!(harness_and_model(Some("claude/opus"), Some("opus".into())).unwrap(), (Harness::Claude, Some("opus".into())), "the same model twice is fine");
+        let two = harness_and_model(Some("claude/opus"), Some("fable".into())).unwrap_err().to_string();
+        assert!(two.contains("two models"), "{two}");
+        assert!(harness_and_model(Some("  "), None).is_err(), "a blank harness");
+    }
+
+    #[test]
+    fn an_agent_shows_as_harness_slash_model() {
+        assert_eq!(runs_label(&Harness::Claude, Some("opus")), "claude/opus");
+        assert_eq!(runs_label(&Harness::Goose, None), "goose");
+    }
 }

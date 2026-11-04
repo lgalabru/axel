@@ -337,6 +337,19 @@ impl Store {
         Ok(())
     }
 
+    /// Change an agent's harness and model (`None`: the harness's default);
+    /// applies to sessions started afterwards.
+    pub fn set_agent_harness(&self, pk: &str, harness: &crate::Harness, model: Option<&str>) -> Result<(), Error> {
+        let n = self.conn.execute(
+            "UPDATE agents SET harness = ?2, model = ?3 WHERE pubkey = ?1",
+            params![pk, harness.as_str(), model],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("agent {pk}")));
+        }
+        Ok(())
+    }
+
     /// Soft-delete: sets `archived_at`; the row (and its name) stay reserved.
     pub fn archive_agent(&self, pk: &str) -> Result<(), Error> {
         let n = self.conn.execute(

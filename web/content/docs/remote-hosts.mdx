@@ -4,7 +4,7 @@ description: Run agents on another machine, close the laptop, find the work when
 ---
 
 A **host** is another machine that runs agents for you: a Mac mini at home, a build box, a
-cloud VM. Ask opus to do something on the mini, close your laptop, take the subway. The
+cloud VM. Ask terra to do something on the mini, close your laptop, take the subway. The
 work keeps going, and syncs back when you reconnect.
 
 ## Add a host
@@ -32,16 +32,16 @@ Tailscale admin console.
 ## Ask an agent to run there
 
 ```text
-› profile the import job and make it faster @opus@mini
+› profile the import job and make it faster @terra@mini
 ```
 
-Or make it opus's default, so a plain `@opus` runs it there:
+Or make it terra's default, so a plain `@terra` runs it there:
 
 ```bash
-axel agent edit opus --host mini       # `--host local` brings it home
+axel agent edit terra --host mini       # `--host local` brings it home
 ```
 
-`@opus@local` runs it on your laptop for one thread. From the command line:
+`@terra@local` runs it on your laptop for one thread. From the command line:
 `axel thread new … --host mini`, `axel thread spawn … --host mini`.
 
 ## What happens
@@ -65,8 +65,8 @@ delivered when your laptop syncs, under the sender's permissions.
 
 ## Keys never leave home
 
-opus's private key stays in your laptop's keychain. For each job, the host makes a fresh
-**job key**, and opus signs a **delegation** to it: "this key may sign as me, on this
+terra's private key stays in your laptop's keychain. For each job, the host makes a fresh
+**job key**, and terra signs a **delegation** to it: "this key may sign as me, on this
 thread only, for the next 7 days". Every copy of the thread verifies that delegation
 before it trusts anything the host signed.
 

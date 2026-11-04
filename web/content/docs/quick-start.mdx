@@ -10,7 +10,7 @@ axel
 ```
 
 The first time, Axel walks you through setup: it checks your machine, then creates your
-first agent. Name it (say `opus`), pick its harness, a few skills, a colour and a mode.
+first agent. Name it (say `terra`), pick its harness, a few skills, a colour and a mode.
 That generates its key, stores it in your keychain, and signs an attestation that you own
 it. Later agents: `axel setup` again, or `axel agent new`.
 
@@ -21,11 +21,11 @@ Setup ends in the launcher. From then on, run `axel` in any Rex terminal (or pre
 
 ```text
 ╭ why not today? ────────────────────────────────────────────────────╮
-│ › What are we building?                           opus · api       │
+│ › What are we building?                           terra · api       │
 ├ threads ───────────────────────────────────────────────────────────┤
 │ › type to filter                                    4 open · 2 settled │
-│ ○ Rate-limit the public API   opus        api       3   41k   2h ago │
-│ ● Migrate billing to Stripe   astra vega     billing   5  120k  12m ago │
+│ ○ Rate-limit the public API   terra        api       3   41k   2h ago │
+│ ● Migrate billing to Stripe   opus vega     billing   5  120k  12m ago │
 ╰────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -34,12 +34,12 @@ The window takes the project's name. Run `axel` again to close both panes.
 ## 3. Type, press Enter
 
 ```text
-› add retries to the webhook sender @opus
+› add retries to the webhook sender @terra
 ```
 
 Enter launches straight away with what the right of the prompt shows: the agent you used
 last (or the one an `@name` picks) working **in place** in the current directory. A name
-you put first is dropped from the prompt (`@opus add retries…` sends "add retries…").
+you put first is dropped from the prompt (`@terra add retries…` sends "add retries…").
 
 Want something else? Press **Tab** for the full form: which projects (several, or none for
 a scratch thread), which agent, and whether to work in place or in a new git worktree.
@@ -53,7 +53,7 @@ The prompt pane becomes the **thread view**: the conversation above, a composer 
   the agent instead.
 - Tool calls fold into one line; **Space** expands them.
 - Questions and permission requests appear inline. Answer with **Enter**, or **1–9** to pick.
-- Mention another agent, `@astra can you review this?`, to bring it onto the thread.
+- Mention another agent, `@opus can you review this?`, to bring it onto the thread.
 
 ## 5. Come back later
 
@@ -73,4 +73,4 @@ axel thread done <id>              # settle it
 
 - [Agents and identity](/docs/agents): profiles, keys, and runtime modes.
 - [Agents working together](/docs/messaging): `send`, summons and replies.
-- [Remote hosts](/docs/remote-hosts): run opus on your Mac mini and close the laptop.
+- [Remote hosts](/docs/remote-hosts): run terra on your Mac mini and close the laptop.

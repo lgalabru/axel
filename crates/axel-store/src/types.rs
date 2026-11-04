@@ -173,7 +173,7 @@ str_enum! {
     AgentColor { Purple => "purple", Yellow => "yellow", Red => "red", Green => "green", Blue => "blue", Gray => "gray", Orange => "orange" }
 }
 
-/// The CLI an agent runs in: one Axel drives natively, or any other command.
+/// The CLI an agent runs in: one Axel knows how to drive, or any other command.
 ///
 /// Stored and serialised as plain text: the builtin name, or the custom
 /// command itself.  Parsing never fails, so there is no `ALL`; see
@@ -184,13 +184,38 @@ pub enum Harness {
     Claude,
     Codex,
     Opencode,
+    Goose,
+    Cursor,
+    Pi,
+    /// Oh My Pi.
+    Omp,
+    Devin,
+    Grok,
+    Kimi,
+    Amp,
+    Hermes,
+    Openclaw,
     /// Any other program, by command.
     Custom(String),
 }
 
 impl Harness {
-    /// The harnesses Axel knows how to drive natively, in display order.
-    pub const BUILTIN: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Opencode];
+    /// The harnesses Axel knows how to drive, in display order.
+    pub const BUILTIN: [Harness; 13] = [
+        Harness::Claude,
+        Harness::Codex,
+        Harness::Opencode,
+        Harness::Goose,
+        Harness::Cursor,
+        Harness::Pi,
+        Harness::Omp,
+        Harness::Devin,
+        Harness::Grok,
+        Harness::Kimi,
+        Harness::Amp,
+        Harness::Hermes,
+        Harness::Openclaw,
+    ];
 
     /// The builtin name, or the custom command.
     pub fn as_str(&self) -> &str {
@@ -198,24 +223,123 @@ impl Harness {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::Opencode => "opencode",
+            Harness::Goose => "goose",
+            Harness::Cursor => "cursor",
+            Harness::Pi => "pi",
+            Harness::Omp => "omp",
+            Harness::Devin => "devin",
+            Harness::Grok => "grok",
+            Harness::Kimi => "kimi",
+            Harness::Amp => "amp",
+            Harness::Hermes => "hermes",
+            Harness::Openclaw => "openclaw",
             Harness::Custom(cmd) => cmd,
         }
     }
 
     /// A builtin by name (case-insensitive), anything else as [`Harness::Custom`].
+    /// A builtin's own CLI name works too (`cursor-agent` is [`Harness::Cursor`]).
     pub fn parse(s: &str) -> Harness {
         let t = s.trim();
-        match t.to_ascii_lowercase().as_str() {
-            "claude" => Harness::Claude,
-            "codex" => Harness::Codex,
-            "opencode" => Harness::Opencode,
-            _ => Harness::Custom(t.to_string()),
-        }
+        let lower = t.to_ascii_lowercase();
+        Harness::BUILTIN
+            .into_iter()
+            .find(|h| h.as_str() == lower || h.program() == lower)
+            .unwrap_or_else(|| Harness::Custom(t.to_string()))
     }
 
     pub fn is_builtin(&self) -> bool {
         !matches!(self, Harness::Custom(_))
     }
+
+    /// The name people know it by.
+    pub fn label(&self) -> &str {
+        match self {
+            Harness::Claude => "Claude Code",
+            Harness::Codex => "Codex",
+            Harness::Opencode => "OpenCode",
+            Harness::Goose => "Goose",
+            Harness::Cursor => "Cursor",
+            Harness::Pi => "Pi",
+            Harness::Omp => "Oh My Pi",
+            Harness::Devin => "Devin",
+            Harness::Grok => "Grok Build",
+            Harness::Kimi => "Kimi Code",
+            Harness::Amp => "Amp",
+            Harness::Hermes => "Hermes Agent",
+            Harness::Openclaw => "OpenClaw",
+            Harness::Custom(cmd) => cmd,
+        }
+    }
+
+    /// The harness's own CLI: what you install, and what runs in a pane.
+    /// A custom harness's first word.
+    pub fn program(&self) -> &str {
+        match self {
+            Harness::Cursor => "cursor-agent",
+            Harness::Custom(cmd) => cmd.split_whitespace().next().unwrap_or(""),
+            other => other.as_str(),
+        }
+    }
+
+    /// The command line of the ACP adapter that lets Axel drive it, for the
+    /// builtins that don't have one inside `axel` (Claude's and Codex's do):
+    /// most CLIs speak ACP themselves behind a subcommand; Pi and Amp need a
+    /// separate adapter.
+    pub fn acp_command(&self) -> Option<&'static [&'static str]> {
+        Some(match self {
+            Harness::Claude | Harness::Codex | Harness::Custom(_) => return None,
+            Harness::Opencode => &["opencode", "acp"],
+            Harness::Goose => &["goose", "acp"],
+            Harness::Cursor => &["cursor-agent", "acp"],
+            Harness::Pi => &["pi-acp"],
+            Harness::Omp => &["omp", "acp"],
+            Harness::Devin => &["devin", "acp"],
+            Harness::Grok => &["grok", "agent", "stdio"],
+            Harness::Kimi => &["kimi", "acp"],
+            Harness::Amp => &["amp-acp"],
+            Harness::Hermes => &["hermes-acp"],
+            Harness::Openclaw => &["openclaw", "acp"],
+        })
+    }
+
+    /// How to install it, in one line.
+    pub fn install(&self) -> &str {
+        match self {
+            Harness::Claude => "curl -fsSL https://claude.ai/install.sh | bash",
+            Harness::Codex => "npm i -g @openai/codex",
+            Harness::Opencode => "npm i -g opencode-ai",
+            Harness::Goose => "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
+            Harness::Cursor => "curl https://cursor.com/install -fsS | bash",
+            Harness::Pi => "npm i -g @earendil-works/pi-coding-agent pi-acp",
+            Harness::Omp => "see https://omp.sh",
+            Harness::Devin => "see https://docs.devin.ai/cli",
+            Harness::Grok => "see https://docs.x.ai/build/overview",
+            Harness::Kimi => "see https://kimi.ai/download",
+            Harness::Amp => "npm i -g @sourcegraph/amp amp-acp",
+            Harness::Hermes => "see https://hermes-agent.nousresearch.com",
+            Harness::Openclaw => "see https://docs.openclaw.ai/start/getting-started",
+            Harness::Custom(_) => "",
+        }
+    }
+}
+
+/// An agent's harness and, optionally, its model: `claude`, `claude/opus`,
+/// `codex/gpt-5.5`.  The model is everything after the first `/`, so model
+/// ids with slashes of their own (`opencode/anthropic/claude-opus`) keep them.
+/// A custom command never splits (`/usr/local/bin/agent` is a command).
+pub fn parse_harness_model(spec: &str) -> (Harness, Option<String>) {
+    let spec = spec.trim();
+    if let Some((h, model)) = spec.split_once('/')
+        && !h.is_empty()
+    {
+        let harness = Harness::parse(h);
+        if harness.is_builtin() {
+            let model = model.trim();
+            return (harness, (!model.is_empty()).then(|| model.to_string()));
+        }
+    }
+    (Harness::parse(spec), None)
 }
 
 impl FromStr for Harness {

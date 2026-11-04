@@ -514,10 +514,7 @@ fn build_profile(agent: &axel_store::Agent) -> AgentProfile {
         name: Some(agent.name.clone()),
         harness: Harness {
             kind: convert::harness_kind(&agent.harness),
-            command: match &agent.harness {
-                axel_store::Harness::Custom(cmd) => Some(cmd.clone()),
-                _ => None,
-            },
+            command: convert::pane_command(&agent.harness),
             args: vec![],
         },
         model: agent.model.clone(),
@@ -545,13 +542,19 @@ pub fn project_skills(config: Option<&WorkspaceConfig>) -> Result<axel_config::I
 }
 
 /// `AXEL.md`'s body, when this harness won't read it on its own: the project already
-/// has its own `CLAUDE.md` / `AGENTS.md`, so Axel couldn't link `AXEL.md` there.
+/// has its own `CLAUDE.md` / `AGENTS.md`, so Axel couldn't link `AXEL.md` there, or
+/// the harness has no driver to link it for (Goose, Cursor, …).
 fn unlinked_context(harness: &axel_store::Harness, dir: &Path) -> Option<String> {
-    let driver = drivers::for_harness(convert::harness_kind(harness))?;
     let config = WorkspaceConfig::load(dir).ok().flatten()?;
+    if config.body.trim().is_empty() {
+        return None;
+    }
+    let Some(driver) = drivers::for_harness(convert::harness_kind(harness)) else {
+        return Some(config.body);
+    };
     let axel_md = config.path.as_ref()?.canonicalize().ok()?;
     let ctx = dir.join(driver.context_filename());
-    if ctx.canonicalize().ok().as_ref() == Some(&axel_md) || config.body.trim().is_empty() {
+    if ctx.canonicalize().ok().as_ref() == Some(&axel_md) {
         return None;
     }
     Some(config.body)
@@ -756,6 +759,18 @@ mod tests {
         let keys: Vec<&str> = s.env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, vec!["PATH", "AXEL_AGENT", "AXEL_THREAD"]);
         assert!(s.env.contains(&("AXEL_AGENT".into(), "pk".into())), "the later value wins");
+    }
+
+    #[test]
+    fn a_harness_axel_cant_link_axel_md_for_gets_it_in_its_prompt() {
+        use axel_store::Harness;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AXEL.md"), "Run the tests before you say done.\n").unwrap();
+        let body = super::unlinked_context(&Harness::Goose, dir.path());
+        assert!(body.is_some_and(|b| b.contains("Run the tests")), "goose has no context file Axel links");
+        std::os::unix::fs::symlink("AXEL.md", dir.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(super::unlinked_context(&Harness::Claude, dir.path()), None, "claude reads it through CLAUDE.md");
+        assert!(super::unlinked_context(&Harness::Cursor, dir.path()).is_some());
     }
 
     #[test]

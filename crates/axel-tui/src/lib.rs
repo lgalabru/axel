@@ -105,7 +105,7 @@ pub struct Deps<'a> {
     pub keystore: &'a axel_identity::Keystore,
     pub cwd: PathBuf,
     /// Harness names offered by the new-agent form, e.g. `["claude", "codex", "opencode"]`.
-    pub harnesses: Vec<&'static str>,
+    pub harnesses: Vec<String>,
     /// Send a command to a managed session's host socket.
     pub send: &'a dyn Fn(&str, SendCommand) -> anyhow::Result<SendReply>,
     /// Start a new managed session for `agent name` on `thread_id` with an initial

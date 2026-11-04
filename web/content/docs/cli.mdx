@@ -16,8 +16,8 @@ done`, and `msg` for `send`.
 
 | | |
 |---|---|
-| `axel agent new NAME [--harness claude\|codex\|opencode] [--model M] [--skills a,b\|*] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. |
-| `axel agent edit NAME [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change its permissions, budget, mode or default host. |
+| `axel agent new NAME [HARNESS[/MODEL]] [--skills a,b\|*] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. `terra codex`, `opus claude/opus`, `gus goose`. |
+| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change its harness, model, permissions, budget, mode or default host. |
 | `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. |
 
 ## Skills
@@ -58,7 +58,7 @@ Thread and session ids accept any unique prefix.
 
 | | |
 |---|---|
-| `axel send "@astra …"` | A signed message to every `@name` in the text, as you, or as `$AXEL_AGENT` from inside a session. |
+| `axel send "@opus …"` | A signed message to every `@name` in the text, as you, or as `$AXEL_AGENT` from inside a session. |
 | `axel inbox [--agent NAME]` | Your inbox, or an agent's. |
 | `axel status working\|blocked\|done\|idle\|error\|clear "msg" [--kind permission\|question\|auth]` | Report a status for `$AXEL_THREAD`. |
 
