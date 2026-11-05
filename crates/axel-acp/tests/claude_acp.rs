@@ -427,3 +427,42 @@ fn cancelling_withdraws_what_was_sent_in_and_says_so() {
     assert_eq!(unsteered.len(), 1, "{seen:#?}");
     assert_eq!(unsteered[0]["params"]["messageIds"], json!(["m1"]), "the host keeps it queued");
 }
+
+/// The text of every agent message chunk, joined.
+fn said(ups: &[Value]) -> String {
+    ups.iter().filter(|u| u["sessionUpdate"] == "agent_message_chunk").filter_map(|u| u["content"]["text"].as_str()).collect()
+}
+
+#[test]
+fn what_claude_says_between_prompts_shows_up_at_once_and_doesnt_end_the_next_turn() {
+    // A background task finished and woke Claude between turns: what it said
+    // used to wait in the channel, come out at the next prompt as its reply,
+    // and end that prompt in milliseconds, the real answer waiting for the
+    // prompt after that.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let sid = new_session(&mut agent, cwd.path());
+    let _ = agent.notifications(Duration::from_millis(300));
+
+    let (_, reply) = agent.call("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "later" }] }), |_| json!({}));
+    assert_eq!(reply["result"]["stopReason"], "end_turn");
+    // Nothing asked, and it shows up anyway, as it is said.
+    let idle = updates(&agent.notifications(Duration::from_millis(1500)));
+    assert!(said(&idle).contains("background done"), "{idle:?}");
+
+    // The next prompt gets its own answer, nothing left over, and runs its full course.
+    let started = std::time::Instant::now();
+    let (seen, reply) = agent.call(
+        "session/prompt",
+        json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "list the files" }] }),
+        |_| json!({ "outcome": { "outcome": "selected", "optionId": "allow" } }),
+    );
+    let ups = updates(&seen);
+    assert!(said(&ups).contains("Hello") && !said(&ups).contains("background done"), "{ups:?}");
+    assert!(ups.iter().any(|u| u["sessionUpdate"] == "tool_call"), "the turn ran its tool call: {ups:?}");
+    assert_eq!(reply["result"]["stopReason"], "end_turn");
+    let _ = started;
+}
+

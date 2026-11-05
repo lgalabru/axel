@@ -7,7 +7,9 @@
 //! (`cancel_async_message` withdraws it) until one reading `fold` arrives,
 //! which takes them all in (echoed, with `--replay-user-messages`) and ends
 //! the turn, or one reading `late`, which ends the turn first and runs them
-//! as a turn of their own.  Its argv and every control request it receives
+//! as a turn of their own.  The prompt `later` answers at once and, a moment
+//! after, says more on its own, as Claude Code does when a background task it
+//! started finishes.  Its argv and every control request it receives
 //! are appended to `$FAKE_CLAUDE_LOG`, one JSON value per line.
 
 use std::io::{BufRead, Write};
@@ -142,6 +144,19 @@ fn main() {
                 }
                 if text == "work" {
                     work(&mut lines);
+                    continue;
+                }
+                if text == "later" {
+                    // Answer, then go on alone a moment later, as Claude Code
+                    // does when a background task it started finishes.
+                    text_reply("ok");
+                    send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok" }));
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        text_reply("background done");
+                        send(json!({ "type": "assistant", "message": { "role": "assistant", "model": "claude-sonnet-test", "content": [{ "type": "text", "text": "background done" }] } }));
+                        send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "background done" }));
+                    });
                     continue;
                 }
                 if text == "sleep" {

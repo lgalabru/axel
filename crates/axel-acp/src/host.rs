@@ -1255,6 +1255,8 @@ impl<W: Write> Host<W> {
         files: Vec<PathBuf>,
         from: Option<Sender>,
     ) -> PromptFuture {
+        // Text Claude was streaming on its own between turns ends here.
+        self.finalize_text();
         self.turn += 1;
         self.turn_started = Instant::now();
         self.turn_user_text = text.clone();

@@ -373,6 +373,7 @@ impl Agent {
             meter: Mutex::new(ClaudeMeter::default()),
         });
         self.spawn_reader(session.clone(), stdout, tx);
+        self.spawn_idle_relay(session.clone());
         self.sessions.lock().expect("sessions lock").insert(session_id.clone(), session.clone());
 
         let mut init = json!({
@@ -706,7 +707,6 @@ impl Agent {
     fn prompt(&self, params: &Value) -> RpcResult {
         let session = self.session(params)?;
         session.cancelled.store(false, Ordering::SeqCst);
-        session.steering.lock().expect("steering lock").prompting = true;
         let result = self.relay_prompt(&session, params);
         {
             let mut steering = session.steering.lock().expect("steering lock");
@@ -723,9 +723,17 @@ impl Agent {
     }
 
     fn relay_prompt(&self, session: &Arc<Session>, params: &Value) -> RpcResult {
-        session.stdin.send(&prompt_to_claude(params));
         let rx = session.messages.lock().expect("messages lock");
-        let sid = session.id.clone();
+        // What Claude said on its own since the last turn and the idle relay
+        // hasn't shown yet: relayed now, so a stale `result` can't end this
+        // prompt before Claude has read it.
+        while let Ok(message) = rx.try_recv() {
+            let _ = self.relay_message(session, &message);
+        }
+        // Only now may messages be sent into the turn: one accepted before the
+        // prompt itself went out would reach Claude first, as a prompt of its own.
+        session.steering.lock().expect("steering lock").prompting = true;
+        session.stdin.send(&prompt_to_claude(params));
         loop {
             let Ok(message) = rx.recv() else {
                 if session.cancelled.load(Ordering::SeqCst) {
@@ -733,24 +741,34 @@ impl Agent {
                 }
                 return Err(RpcError::invalid("Session did not end in result"));
             };
-            match message.get("type").and_then(Value::as_str).unwrap_or("") {
+            if let Some(end) = self.relay_message(session, &message) {
+                return end;
+            }
+        }
+    }
+
+    /// Relay one message from Claude to the client.  `Some` when it ends the
+    /// turn (a `result`, or an error that does); the idle relay ignores that.
+    fn relay_message(&self, session: &Arc<Session>, message: &Value) -> Option<RpcResult> {
+        let sid = session.id.clone();
+        match message.get("type").and_then(Value::as_str).unwrap_or("") {
                 "system" | "tool_progress" | "tool_use_summary" | "auth_status" => {}
                 // How much of the plan's windows the account has used.
                 "rate_limit_event" => {
-                    let limits = claude_limits(&message);
+                    let limits = claude_limits(message);
                     if !limits.is_empty() {
                         self.client.notify("_axel/limits", limits_params(&limits));
                     }
                 }
                 "result" => {
-                    session.meter.lock().expect("meter lock").on_result(&message);
+                    session.meter.lock().expect("meter lock").on_result(message);
                     if session.cancelled.load(Ordering::SeqCst) {
-                        return Ok(json!({ "stopReason": "cancelled" }));
+                        return Some(Ok(json!({ "stopReason": "cancelled" })));
                     }
                     // A message sent in after the turn's last step: Claude runs
                     // it as a turn of its own. Its result ends this prompt.
                     if !session.steering.lock().expect("steering lock").pending.is_empty() {
-                        continue;
+                        return None;
                     }
                     let is_error = message.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                     let errors = || {
@@ -762,24 +780,24 @@ impl Agent {
                         "success" => {
                             let result = message.get("result").and_then(Value::as_str).unwrap_or("");
                             if result.contains("Please run /login") {
-                                return Err(RpcError::auth_required());
+                                return Some(Err(RpcError::auth_required()));
                             }
                             if is_error {
-                                return Err(RpcError::internal(result));
+                                return Some(Err(RpcError::internal(result)));
                             }
-                            return Ok(json!({ "stopReason": "end_turn" }));
+                            return Some(Ok(json!({ "stopReason": "end_turn" })));
                         }
                         "error_during_execution" => {
                             if is_error {
-                                return Err(RpcError::internal(errors()));
+                                return Some(Err(RpcError::internal(errors())));
                             }
-                            return Ok(json!({ "stopReason": "end_turn" }));
+                            return Some(Ok(json!({ "stopReason": "end_turn" })));
                         }
                         "error_max_budget_usd" | "error_max_turns" | "error_max_structured_output_retries" => {
                             if is_error {
-                                return Err(RpcError::internal(errors()));
+                                return Some(Err(RpcError::internal(errors())));
                             }
-                            return Ok(json!({ "stopReason": "max_turn_requests" }));
+                            return Some(Ok(json!({ "stopReason": "max_turn_requests" })));
                         }
                         other => eprintln!("[axel claude-acp] unexpected result subtype {other}"),
                     }
@@ -810,14 +828,14 @@ impl Agent {
                 kind @ ("user" | "assistant") => {
                     if kind == "assistant" {
                         let mut meter = session.meter.lock().expect("meter lock");
-                        meter.on_assistant(&message);
+                        meter.on_assistant(message);
                         // A long turn's spend shows as it happens, not at its end.
                         if let Some(p) = meter.progress(std::time::Instant::now()) {
                             self.client.notify("_axel/usage", p.into_reply(json!({ "sessionId": sid })));
                         }
                     }
                     if session.cancelled.load(Ordering::SeqCst) {
-                        continue;
+                        return None;
                     }
                     let msg = message.get("message").cloned().unwrap_or(Value::Null);
                     let content = msg.get("content").cloned().unwrap_or(Value::Null);
@@ -830,23 +848,23 @@ impl Agent {
                                     self.client.update(&sid, u);
                                 }
                             }
-                            continue;
+                            return None;
                         }
                         if text.contains("<local-command-stderr>") {
                             eprintln!("{text}");
-                            continue;
+                            return None;
                         }
                     }
                     let single_text = content.as_array().is_some_and(|a| a.len() == 1 && a[0].get("type").and_then(Value::as_str) == Some("text"));
                     if kind == "user" && (content.is_string() || single_text) {
-                        continue;
+                        return None;
                     }
                     if kind == "assistant"
                         && msg.get("model").and_then(Value::as_str) == Some("<synthetic>")
                         && single_text
                         && content[0].get("text").and_then(Value::as_str).is_some_and(|t| t.contains("Please run /login"))
                     {
-                        return Err(RpcError::auth_required());
+                        return Some(Err(RpcError::auth_required()));
                     }
                     // Assistant text and thinking already streamed as deltas.
                     let content = if kind == "assistant" {
@@ -872,7 +890,38 @@ impl Agent {
                 }
                 other => eprintln!("[axel claude-acp] unexpected message type {other}"),
             }
-        }
+        None
+    }
+
+    /// Between prompts, Claude can go on by itself: a background task it
+    /// started finishes and wakes it, and it reads the output and says what
+    /// it found.  Nothing asked, so nothing is reading its stream; left in
+    /// the channel, those messages would come out at the next prompt as if
+    /// they answered it, and their `result` would end that prompt before
+    /// Claude had read it (the real answer then waiting for the prompt after).
+    /// This thread relays them as they come, whenever no prompt is running.
+    fn spawn_idle_relay(self: &Arc<Self>, session: Arc<Session>) {
+        let agent = self.clone();
+        std::thread::spawn(move || {
+            loop {
+                // Polled, never waited on: the receiver is held for an instant,
+                // so a prompt starting right now isn't kept waiting for it.
+                if !session.steering.lock().expect("steering lock").prompting
+                    && let Ok(rx) = session.messages.try_lock()
+                {
+                    loop {
+                        match rx.try_recv() {
+                            Ok(message) => {
+                                let _ = agent.relay_message(&session, &message);
+                            }
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
     }
 }
 
