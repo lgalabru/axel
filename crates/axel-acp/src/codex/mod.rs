@@ -361,6 +361,10 @@ impl Agent {
         };
         let turn_id = started.as_ref().and_then(|r| r.pointer("/turn/id")).and_then(Value::as_str).map(String::from);
         *s.turn.lock().expect("turn lock") = turn_id.clone();
+        // The turn's model, for the progress reports sent while it runs.
+        if let Some(m) = s.model.lock().expect("model lock").clone() {
+            s.meter.lock().expect("meter lock").model = Some(m);
+        }
         let result = self.relay(&s, turn_id.as_deref());
         *s.turn.lock().expect("turn lock") = None;
         // The turn's spend goes in its reply; a failed one's counts toward the next.
@@ -422,7 +426,15 @@ impl Agent {
                 "account/rateLimits/updated" => self.notify_limits(&p),
                 "thread/tokenUsage/updated" => {
                     let usage = p.get("tokenUsage").cloned().unwrap_or(Value::Null);
-                    s.meter.lock().expect("meter lock").observe(&usage);
+                    let progress = {
+                        let mut meter = s.meter.lock().expect("meter lock");
+                        meter.observe(&usage);
+                        meter.progress(std::time::Instant::now())
+                    };
+                    // A long turn's spend shows as it happens, not at its end.
+                    if let Some(p) = progress {
+                        self.client.notify("_axel/usage", p.into_reply(json!({ "sessionId": s.id })));
+                    }
                     if let Some(size) = usage.get("modelContextWindow").and_then(Value::as_u64) {
                         let used = usage.pointer("/last/totalTokens").and_then(Value::as_u64).unwrap_or(0);
                         self.client.update(&s.id, json!({ "sessionUpdate": "usage_update", "used": used, "size": size }));

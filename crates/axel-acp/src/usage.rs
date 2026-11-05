@@ -19,9 +19,22 @@
 //! includes reasoning) and `_meta.axel` with the model and the cost when the
 //! harness reported one. The host reads `usage` only next to `_meta.axel`:
 //! ACP leaves what it counts open.
+//!
+//! A turn can run for hours, so the spend also comes in as it happens: at
+//! most every [`PROGRESS_EVERY`], an `_axel/usage` notification carries the
+//! tokens spent since the last one, in the same shape. Claude's are its
+//! `assistant` messages' usage (each API call once, by message id); Codex's
+//! are its reports. The reply then holds only what no progress report
+//! carried, plus the turn's cost, so nothing is counted twice.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use axel_store::LimitWindow;
 use serde_json::{Value, json};
+
+/// How often a running turn reports what it has spent so far.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(15);
 
 /// One turn's spend.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,6 +55,17 @@ pub struct TurnUsage {
 impl TurnUsage {
     pub fn is_empty(&self) -> bool {
         self.input + self.output + self.cache_read + self.cache_write == 0 && self.cost_usd.is_none_or(|c| c == 0.0)
+    }
+
+    /// `self` less `other`'s token counts, each floored at zero; the cost
+    /// and model stay.
+    pub fn less_tokens(mut self, other: &TurnUsage) -> TurnUsage {
+        self.input = self.input.saturating_sub(other.input);
+        self.output = self.output.saturating_sub(other.output);
+        self.cache_read = self.cache_read.saturating_sub(other.cache_read);
+        self.cache_write = self.cache_write.saturating_sub(other.cache_write);
+        self.reasoning = self.reasoning.saturating_sub(other.reasoning).min(self.output);
+        self
     }
 
     fn add(&mut self, other: TurnUsage) {
@@ -112,24 +136,53 @@ pub struct ClaudeMeter {
     /// Each model's running `costUSD`, to tell which one did the turn.
     model_cost_seen: std::collections::HashMap<String, f64>,
     pending: TurnUsage,
+    /// Each API call's usage this prompt, by message id: Claude repeats a
+    /// message once per content block.
+    calls: HashMap<String, TurnUsage>,
+    /// Spent this prompt and not yet reported as progress.
+    live: TurnUsage,
+    /// Reported as progress this prompt.
+    reported: TurnUsage,
+    last_progress: Option<Instant>,
     /// Tokens in context after the newest main-agent response.
     context_used: Option<u64>,
     context_size: Option<u64>,
 }
 
 impl ClaudeMeter {
-    /// An `assistant` message: how full the context is now. Subagents' and
-    /// synthetic messages say nothing about the main context.
+    /// An `assistant` message: what its API call spent (subagents' too),
+    /// and how full the main context is now. Synthetic messages spend
+    /// nothing; subagents' say nothing about the main context.
     pub fn on_assistant(&mut self, message: &Value) {
-        if message.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
-            return;
-        }
         let msg = message.get("message").unwrap_or(&Value::Null);
         if msg.get("model").and_then(Value::as_str) == Some("<synthetic>") {
             return;
         }
         let Some(u) = msg.get("usage") else { return };
         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        if let Some(id) = msg.get("id").and_then(Value::as_str) {
+            let call = TurnUsage {
+                input: n("input_tokens"),
+                output: n("output_tokens"),
+                cache_read: n("cache_read_input_tokens"),
+                cache_write: n("cache_creation_input_tokens"),
+                model: msg.get("model").and_then(Value::as_str).map(String::from),
+                ..Default::default()
+            };
+            // The same call again: only what grew since.
+            let seen = self.calls.entry(id.to_string()).or_default();
+            let grew = call.clone().less_tokens(seen);
+            seen.input = seen.input.max(call.input);
+            seen.output = seen.output.max(call.output);
+            seen.cache_read = seen.cache_read.max(call.cache_read);
+            seen.cache_write = seen.cache_write.max(call.cache_write);
+            if !grew.is_empty() {
+                self.live.add(grew);
+            }
+        }
+        if message.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) {
+            return;
+        }
         let used = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") + n("output_tokens");
         if used > 0 {
             self.context_used = Some(used);
@@ -174,9 +227,25 @@ impl ClaudeMeter {
         self.pending.add(turn);
     }
 
-    /// The prompt's usage so far, and a fresh start for the next.
+    /// What was spent since the last progress report, when there is some
+    /// and the last report is at least [`PROGRESS_EVERY`] old.
+    pub fn progress(&mut self, now: Instant) -> Option<TurnUsage> {
+        if self.live.is_empty() || self.last_progress.is_some_and(|t| now.duration_since(t) < PROGRESS_EVERY) {
+            return None;
+        }
+        self.last_progress = Some(now);
+        let p = std::mem::take(&mut self.live);
+        self.reported.add(p.clone());
+        Some(p)
+    }
+
+    /// The prompt's usage less what progress reports carried, and a fresh
+    /// start for the next.
     pub fn take(&mut self) -> TurnUsage {
-        std::mem::take(&mut self.pending)
+        let reported = std::mem::take(&mut self.reported);
+        self.live = TurnUsage::default();
+        self.calls.clear();
+        std::mem::take(&mut self.pending).less_tokens(&reported)
     }
 
     /// `(used, size)` of the context window, once both are known.
@@ -237,6 +306,9 @@ impl Breakdown {
 pub struct CodexMeter {
     baseline: Option<Breakdown>,
     pending: Breakdown,
+    /// The part of `pending` reported as progress.
+    reported: Breakdown,
+    last_progress: Option<Instant>,
     pub model: Option<String>,
 }
 
@@ -258,10 +330,29 @@ impl CodexMeter {
         self.pending = self.pending.plus(delta);
     }
 
-    /// Spend since the last `take`. Reports that arrive after a turn ends
-    /// count toward the next.
+    /// What was spent since the last progress report, when there is some
+    /// and the last report is at least [`PROGRESS_EVERY`] old.
+    pub fn progress(&mut self, now: Instant) -> Option<TurnUsage> {
+        if self.last_progress.is_some_and(|t| now.duration_since(t) < PROGRESS_EVERY) {
+            return None;
+        }
+        let p = self.usage(self.pending.since(self.reported).unwrap_or_default());
+        if p.is_empty() {
+            return None;
+        }
+        self.last_progress = Some(now);
+        self.reported = self.pending;
+        Some(p)
+    }
+
+    /// Spend since the last `take` that no progress report carried.
+    /// Reports that arrive after a turn ends count toward the next.
     pub fn take(&mut self) -> TurnUsage {
-        let b = std::mem::take(&mut self.pending);
+        let b = std::mem::take(&mut self.pending).since(std::mem::take(&mut self.reported)).unwrap_or_default();
+        self.usage(b)
+    }
+
+    fn usage(&self, b: Breakdown) -> TurnUsage {
         TurnUsage {
             input: b.input.saturating_sub(b.cached + b.cache_write),
             output: b.output,
@@ -370,6 +461,45 @@ pub fn codex_limits(params: &Value) -> Vec<Limit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assistant(id: &str, input: u64, output: u64, cache_read: u64) -> Value {
+        json!({ "type": "assistant", "parent_tool_use_id": null, "message": { "id": id, "model": "claude-opus-5-5",
+            "usage": { "input_tokens": input, "output_tokens": output, "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": 0 } } })
+    }
+
+    #[test]
+    fn claude_reports_spend_as_it_goes_and_the_reply_holds_the_rest() {
+        let t0 = Instant::now();
+        let mut m = ClaudeMeter::default();
+        m.on_assistant(&assistant("m1", 10, 5, 1000));
+        m.on_assistant(&assistant("m1", 10, 5, 1000));
+        let p = m.progress(t0).expect("first report");
+        assert_eq!((p.input, p.output, p.cache_read), (10, 5, 1000), "a call repeated per content block counts once");
+        m.on_assistant(&assistant("m2", 20, 7, 2000));
+        assert_eq!(m.progress(t0 + Duration::from_secs(1)), None, "not more often than every 15s");
+        let p = m.progress(t0 + PROGRESS_EVERY).expect("second report");
+        assert_eq!((p.input, p.output, p.cache_read), (20, 7, 2000));
+        m.on_result(&json!({ "type": "result", "total_cost_usd": 0.5,
+            "usage": { "input_tokens": 31, "output_tokens": 12, "cache_read_input_tokens": 3000, "cache_creation_input_tokens": 0 } }));
+        let rest = m.take();
+        assert_eq!((rest.input, rest.output, rest.cache_read), (1, 0, 0), "only what no report carried");
+        assert_eq!(rest.cost_usd, Some(0.5), "the turn's cost, whole");
+        m.on_assistant(&assistant("m1", 10, 5, 1000));
+        assert!(m.progress(t0 + PROGRESS_EVERY * 2).is_some(), "a new prompt starts over");
+    }
+
+    #[test]
+    fn codex_reports_spend_as_it_goes_and_the_reply_holds_the_rest() {
+        let t0 = Instant::now();
+        let mut m = CodexMeter::new(Some("gpt-5".into()));
+        let report = |total: u64| json!({ "total": { "inputTokens": total, "outputTokens": total / 10 }, "last": { "inputTokens": total, "outputTokens": total / 10 } });
+        m.observe(&report(100));
+        assert_eq!(m.progress(t0).map(|p| p.input), Some(100));
+        m.observe(&report(250));
+        let rest = m.take();
+        assert_eq!((rest.input, rest.output), (150, 15), "the reply: what came after the last report");
+        assert_eq!(m.progress(t0 + PROGRESS_EVERY), None, "nothing new");
+    }
 
     /// The two results a real `claude -p` printed for two prompts in one
     /// process (trimmed): `usage` per turn, cost and `modelUsage` running.

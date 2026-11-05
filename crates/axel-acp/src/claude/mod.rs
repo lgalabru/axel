@@ -809,7 +809,12 @@ impl Agent {
                 }
                 kind @ ("user" | "assistant") => {
                     if kind == "assistant" {
-                        session.meter.lock().expect("meter lock").on_assistant(&message);
+                        let mut meter = session.meter.lock().expect("meter lock");
+                        meter.on_assistant(&message);
+                        // A long turn's spend shows as it happens, not at its end.
+                        if let Some(p) = meter.progress(std::time::Instant::now()) {
+                            self.client.notify("_axel/usage", p.into_reply(json!({ "sessionId": sid })));
+                        }
                     }
                     if session.cancelled.load(Ordering::SeqCst) {
                         continue;

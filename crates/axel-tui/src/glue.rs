@@ -785,7 +785,8 @@ pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
         data.agents.push(AgentSpend {
             name: agent.map(|a| a.name.clone()).unwrap_or_else(|| w.key.chars().take(8).collect()),
             color: agent.and_then(|a| a.color),
-            spark: if w.last_hour.turns > 0 { store.usage_series(Some(&w.key), now, 60, 60).map_err(se)? } else { vec![0; 60] },
+            // A turn still running has spent without finishing a turn yet.
+            spark: if w.last_hour.tokens() > 0 { store.usage_series(Some(&w.key), now, 60, 60).map_err(se)? } else { vec![0; 60] },
             context: context.get(&w.key).copied(),
             last_hour: w.last_hour,
             last_day: w.last_day,

@@ -373,6 +373,11 @@ struct Host<W: Write> {
     turn_authored: Vec<PathBuf>,
     /// A slow checkpoint has been pointed out once already.
     checkpoint_slow_told: bool,
+    /// What this turn's `_axel/usage` reports were costed at: the turn's
+    /// own cost, when the harness gives one at the end, already holds it.
+    turn_progress_cost: f64,
+    /// An `_axel/usage` report came in this turn.
+    turn_progress: bool,
     cur_text: Option<TextItem>,
     /// Pending `Permission` items by item id.  Permission items carry
     /// `ref_id = "permission:<toolCallId>"` so tool-call updates never touch them.
@@ -415,6 +420,8 @@ impl<W: Write> Host<W> {
             last_after: None,
             turn_authored: Vec::new(),
             checkpoint_slow_told: false,
+            turn_progress_cost: 0.0,
+            turn_progress: false,
             cur_text: None,
             pending: HashMap::new(),
             queue: VecDeque::new(),
@@ -1101,6 +1108,17 @@ impl<W: Write> Host<W> {
                 }
                 self.line(BLUE, "↳", &format!("read  {DIM}{}{RESET}", head(&q.text, 100)));
             }
+            // Spend so far in a running turn: tokens now, the turn counted
+            // with its reply.
+            "_axel/usage" => {
+                let Some(usage) = TurnUsage::from_reply(params) else { return };
+                let delta = axel_store::UsageDelta { turns: 0, ..usage_delta(&usage) };
+                self.turn_progress_cost += delta.cost_usd_est;
+                self.turn_progress = true;
+                if let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &delta, None) {
+                    self.line(RED, "✖", &format!("usage: {e}"));
+                }
+            }
             "_axel/limits" => {
                 for l in crate::usage::limits_from_params(params) {
                     if let Err(e) = self.store.set_plan_limit(&self.cfg.harness, l.window, l.used_pct, l.resets_at) {
@@ -1253,6 +1271,8 @@ impl<W: Write> Host<W> {
         self.turn_authored.clear();
         // Before the prompt goes out, so the agent's first edit is never in `before`.
         self.turn_before = self.checkpoint(checkpoint::Which::Before);
+        self.turn_progress_cost = 0.0;
+        self.turn_progress = false;
         self.cur_text = None;
         let paths = attach::attachment_paths(&files);
         let mut content = json!({ "text": text, "attachments": paths });
@@ -1310,10 +1330,22 @@ impl<W: Write> Host<W> {
     /// adapters do). ACP leaves what `usage` counts open, so a reply without
     /// `_meta.axel` isn't summed.
     fn record_usage(&mut self, resp: &acp::PromptResponse) {
+        let progress_cost = std::mem::take(&mut self.turn_progress_cost);
+        let progress = std::mem::take(&mut self.turn_progress);
         let Some(usage) = serde_json::to_value(resp).ok().as_ref().and_then(TurnUsage::from_reply) else {
+            // Progress reports carried all of it: the turn still counts.
+            if progress
+                && let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &axel_store::UsageDelta { turns: 1, ..Default::default() }, None)
+            {
+                self.line(RED, "✖", &format!("usage: {e}"));
+            }
             return;
         };
-        if let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &usage_delta(&usage), None) {
+        let mut delta = usage_delta(&usage);
+        if usage.cost_usd.is_some() {
+            delta.cost_usd_est = (delta.cost_usd_est - progress_cost).max(0.0);
+        }
+        if let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &delta, None) {
             self.line(RED, "✖", &format!("usage: {e}"));
         }
     }

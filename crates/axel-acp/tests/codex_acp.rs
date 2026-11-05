@@ -133,11 +133,14 @@ fn a_turn_streams_asks_for_approvals_and_runs() {
         json!({ "outcome": { "outcome": "selected", "optionId": "approved" } })
     });
     assert_eq!(reply["result"]["stopReason"], "end_turn");
-    // The thread's first report counts its newest response only (a resumed
-    // thread's running total holds its history); input excludes the cached part.
-    let usage = &reply["result"]["usage"];
+    // The spend arrives as the turn runs. The thread's first report counts
+    // its newest response only (a resumed thread's running total holds its
+    // history); input excludes the cached part.
+    let progress = seen.iter().find(|m| m["method"] == "_axel/usage").expect("spend reported as it happened");
+    let usage = &progress["params"]["usage"];
     assert_eq!((usage["inputTokens"].as_u64(), usage["cachedReadTokens"].as_u64(), usage["outputTokens"].as_u64()), (Some(2), Some(6), Some(4)));
-    assert_eq!(reply["result"]["_meta"]["axel"]["model"], "gpt-big");
+    assert_eq!(progress["params"]["_meta"]["axel"]["model"], "gpt-big");
+    assert!(reply["result"].get("usage").is_none(), "nothing left for the reply to carry");
     // The plan's limits, read as the session starts.
     let limits = new_seen.iter().chain(&set_seen).chain(&seen).find(|m| m["method"] == "_axel/limits").expect("limits sent");
     assert_eq!(limits["params"]["windows"][0], json!({ "window": "five_hour", "usedPercent": 42.0, "resetsAt": 1000 }));
