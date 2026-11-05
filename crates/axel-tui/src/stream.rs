@@ -425,10 +425,11 @@ fn is_settled(row: &Row, items: &[ThreadItem], last: bool, working: bool) -> boo
     if last && working {
         return false;
     }
-    // Running, unless its turn is over: a tool call the turn ended without
-    // (cancelled mid-call) never finishes, and would hold every row after it
-    // in the live tail for good.
-    let moving = |i: usize| matches!(items[i].status, Some(ItemStatus::Running | ItemStatus::Pending)) && !turn_over(items, i);
+    // Running, unless the thread has moved on past it: then nothing the
+    // stream could still show of it is coming, and holding it would hold
+    // every row after it in the tail (hidden once the tail outgrows the
+    // pane) until something else finally settled it.
+    let moving = |i: usize| matches!(items[i].status, Some(ItemStatus::Running | ItemStatus::Pending)) && !moved_on(items, i);
     match row {
         Row::Prose(i) | Row::Thought(i) | Row::Choice(i) => !moving(*i),
         Row::Tool { idx, .. } => !moving(*idx),
@@ -437,13 +438,29 @@ fn is_settled(row: &Row, items: &[ThreadItem], last: bool, working: bool) -> boo
     }
 }
 
-/// Item `i`'s turn has ended: its session ended the turn, or went on to a later one.
-fn turn_over(items: &[ThreadItem], i: usize) -> bool {
+/// The thread has moved on past item `i`, so the stream prints it as it
+/// stands, whatever its status still says.  Its own agent went on: a later
+/// turn, its turn's end, text or a thought after it, or, for a tool call,
+/// anything after it but another call of the same run (calls run in
+/// parallel, so a sibling call proves nothing).  Or another agent's work
+/// arrived after it, which the stream can't print before it.  A call that
+/// keeps running in the background, or whose last update was lost, is then
+/// frozen in scrollback as `running`; its details pane still shows it live.
+/// A prompt the owner typed or queued, and an approval the agent waits for,
+/// are not progress.
+fn moved_on(items: &[ThreadItem], i: usize) -> bool {
+    use crate::model::ItemKind as K;
     let it = &items[i];
-    items[i + 1..]
-        .iter()
-        .filter(|later| later.session_id == it.session_id)
-        .any(|later| later.turn > it.turn || (later.turn == it.turn && later.kind == crate::model::ItemKind::TurnEnd))
+    items[i + 1..].iter().any(|later| {
+        let progress = matches!(later.kind, K::AssistantMessage | K::Thought | K::ToolCall | K::Error | K::TurnEnd);
+        if !progress {
+            return false;
+        }
+        if later.session_id != it.session_id {
+            return true;
+        }
+        later.turn > it.turn || it.kind != K::ToolCall || later.kind != K::ToolCall
+    })
 }
 
 /// Lines for one row.  A pending approval gets a stream-specific card (it is
@@ -765,6 +782,72 @@ mod tests {
         let mut s2 = Stream::default();
         let _ = s2.frame(&ThreadView::new("T1", d2), 80, 40);
         assert!(s2.live_lines > 0, "a call still in its turn stays live");
+    }
+
+    #[test]
+    fn a_call_still_running_after_its_agent_moved_on_doesnt_hold_the_tail() {
+        // The "unblock" bug: a fetch whose completion never arrived (or a
+        // command left running in the background) kept every later row in
+        // the live tail, hidden past the pane, until the owner's next message
+        // started a new turn and everything appeared at once.
+        let mut d = fixtures::data();
+        d.items[7].status = Some(ItemStatus::Allowed);
+        d.agents[0].2 = crate::model::StatusState::Working;
+        let mut stuck = fixtures::tool("t9", "Fetch https://example.com", "fetch", 8_000);
+        stuck.status = Some(ItemStatus::Running);
+        d.items.push(stuck);
+        d.items.push(fixtures::item("a3", ItemKind::AssistantMessage, ItemBody::Text("It deployed.".into()), 8_300));
+        d.items.push(fixtures::tool("t10", "Read nav.mjs", "read", 8_400));
+        d.items.push(fixtures::item("a4", ItemKind::AssistantMessage, ItemBody::Text("The benchmark is live.".into()), 8_500));
+        let v = ThreadView::new("T1", d);
+        let mut s = Stream::default();
+        let out = plain(&s.frame(&v, 80, 40));
+        assert!(s.committed.contains("fold:t9"), "the stuck call is printed as it stands: {:?}", s.committed);
+        assert!(s.committed.contains("a3") && s.committed.contains("fold:t10"), "and the rows after it settle: {:?}", s.committed);
+        assert!(out.contains("It deployed.") && out.contains("The benchmark is live."), "{out}");
+        assert_eq!(s.live_lines, 4, "only the newest row and the spinner stay live while the agent works: {out}");
+    }
+
+    #[test]
+    fn parallel_calls_and_queued_prompts_arent_progress() {
+        // Two calls of one run in flight: a sibling proves nothing finished.
+        let mut d = fixtures::data();
+        d.items[7].status = Some(ItemStatus::Allowed);
+        d.agents[0].2 = crate::model::StatusState::Working;
+        for (id, at) in [("t9", 8_000), ("t10", 8_100)] {
+            let mut c = fixtures::tool(id, "Read x.rs", "read", at);
+            c.status = Some(ItemStatus::Running);
+            d.items.push(c);
+        }
+        // Nor a prompt the owner sent into the turn, not read yet.
+        let mut queued = fixtures::item("u2", ItemKind::UserMessage, ItemBody::Text("also do y".into()), 8_200);
+        queued.agent = None;
+        queued.status = Some(ItemStatus::Pending);
+        queued.steering = true;
+        d.items.push(queued);
+        let v = ThreadView::new("T1", d);
+        let mut s = Stream::default();
+        let _ = s.frame(&v, 80, 40);
+        assert!(!s.committed.contains("fold:t9"), "the run is still live: {:?}", s.committed);
+    }
+
+    #[test]
+    fn another_agents_work_after_a_running_call_frees_the_stream() {
+        // A long call of one agent must not hide what another agent says after it.
+        let mut d = fixtures::data();
+        d.items[7].status = Some(ItemStatus::Allowed);
+        let mut long = fixtures::tool("t9", "cargo test", "execute", 8_000);
+        long.status = Some(ItemStatus::Running);
+        d.items.push(long);
+        let mut other = fixtures::item("b1", ItemKind::AssistantMessage, ItemBody::Text("Reviewed: two nits.".into()), 8_300);
+        other.session_id = "S2".into();
+        other.agent = Some(("Nova".into(), None));
+        d.items.push(other);
+        let v = ThreadView::new("T1", d);
+        let mut s = Stream::default();
+        let out = plain(&s.frame(&v, 80, 40));
+        assert!(out.contains("Reviewed: two nits."), "{out}");
+        assert_eq!(s.live_lines, 0, "nothing held: {out}");
     }
 
     #[test]
