@@ -201,8 +201,7 @@ fn lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'
         return out;
     }
     let mut left = room - shown;
-    // Everyone together, when there's more than one.
-    if !tight && n > 1 && left >= 1 {
+    let all_row = (!tight && n > 1).then(|| {
         let all = AgentSpend {
             name: "all".into(),
             last_hour: data.last_hour.clone(),
@@ -212,16 +211,43 @@ fn lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'
         };
         let mut line = agent_line(&all, &cols, name_w, 0, 0);
         line.spans.iter_mut().for_each(|s| s.style = s.style.add_modifier(Modifier::DIM));
-        out.push(line);
-        left -= 1;
-    }
-    if !tight {
-        left -= plans(&mut out, &data.limits, width, left, name_w);
-    } else if !folded && left >= 1 {
-        // No room on the label row: a line of their own, when there's one.
-        if let Some(limits) = folded_limits(&data.limits, width) {
-            out.push(Line::from(limits));
+        line
+    });
+    // The plan limits: a section of their own on a tall pane (a gap, a
+    // heading, a row per harness), else one centered strip under the agents,
+    // a blank line before it when there's a row to spare.  They come before
+    // the "all" row: knowing a window is used up matters more than the sum.
+    let section_rows = data.limits.len() + 2;
+    let full = !tight && !data.limits.is_empty() && left >= section_rows + usize::from(all_row.is_some());
+    if full {
+        if let Some(all) = all_row {
+            out.push(all);
             left -= 1;
+        }
+        left -= plans(&mut out, &data.limits, width, left, name_w);
+    } else {
+        let strip = (!folded).then(|| limits_strip(&data.limits, width)).flatten();
+        match (strip, all_row) {
+            (Some(strip), Some(all)) if left >= 3 => {
+                out.push(all);
+                out.push(Line::raw(""));
+                out.push(strip);
+                left -= 3;
+            }
+            (Some(strip), _) if left >= 2 => {
+                out.push(Line::raw(""));
+                out.push(strip);
+                left -= 2;
+            }
+            (Some(strip), _) if left >= 1 => {
+                out.push(strip);
+                left -= 1;
+            }
+            (None, Some(all)) if left >= 1 => {
+                out.push(all);
+                left -= 1;
+            }
+            _ => {}
         }
     }
     // The threads that spent today: a gap, a label, at least one.
@@ -259,6 +285,54 @@ fn plans(out: &mut Vec<Line<'static>>, plans: &[PlanRow], width: usize, left: us
         out.push(plan_line(p, width, name_w));
     }
     plans.len() + HEADING
+}
+
+/// Every plan window on one centered line: each with as much detail as the
+/// width allows (`5h ▰▰▰▰▱ 84% ↻2h   wk ▱▱▱▱▱ 9% ↻5d`), the harness named
+/// when there's more than one; else the fullest window alone.
+fn limits_strip(plans: &[PlanRow], width: usize) -> Option<Line<'static>> {
+    if plans.is_empty() {
+        return None;
+    }
+    let centered = |mut spans: Vec<Span<'static>>| -> Option<Line<'static>> {
+        // The window spans start with two spaces of their own.
+        if let Some(first) = spans.first_mut()
+            && let Some(rest) = first.content.strip_prefix("  ")
+        {
+            first.content = rest.to_string().into();
+        }
+        let w = Line::from(spans.clone()).width();
+        if w > width {
+            return None;
+        }
+        spans.insert(0, Span::raw(" ".repeat((width - w) / 2)));
+        Some(Line::from(spans))
+    };
+    for detail in [Detail::Bar, Detail::Reset] {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, p) in plans.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("  ·", theme::dim()));
+            }
+            if plans.len() > 1 {
+                spans.push(Span::styled(format!("  {}", p.harness), theme::dim()));
+            }
+            for w in &p.windows {
+                spans.extend(window_spans(w, detail));
+            }
+        }
+        if let Some(line) = centered(spans) {
+            return Some(line);
+        }
+    }
+    // Shares alone, packed tight; else the fullest window with its reset.
+    if let Some(folded) = folded_limits(plans, width) {
+        let w = Line::from(folded.clone()).width();
+        let mut spans = vec![Span::raw(" ".repeat((width - w) / 2))];
+        spans.extend(folded);
+        return Some(Line::from(spans));
+    }
+    None
 }
 
 /// Every plan window on one line in `width` (`5h 31%  wk 12%`, each
@@ -496,6 +570,28 @@ mod tests {
         }
         let s = screen(30, 6, &d);
         assert_eq!(s[5], " +3 more", "{s:?}");
+    }
+
+    #[test]
+    fn a_short_pane_puts_the_limits_on_one_centered_strip_after_a_gap() {
+        let d = with_limits(data());
+        // Header, labels, two agents, a blank line, the strip: no room for the
+        // "all" row or the section heading.
+        let s = screen(60, 6, &d);
+        assert_eq!(s[4], "", "a gap after the last agent: {s:?}");
+        assert!(s[5].contains("5h  84% ↻2h") && s[5].contains("wk   9% ↻5d") && s[5].contains("codex"), "every window with its reset: {s:?}");
+        let lead = s[5].chars().take_while(|c| *c == ' ').count();
+        assert!(lead >= 2, "centered: {:?}", s[5]);
+        // Wider: the bars come too.
+        assert!(screen(80, 6, &d)[5].contains("5h ▰▰▰▰▱  84% ↻2h"), "{:?}", screen(80, 6, &d)[5]);
+        // One row more: the "all" row comes back above the gap.
+        let s = screen(60, 7, &d);
+        assert!(s[4].trim_start().starts_with("all") && s[5].is_empty() && s[6].contains("84%"), "{s:?}");
+        // One row less: the strip alone, no gap.
+        let s = screen(60, 5, &d);
+        assert!(s[4].contains("84%") && !s.iter().any(|l| l.trim_start().starts_with("all")), "{s:?}");
+        // Tall: the section with its heading, as before.
+        assert!(screen(60, 12, &d).iter().any(|l| l.contains("plan limits")));
     }
 
     #[test]
