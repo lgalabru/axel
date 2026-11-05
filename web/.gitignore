@@ -42,3 +42,9 @@ next-env.d.ts
 
 # fumadocs-mdx generated
 .source
+
+# Generated from content/docs by scripts/agent-files.mjs at build
+public/llms.txt
+public/llms-full.txt
+public/SKILL.md
+public/.well-known/agent-skills/

@@ -1,0 +1,91 @@
+---
+title: Getting the most out of Axel
+description: Habits that make agents, threads and hosts pay off.
+---
+
+Axel works out of the box, but a few habits make it much better.
+
+## Give agents outcomes, and a reviewer
+
+A thread's intent is its title and its first prompt. State the outcome and who should
+check it: "add retries to the webhook sender, then ask @opus for a review". Let autopilot
+run; answer questions when Rex's tab says an agent is blocked. Agents work best when they
+aren't narrating steps to you.
+
+## A small team on different models
+
+One builder with the few skills your stack needs, one reviewer on another model with a
+review skill. A different model catches different mistakes, and each agent loads only its
+own skills, so no session pays for skills it doesn't use.
+
+```bash
+axel agent new terra codex --skills rust,axum
+axel agent new opus claude/opus --skills review,security
+axel agent edit terra --allow opus
+```
+
+## Review by turn
+
+Under each turn that changed files, the thread view shows a change line: `Δ 3 files
++42 −7`. Click it to open the diff pane. There, **↑↓** picks a file, **j/k** moves through
+the diff, **v** marks lines, **c** writes a note under them, and **Enter** sends your
+notes to the agent as one review with the exact lines attached. **u** undoes the turn in
+the working tree, keeping later work unless it overlaps (**R** restores the turn's files
+instead). **[** and **]** step between turns.
+
+From a shell:
+
+```bash
+axel thread diff <id> [--turn N] [--stat]
+axel thread undo <id> --turn N [--restore]
+```
+
+Checkpoints are hidden git refs, never on your branches and never pushed. `axel gc` prunes
+old ones, and runs by itself when you archive a thread.
+
+## Long jobs on a host
+
+A Mac mini on your tailnet with Rex running at login is the place for the three-hour
+refactor. `@terra@mini …` sends it there; the branch comes home when you reconnect, and
+you review the turns when you're back. See [Remote hosts](/docs/remote-hosts).
+
+## One worktree per parallel thread
+
+Press **Tab** in the launcher and pick a new worktree when two threads touch the same
+repository. Agents stay out of each other's way, and each thread has its own branch to
+review and merge.
+
+## Keep AXEL.md honest
+
+The body is what you'd tell a new colleague before they touch the repo. The frontmatter
+lists the skills the project needs. Commit both with `AXEL.lock`, so every machine and
+every harness reads the same context. See [The AXEL.md file](/docs/axel-md).
+
+## Steer without stopping
+
+Mid-turn, **Enter** drops your message into the agent's turn; it reads it at its next step
+and carries on. **Option+↑** edits that message until it's read. **Ctrl+S** is for when the
+agent must stop now.
+
+## Watch what it costs
+
+`axel usage` shows tokens and estimated cost per agent over the last hour, day and all
+time, and how much of your Claude and Codex plan limits is used. Look before changing
+models or budgets. `axel agent edit terra --daily-usd 20` caps an agent.
+
+## Let scripts report
+
+Anything running in a thread can say where it is, and it shows on the dashboard and on
+Rex's tab:
+
+```bash
+axel status working "migrating the auth tests"
+axel status blocked --kind question "which DB should staging use?"
+axel status done "PR ready: auth refresh fix"
+```
+
+## When something is off
+
+`axel doctor` first: Rex, the keychain, the database, the harnesses. Then `axel log
+<session> -f` for a managed session's raw frames. Processes started before an update keep
+the old binary until they're restarted.

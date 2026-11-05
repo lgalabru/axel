@@ -128,6 +128,9 @@ You'll need [Rex](https://www.superlogical.com/rex) and a harness:
 - [Threads](https://axel.md/docs/threads) and [agents](https://axel.md/docs/agents)
 - [Agents working together](https://axel.md/docs/messaging)
 - [Keyboard](https://axel.md/docs/keys) and [command line](https://axel.md/docs/cli)
+- For agents and LLMs: [llms.txt](https://axel.md/llms.txt), every page in
+  [llms-full.txt](https://axel.md/llms-full.txt), and an Agent Skill that installs and runs
+  Axel for you: `npx skills add https://axel.md`
 
 ## Development
 

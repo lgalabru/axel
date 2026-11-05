@@ -10,6 +10,15 @@ pnpm dev         # http://localhost:3000 and http://localhost:3000/docs
 pnpm build
 ```
 
+`pnpm build` first runs `scripts/agent-files.mjs`, which generates the files for agents and
+language models from `content/docs/*.mdx`: `public/llms.txt`, `public/llms-full.txt`, and the
+Agent Skill at `public/.well-known/agent-skills/` (`index.json` in the 0.2.0 discovery format,
+`axel.tar.gz` with its sha256 in the index, and the same files unpacked under `axel/`), plus
+`public/SKILL.md` for `/skill`. The skill's short body is hand-written in `skill/SKILL.md`;
+every docs page becomes one of its `references/`. They're git-ignored: never edit them in
+`public/`. `npx skills add https://axel.md` installs the skill; to test against a local
+server, generate with `AGENT_FILES_SITE=http://127.0.0.1:8765` and serve `public/`.
+
 URLs live in `src/lib/site.ts`. On Vercel, the project's root directory is `web`.
 Requests to the old `docs.axel.md` redirect to `axel.md/docs` (see `next.config.mjs`),
 as long as that domain stays attached to the project.

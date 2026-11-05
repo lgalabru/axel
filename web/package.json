@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "agent-files": "node scripts/agent-files.mjs",
+    "build": "node scripts/agent-files.mjs && next build",
     "start": "next start",
     "lint": "next lint"
   },

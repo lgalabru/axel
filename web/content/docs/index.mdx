@@ -46,6 +46,19 @@ programs can drive. That's the foundation Axel is built on. [Why Rex](/docs/why-
 - **No screen scraping.** Status comes from Claude Code hooks, Codex notify, the Agent
   Client Protocol, or `axel status`, mirrored to Rex.
 
+## For agents and language models
+
+The site is readable without a browser: [`/llms.txt`](/llms.txt) is the map and
+[`/llms-full.txt`](/llms-full.txt) every page in one file. There is also an
+[Agent Skill](https://agentskills.io) that teaches an agent to install, set up and use Axel
+on your behalf, published at [`/.well-known/agent-skills/`](/.well-known/agent-skills/index.json):
+
+```bash
+npx skills add https://axel.md
+```
+
+All three are generated from these pages at every deploy, so they never fall behind.
+
 ## Where to go next
 
 <Cards>
