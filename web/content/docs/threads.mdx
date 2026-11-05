@@ -36,6 +36,7 @@ and merge, which is what lets it run on a remote host while your laptop sleeps.
 | **Sessions** | Every agent instance that worked on it: which agent, where, with which harness, and the harness's own conversation id. |
 | **Items** | The conversation: your messages, the agents' replies, tool calls, questions, permission requests. |
 | **Usage** | Input, output and cache tokens, and the estimated cost, per session. |
+| **Checkpoints** | Per turn in a git workspace: the tree before and after it, as hidden git refs, with the file list on the turn. |
 
 Several agents can work on the same thread at once, and one agent can come back to it many
 times. Each time is a new **session**: `axel thread resume` starts one that continues the
@@ -79,6 +80,14 @@ the history.
   again. Rex's Activity (⌘.) still lists every agent on the thread, with its state. The
   window is named after the thread, and it works both ways: rename the window in Rex and
   the thread takes the new name.
+- **What a turn changed**: under each turn that touched files, a change line, `Δ 3 files
+  +42 −7`, or `2 files (+1 not this agent)` when a command or another agent also changed
+  files during the turn. Click it to open the diff pane: the file list, the diff side by
+  side or in one column, notes you can send back as a review, and undo. See
+  [Getting the most out of Axel](/docs/tips#review-by-turn) and the [keys](/docs/keys#diff-pane).
+- **Attachments**: the 📎 chips under a message are links; a click shows the file in Finder.
+- **Tokens**: a pane beside the composer shows what each agent on the thread spends, as it
+  spends it. See [Tokens and cost](/docs/usage).
 - **Tool calls**: each `▸ 5 tool calls` line is a link. Click it (⌘-click if Rex asks)
   to open every call in it in a pane down the right of the window: who ran it and when,
   how long each call took, commands with what they're for, edits as diffs, files read and

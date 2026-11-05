@@ -53,6 +53,7 @@ Stop and ask when a requirement is missing. Details: `references/installation.md
 | set up a repo for agents | write `AXEL.md`, skills in its frontmatter, commit `AXEL.lock` | `references/axel-md.md` |
 | see or undo what a turn changed | the change line, `axel thread diff`, `axel thread undo` | `references/tips.md` |
 | report status from a script | `axel status working\|blocked\|done "msg"` | `references/agent-toolkit.md` |
+| see what agents spend, or why one stalled | `axel usage`, the plan limits line | `references/usage.md` |
 | get more out of it | the habits | `references/tips.md` |
 
 ## Rules

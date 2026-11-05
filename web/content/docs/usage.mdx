@@ -1,0 +1,66 @@
+---
+title: Tokens and cost
+description: What each agent spends, as it spends it, and how much of your plan is left.
+---
+
+Axel counts every session's tokens and estimates what they cost, per agent and per
+thread, over the last hour, the last day and all time. It also keeps an eye on your
+plan's limits, so you know before an agent stalls.
+
+## The tokens pane
+
+```bash
+axel usage      # a pane in the top-right corner of the Rex window; again to hide it
+```
+
+Every thread opens with the same pane beside its composer, so it's there while you
+work. It shows as much as its size allows:
+
+```text
+tokens                        $68.67 today
+         24h    $ 24h   ctx   last hour
+aaron    79M   $57.86   62%   ⣀⣀⣀⣠⣿⣄⣀⣀⣀⣸
+jude     22M   $10.81   23%   ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀
+all     101M   $68.67
+claude   5h ▰▰▰▰▱  84% ↻2h    wk ▱▱▱▱▱   9% ↻5d
+```
+
+| Column | |
+|---|---|
+| **24h**, **$ 24h** | Tokens and estimated cost over the last 24 hours. Wider panes add all time. |
+| **ctx** | How full the agent's context window is right now, for a session that reports it. |
+| **last hour** | A chart of the last 60 minutes, two bars per cell, every agent on the same scale. A quiet minute is a dot on the floor. |
+| **all** | Everyone together, when there's more than one agent. |
+| **plan limits** | Each harness's windows: Claude's five hours and week, Codex's windows or its monthly credit. The bar, the share used and when it resets (`↻2h`). A window at 100% keeps its reset time however narrow the pane, since that's when your agents start again. |
+
+A tall pane adds the threads that spent today. A sliver of a pane is one line: the last
+hour's tokens and today's cost. The dashboard shows the same numbers per thread and per
+agent, with the sparkline.
+
+## As it spends
+
+Managed sessions report tokens while a turn runs, at most every 15 seconds, so a turn
+that works for an hour moves the chart as it goes rather than landing as one bar at the
+end. The turn's total still counts once. Pane sessions are read from the harness's own
+transcript at each hook.
+
+## Where the numbers come from
+
+- **Claude Code**: each turn's usage from its result; the cost from how much Claude's own
+  running total grew.
+- **Codex**: what its running total grew by. The first report after a resume counts the
+  newest response only.
+- **Plan limits**: reported by the harnesses themselves as they run, and kept locally. A
+  window that started over shows as `new` until the next report.
+- **Pane sessions**: the Claude transcript, each message counted once; the Codex rollout's
+  totals.
+
+Cost is an estimate from a small per-model price table, shown as such. Every usage report
+is kept, with no retention, so any window is a sum; the dashboard's sparkline samples are
+kept for a day.
+
+## Budgets
+
+`axel agent edit terra --daily-usd 20` caps what an agent may spend in a day. An agent past
+its budget can't be summoned until the next day, and the refusal says how to raise it. See
+[Permissions and budgets](/docs/policies).

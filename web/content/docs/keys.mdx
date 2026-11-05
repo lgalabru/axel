@@ -41,6 +41,9 @@ description: Keys in the launcher, the recent threads and the thread view.
 | **Space** | With an empty composer: expand or fold the tool calls under the cursor. |
 | **PgUp / PgDn** | Scroll the conversation. |
 | `@name` | Message or summon another agent on this thread. |
+| Click `▸ 5 tool calls` | Open the run of calls in a pane. |
+| Click `Δ 3 files  +42 −7` | Open the turn's diff pane. |
+| Click a 📎 chip | Show the attached file in Finder. |
 
 ### Editing your message
 
@@ -57,6 +60,24 @@ description: Keys in the launcher, the recent threads and the thread view.
 | **Cmd+Z**, **Ctrl+Z** | Undo, a word at a time. **Shift+Cmd+Z** redoes. |
 
 Pasted text keeps its line breaks.
+
+## Diff pane
+
+Opened from a turn's change line, or with `axel thread diff <id> --pane`.
+
+| Key | |
+|---|---|
+| **↑ ↓** | Pick a file. The agent's own files come first, the rest under *also changed during this turn*. |
+| **j / k** | Move through the diff, by line, or by row when side by side. **PgUp / PgDn** page; **g / G** jump to the ends. |
+| **s** | Switch between side by side (old left, new right) and one column. Panes 110 columns or wider start side by side. |
+| **v** | Start or clear a mark; move with **j** to extend it. |
+| **c** | Write a note under the marked lines (or the cursor line). **Enter** saves it, **Esc** drops it. |
+| **d** | Remove the note under the cursor. |
+| **Enter** | Send every note to the agent as one review, each with its path, line range and the marked lines. |
+| **u**, then **y** | Undo the turn in the working tree, keeping later work unless it overlaps. Not offered while the agent is mid-turn. |
+| **R** | After an undo that hit overlapping work: restore the turn's files to how they were before it. |
+| **[ ]** | The previous or next turn of the same agent. |
+| **q**, **Esc** | Close. Notes you haven't sent are kept. |
 
 ## Dashboard
 

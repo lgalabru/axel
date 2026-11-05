@@ -40,6 +40,8 @@ See [The AXEL.md file](/docs/axel-md).
 | `axel thread open THREAD` | The thread view, in this terminal. |
 | `axel thread split THREAD` | A Rex window: the conversation above, the composer below. |
 | `axel thread ls [--all]` · `show THREAD` | List, inspect. |
+| `axel thread diff THREAD [--session S] [--turn N] [--stat]` | What a turn changed: the file list, then the patch. Without `--turn`, the latest turn that changed a file. `--pane` is the floating pane a change line opens. |
+| `axel thread undo THREAD [--session S] [--turn N] [--restore] [-y]` | Take a turn's edits back out of the working tree, keeping later work unless it overlaps; `--restore` rewrites the turn's files to how they were before it. A snapshot is kept first; the agent is told. |
 | `axel thread stop THREAD` | End every live session on it. |
 | `axel thread done` · `reopen` · `archive` · `delete THREAD` | Settle, reopen, archive, delete. |
 
@@ -78,5 +80,6 @@ Thread and session ids accept any unique prefix.
 | `axel mcp` | The MCP server, on stdio. |
 | `axel hook claude\|codex` | The hook sink; installed for you at launch. |
 | `axel setup` | Check this machine and create an agent, interactively. Runs by itself the first time. |
-| `axel usage` | Show the tokens and cost each agent spent (last hour, 24 hours, all time) and how much of your Claude and Codex plan limits is used, in the top-right corner of the Rex window. Run it again to hide it. |
+| `axel usage` | The tokens pane in the top-right corner of the Rex window: what each agent spent (last hour, 24 hours, all time), its context fill, and how much of your plan limits is used. Run it again to hide it. See [Tokens and cost](/docs/usage). |
+| `axel gc` | Prune old turn checkpoints: archived threads after a week; on live threads, after a month, all but each session's latest 20 turns. Runs by itself after `axel thread archive`. |
 | `axel doctor` | Check Rex, the keychain and the database. |
