@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::model::{AgentSpend, LimitRow, PlanRow, UsageData};
 use crate::theme;
@@ -101,18 +101,19 @@ pub fn render(frame: &mut Frame, data: &UsageData, area: Rect) {
         frame.render_widget(Paragraph::new(lines(data, area.width as usize, area.height as usize, true)), area);
         return;
     }
-    let today = format!(" {} today ", cost(data.last_day.cost_usd));
-    let mut block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(theme::dim())
-        .title(Line::from(vec![Span::raw(" "), Span::styled("tokens", theme::accent_bold()), Span::raw(" ")]))
-        .padding(Padding::horizontal(1));
-    if usize::from(area.width) >= " tokens ".len() + today.len() + 4 {
-        block = block.title_top(Line::from(Span::styled(today, theme::dim())).right_aligned());
+    // No box of its own: the Rex pane is the frame. A header line, "tokens"
+    // at the left and today's cost at the right, then the table, one column in.
+    let inner = Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: area.height };
+    let today = format!("{} today", cost(data.last_day.cost_usd));
+    let mut header = vec![Span::styled("tokens", theme::accent_bold())];
+    let room = usize::from(inner.width);
+    if room >= "tokens".len() + today.len() + 2 {
+        header.push(Span::raw(" ".repeat(room - "tokens".len() - today.len())));
+        header.push(Span::styled(today, theme::dim()));
     }
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines(data, inner.width as usize, inner.height as usize, false)), inner);
+    frame.render_widget(Paragraph::new(Line::from(header)), Rect { height: 1, ..inner });
+    let body = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
+    frame.render_widget(Paragraph::new(lines(data, body.width as usize, body.height as usize, false)), body);
 }
 
 /// One line: the last hour's tokens, today's cost and, when it fits, the
@@ -453,10 +454,11 @@ mod tests {
     #[test]
     fn a_small_pane_shows_each_agents_day_and_hour() {
         let s = screen(24, 6, &data());
-        assert!(s[0].contains("tokens"), "{s:?}");
-        assert_eq!(s[1], "│          24h 1h      │");
-        assert_eq!(s[2], "│ terra   310k ⣀⣀⣀⣠⣀⣀⣸ │");
-        assert_eq!(s[3], "│ opus     88k ⣀⣀⣀⣀⣀⣀⣀ │", "a quiet hour is a dotted line");
+        assert_eq!(s[0], " tokens     $5.30 today", "no box: a header line, today's cost at its right");
+        assert_eq!(s[1], "          24h last hour");
+        assert_eq!(s[2], " terra   310k ⣀⣀⣀⣀⣠⣀⣀⣀⣸", "two more columns than the box left, so a wider chart");
+        assert_eq!(s[3], " opus     88k ⣀⣀⣀⣀⣀⣀⣀⣀⣀", "a quiet hour is a dotted line");
+        assert_eq!(screen(20, 6, &data())[0], " tokens", "too narrow for the cost: the header waits for room");
     }
 
     #[test]
@@ -491,7 +493,7 @@ mod tests {
             d.agents.push(AgentSpend { name: format!("a{i}"), ..Default::default() });
         }
         let s = screen(30, 6, &d);
-        assert_eq!(s[4], "│ +4 more                    │", "{s:?}");
+        assert_eq!(s[5], " +3 more", "{s:?}");
     }
 
     #[test]
