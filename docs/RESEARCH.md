@@ -1,6 +1,7 @@
-# Research notes (2026-10-31)
+# Research notes (2026-10-31, Entire added 2026-11-05)
 
-Condensed findings from four read-only surveys. Raw per-method Rex schemas were
+Condensed findings from read-only surveys; conclusions that changed a choice are in
+`adr/`. Raw per-method Rex schemas were
 captured during research; re-derive with `rex api describe METHOD --json`.
 
 ## Rex (Superlogical) — Beta 0.1.0, API revision 7
@@ -92,3 +93,16 @@ install drivers, `axel acp` stdio relay with env mapping, `git.rs` worktree isol
 `ClaudeCommand` builder. Drop: tmux, axum hook server, OTEL scraping, `send-keys`
 replies, Codex bell scraping, trust-prompt keystrokes. Root cause of the todo/inbox
 pain: task↔terminal identity was inferred from scraping and shared hook files.
+
+## Entire (entire.io CLI, 2026-11-05)
+
+Provenance for teams: a checkpoint per *commit*, written by `post-commit` under
+`refs/entire/checkpoints/<shard>/<ulid>` (transcript, prompts, metadata), linked by an
+`Entire-Checkpoint` trailer, pushed by `pre-push` to one elected remote. Pending work
+between commits lives in `.git/entire-sessions/<id>.json` (touched files + blob hashes).
+They *had* per-turn working-tree snapshots on shadow branches and `entire rewind`, and
+removed both in 2026 (storage growth, 16 s commit hooks, cleanup losing work, no
+replacement for rewind). Different question from ours; see
+`adr/0001-turn-checkpoints-not-commit-checkpoints.md` for why we keep turn checkpoints
+and what to borrow (blob hashes, commit→turn links, packing after prune, zombie sweep).
+

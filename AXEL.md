@@ -11,6 +11,8 @@ Terminal-first workbench for coding agents, built on Rex. Rust workspace, editio
 
 - `docs/DESIGN.md` is the source of truth for concepts and the launch flow.
 - `docs/CONTRACTS.md` fixes the public API of every crate; change shape only there first.
-- `docs/RESEARCH.md` records what we learned from Rex, t3code, Buzz and Axel v1.
+- `docs/RESEARCH.md` records what we learned from Rex, t3code, Buzz, Axel v1 and Entire.
+- `docs/adr/` holds decision records: why a design is what it is. `docs/rfd/` holds ideas and
+  risky research that aren't decisions yet. The `design-docs` skill says which to write when.
 - Build offline: `cargo build --offline`; test: `cargo test --offline`.
 - Never drive agents by typing into their terminals. Status comes from hooks, ACP or OSC 7501.

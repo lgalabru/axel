@@ -6,7 +6,9 @@ Axel never draws windows, it asks Rex for panes.
 
 This is a from-scratch reboot. The previous Axel (tmux launcher + macOS app) and two
 other tools the author used (Buzz, t3code) were studied first; see `RESEARCH.md`.
-Code is imported piece by piece, never by trimming the old repo.
+Code is imported piece by piece, never by trimming the old repo. This file says what
+Axel is; why it is that way is in `adr/` (one decision per file), and ideas that
+aren't decisions yet are in `rfd/`.
 
 ## Principles
 
@@ -435,8 +437,10 @@ axel-next/
   Cargo.toml              workspace, edition 2024
   AXEL.md                 dogfood config for this repo (CLAUDE.md links to it)
   docs/DESIGN.md          this file
-  docs/RESEARCH.md        what we learned from Rex, t3code, Buzz, Axel v1
+  docs/RESEARCH.md        what we learned from Rex, t3code, Buzz, Axel v1, Entire
   docs/IMPORTS.md         provenance of every imported module
+  docs/adr/               decision records: why a design is what it is
+  docs/rfd/               requests for discussion: ideas, risky research, open questions
   crates/
     axel-identity         Ed25519 keys, base58 encoding, attestation, keystore
     axel-inbox            envelope, kinds, threading, mentions, inbox queries
@@ -669,5 +673,6 @@ outside a repository, the turn simply has no checkpoint.
   deleted threads go after 7 days; on live threads, after 30 days only each session's
   latest 20 turns stay. Git's own gc reclaims the objects.
 - **Not yet**: Codex pane sessions (no turn-start hook), and settings for the retention
-  numbers.
+  numbers. Why turns and not commits, and what to borrow from Entire's commit-time
+  design: `adr/0001-turn-checkpoints-not-commit-checkpoints.md`.
 
