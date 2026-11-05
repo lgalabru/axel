@@ -34,9 +34,9 @@ pub const PROMPT_LABEL: &str = "why not today?";
 /// The usage HUD older versions opened beside the launcher; still closed by the toggle.
 const USAGE_LABEL: &str = "usage";
 pub const THREADS_LABEL: &str = "threads";
-/// The tokens pane beside a composer: this many columns (its summary line
-/// and a row per agent fit)…
-const DOCK_USAGE_COLS: u16 = 34;
+/// The tokens pane beside a composer: this many columns (each agent's day,
+/// cost and context, and the last hour's chart)…
+const DOCK_USAGE_COLS: u16 = 48;
 /// …and never more than this share of the row…
 const DOCK_USAGE_MAX_SHARE: f64 = 0.35;
 /// …and only when the composer keeps at least this many.
@@ -1281,11 +1281,11 @@ mod dock_tests {
     }
 
     #[test]
-    fn the_tokens_pane_beside_the_composer_is_34_columns() {
-        let keep = usage_keep(160).unwrap();
-        assert!((keep - 126.0 / 160.0).abs() < 1e-9, "{keep}");
-        assert!((usage_keep(120).unwrap() - 86.0 / 120.0).abs() < 1e-9, "a 120-column row: 34 of it, not half");
+    fn the_tokens_pane_beside_the_composer_is_48_columns() {
+        let keep = usage_keep(200).unwrap();
+        assert!((keep - 152.0 / 200.0).abs() < 1e-9, "{keep}");
         // Never more than 35% of the row.
+        assert!((usage_keep(120).unwrap() - 0.65).abs() < 1e-9, "a 120-column row: 42 of it, not 48");
         assert!((usage_keep(80).unwrap() - 0.65).abs() < 1e-9);
         assert_eq!(usage_keep(70), None, "a narrow composer keeps its width");
     }

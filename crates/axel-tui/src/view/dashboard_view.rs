@@ -190,10 +190,7 @@ fn render_compact_row(frame: &mut Frame, a: &DashAgentRow, row: Rect, cols: &Com
     frame.render_widget(Paragraph::new(Line::from(spans)).style(base), row);
     if let Some(x) = spark_x {
         // Take the tail of the series so the newest buckets are shown.
-        let n = cols.spark as usize;
-        let data: Vec<u64> = if a.spark.len() > n { a.spark[a.spark.len() - n..].to_vec() } else { a.spark.clone() };
-        let color = if data.iter().all(|v| *v == 0) { theme::DIM } else { theme::ACCENT };
-        frame.render_widget(Sparkline::default().data(&data).style(base.fg(color)), Rect::new(x, row.y, cols.spark, 1));
+        frame.render_widget(Paragraph::new(Line::from(chart(&a.spark, cols.spark as usize, base))), Rect::new(x, row.y, cols.spark, 1));
     }
 }
 
@@ -241,9 +238,16 @@ fn finish_row(frame: &mut Frame, row: Rect, mut spans: Vec<Span<'static>>, base:
     if let Some((x, data)) = spark
         && x + SPARK_W <= row.x + row.width
     {
-        let color = if data.iter().all(|v| *v == 0) { theme::DIM } else { theme::ACCENT };
-        frame.render_widget(Sparkline::default().data(data).style(base.fg(color)), Rect::new(x, row.y, SPARK_W, 1));
+        frame.render_widget(Paragraph::new(Line::from(chart(data, SPARK_W as usize, base))), Rect::new(x, row.y, SPARK_W, 1));
     }
+}
+
+/// A row's chart: `series` in braille across `width` cells, on `base`'s background.
+fn chart(series: &[u64], width: usize, base: Style) -> Vec<Span<'static>> {
+    let series: Vec<i64> = series.iter().map(|&v| v.min(i64::MAX as u64) as i64).collect();
+    // The quiet floor comes dim with no background: give it the row's.
+    let bg = Style { bg: base.bg, ..Style::default() };
+    super::chart::braille(&series, width, 0, base.fg(theme::ACCENT)).into_iter().map(|s| s.patch_style(bg)).collect()
 }
 
 // ---------------------------------------------------------------- threads

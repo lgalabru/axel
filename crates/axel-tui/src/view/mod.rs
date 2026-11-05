@@ -1,5 +1,6 @@
 //! Rendering. Views are pure functions of state onto a ratatui [`Frame`].
 
+pub mod chart;
 pub mod dashboard_view;
 pub mod inbox_view;
 pub mod launcher_view;
@@ -407,7 +408,7 @@ mod tests {
         assert!(t.contains("◐ Nova"), "{t}");
         assert!(t.contains("12k"), "{t}");
         let atlas = t.lines().find(|l| l.contains("Atlas")).unwrap();
-        assert!(atlas.chars().any(|c| ('\u{2581}'..='\u{2588}').contains(&c)), "sparkline expected: {atlas}");
+        assert!(atlas.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)), "sparkline expected: {atlas}");
         // Single dim footer line.
         assert!(t.contains("n new · i inbox · q"), "{t}");
         // Flash replaces the footer.
@@ -448,14 +449,14 @@ mod tests {
         assert!(!t.contains("n new"), "{t}");
         assert!(t.contains("Atlas") && t.contains("12k"), "{t}");
         let atlas = t.lines().find(|l| l.contains("Atlas")).unwrap();
-        assert!(atlas.chars().any(|c| ('\u{2581}'..='\u{2588}').contains(&c)), "sparkline at 30 cols: {atlas}");
+        assert!(atlas.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)), "sparkline at 30 cols: {atlas}");
         // Narrower: the sparkline goes first, tokens stay.
         let mut term = Terminal::new(TestBackend::new(22, 7)).unwrap();
         term.draw(|f| super::dashboard_view::render(f, &d, 5_000)).unwrap();
         let t = text(&term);
         assert!(t.contains("Atlas") && t.contains("12k"), "{t}");
         let atlas = t.lines().find(|l| l.contains("Atlas")).unwrap();
-        assert!(!atlas.chars().any(|c| ('\u{2581}'..='\u{2588}').contains(&c)), "no sparkline at 22 cols: {atlas}");
+        assert!(!atlas.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)), "no sparkline at 22 cols: {atlas}");
         let mut term = Terminal::new(TestBackend::new(14, 6)).unwrap();
         term.draw(|f| super::dashboard_view::render(f, &d, 5_000)).unwrap();
         let t = text(&term);

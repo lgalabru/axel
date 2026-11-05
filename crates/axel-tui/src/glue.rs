@@ -324,7 +324,7 @@ fn thread_rows(
             sessions_total: s.sessions_total,
             sessions_live: s.sessions_live.len(),
             tokens: s.usage.input_tokens + s.usage.output_tokens,
-            spark: bucket_series(&samples, since, now, 10),
+            spark: bucket_series(&samples, since, now, 20),
             updated_at: s.thread.updated_at,
             focus_session: focus_session(s, statuses),
             settled: s.thread.state == ThreadState::Done,
@@ -377,7 +377,7 @@ pub fn load_dashboard(store: &Store, owner_pk: &str, now: i64) -> Result<Dashboa
                 (
                     title,
                     sess.environment_label.clone(),
-                    bucket_series(&samples, since, now, 10),
+                    bucket_series(&samples, since, now, 20),
                     if live { Some(sess.id.clone()) } else { None },
                     if live { statuses.get(&sess.id) } else { None },
                 )
