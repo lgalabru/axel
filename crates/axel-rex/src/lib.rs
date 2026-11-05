@@ -110,18 +110,23 @@ fn installed_rex() -> Option<String> {
     candidates.iter().find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The `rex` executable Axel runs: `$AXEL_REX_BIN`, else `rex` on `PATH`, else
+/// the one the Rex app installs (Rex terminals put it on `PATH`; others don't).
+pub fn program() -> String {
+    std::env::var("AXEL_REX_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| (!on_path("rex")).then(installed_rex).flatten())
+        .unwrap_or_else(|| "rex".to_string())
+}
+
 impl CliRunner {
     /// Use `rex` from `PATH` (or `$AXEL_REX_BIN`), talking to `server` if given
     /// (exported to the child as `REX_SERVER`; the CLI reads it from there).
     /// Outside a Rex terminal `rex` is usually not on `PATH` (Rex terminals add
     /// it): then the one the Rex app installs.
     pub fn new(server: Option<String>) -> CliRunner {
-        let program = std::env::var("AXEL_REX_BIN")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| (!on_path("rex")).then(installed_rex).flatten())
-            .unwrap_or_else(|| "rex".to_string());
-        CliRunner { program, server }
+        CliRunner { program: program(), server }
     }
 
     /// The method name an `api call` argv targets, for error messages.
@@ -242,6 +247,22 @@ impl Rex {
     /// The environment this client was built from.
     pub fn env(&self) -> &RexEnv {
         &self.env
+    }
+
+    /// `rex events -s SESSION --json`, ready to spawn: one JSON object per line
+    /// for every event of this session (`session_event` with `payload.event
+    /// {type, payload}`), until killed.  Stdout is piped, stdin and stderr are
+    /// dropped.
+    pub fn events_command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(program());
+        cmd.args(["events", "-s", &self.env.session, "--json"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        if let Some(server) = &self.env.server {
+            cmd.env("REX_SERVER", server);
+        }
+        cmd
     }
 
     /// `rex api call -s SESSION METHOD JSON`.  The CLI injects `session_id`

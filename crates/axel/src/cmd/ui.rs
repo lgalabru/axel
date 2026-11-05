@@ -661,7 +661,68 @@ pub fn run_stream(thread_id: &str) -> Result<()> {
     // Its runs of tool calls are `axel-links://` links: make sure something opens them.
     super::links::ensure_installed();
     let owner_pk = ctx.owner()?.public().to_string();
+    if let Some(rex) = &ctx.rex {
+        follow_window_label(&ctx, rex, thread_id);
+    }
     axel_tui::run_stream(&ctx.store, &owner_pk, thread_id)
+}
+
+/// Rename the thread when its window is renamed in Rex.  The window took the
+/// thread's title when the thread docked; a name typed over it is a name for
+/// the thread, so a watcher on `rex events` writes it back as the title (and
+/// onto this pane's label).  Rex's placeholder, the title itself and the
+/// title as Axel shortens it for the tab don't count, so Axel's own labelling
+/// never renames anything.  Best effort: no Rex, no window, no watcher.
+fn follow_window_label(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) {
+    let Ok(Some(window)) = window_of_block(rex, &rex.env().block) else { return };
+    let Ok(owner) = ctx.owner() else { return };
+    let mut child = match rex.events_command().spawn() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let Some(stdout) = child.stdout.take() else { return };
+    let (env, block, thread_id) = (rex.env().clone(), rex.env().block.clone(), thread_id.to_string());
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let rex = axel_rex::Rex::new(env);
+        let Ok(store) = axel_store::Store::open_default() else { return };
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            let Some(label) = window_label_event(&line, &window) else { continue };
+            let Ok(Some(t)) = store.get_thread(&thread_id) else { continue };
+            if !label_renames_thread(&label, &window, &t.title) {
+                continue;
+            }
+            if store.update_thread(&owner, &thread_id, Some(&label), None).is_ok() {
+                rex.set_block_label(&block, &label).ok();
+            }
+        }
+        let _ = child.kill();
+    });
+}
+
+/// The new label a `rex events --json` line gives `window_id`, if that is what
+/// the line says.
+pub(crate) fn window_label_event(line: &str, window_id: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("session_event") {
+        return None;
+    }
+    let event = v.get("payload")?.get("event")?;
+    if event.get("type").and_then(|t| t.as_str()) != Some("window_label_changed") {
+        return None;
+    }
+    let payload = event.get("payload")?;
+    if payload.get("window_id").and_then(|w| w.as_str()) != Some(window_id) {
+        return None;
+    }
+    payload.get("label").and_then(|l| l.as_str()).map(str::to_string)
+}
+
+/// A label someone gave the window, rather than Rex's placeholder or the
+/// thread's own title (whole, or shortened for the tab as Axel sets it).
+pub(crate) fn label_renames_thread(label: &str, window_id: &str, title: &str) -> bool {
+    let label = label.trim();
+    !label.is_empty() && !is_placeholder_window_label(window_id, label) && label != title.trim() && label != axel_tui::util::ellipsize(title, 40)
 }
 
 /// `axel thread compose`: the bottom pane.  Leaving it closes its window, so
@@ -1363,5 +1424,26 @@ mod window_name_tests {
         assert!(!is_placeholder_window_label(id, "Window 1b574bf3"), "another window's placeholder is a name");
         assert!(!is_placeholder_window_label(id, "api work"));
         assert_eq!(project_label(std::path::Path::new("/Users/ludo/Coding/axel")).as_deref(), Some("axel"));
+    }
+
+    #[test]
+    fn a_window_renamed_in_rex_renames_its_thread() {
+        // A real line from `rex events --json`.
+        let w = "window:01a1acec-19d4-704a-b377-cae3ed3ac66d";
+        let line = format!(
+            r#"{{"type":"session_event","payload":{{"session_id":"session:x","event":{{"type":"window_label_changed","payload":{{"window_id":"{w}","label":"renamed by hand"}}}}}}}}"#
+        );
+        assert_eq!(window_label_event(&line, w).as_deref(), Some("renamed by hand"));
+        assert_eq!(window_label_event(&line, "window:other"), None, "another window's rename");
+        let other = r#"{"type":"session_event","payload":{"session_id":"session:x","event":{"type":"session_view_changed","payload":{}}}}"#;
+        assert_eq!(window_label_event(other, w), None);
+        assert_eq!(window_label_event("not json", w), None);
+
+        let title = "add retries to the webhook sender, then ask @opus for a review";
+        assert!(label_renames_thread("webhook retries", w, title));
+        assert!(!label_renames_thread(title, w, title), "the title itself");
+        assert!(!label_renames_thread(&axel_tui::util::ellipsize(title, 40), w, title), "the title as Axel puts it on the tab");
+        assert!(!label_renames_thread("Window ed3ac66d", w, title), "Rex's placeholder");
+        assert!(!label_renames_thread("  ", w, title));
     }
 }

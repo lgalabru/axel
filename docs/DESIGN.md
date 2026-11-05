@@ -605,6 +605,10 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   the policy as `agent edit --allow` would; "this message" is a grant scoped to that one
   `send` call (a guard), honoured by both the message and summon checks. A client that
   can't elicit gets the refusal with the command, as before.
+- **The window's name is the thread's**: a docked thread names its Rex window after its
+  title, and the stream pane watches `rex events` for `window_label_changed`: a name typed
+  over the window in Rex becomes the thread's title (Rex's placeholder and the title as
+  Axel shortens it for the tab don't count, so Axel's own labelling renames nothing).
 - **Agent panes**: a managed session's host pane (`<agent> · <thread> · log`) starts
   minimized: a detached Rex block, running but in no window. ^L in the composer shows the
   log of the agent you're talking to beside the conversation (`session.move_block`), and
