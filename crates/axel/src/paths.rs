@@ -22,9 +22,9 @@ pub fn skills_cache_dir() -> PathBuf {
     home().join("skills").join("cache")
 }
 
+/// `~/.config/axel/skills`: the skills every agent can use, kept on this
+/// machine (`*` in an agent's skills means all of them).  Not
+/// `dirs::config_dir()`, which on macOS is `~/Library/Application Support`.
 pub fn global_skills_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(home)
-        .join("axel")
-        .join("skills")
+    axel_config::default_global_skills_dir().unwrap_or_else(|| home().join("skills").join("global"))
 }

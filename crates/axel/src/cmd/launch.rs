@@ -211,12 +211,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
 
     // 4. Skills (remote ones fetched and pinned in AXEL.lock) and the project context.
     if let Some(driver) = drivers::for_harness(profile.harness.kind) {
-        let all = project_skills(config.as_ref())?;
-        let skills = axel_config::resolve_skills(&profile.skills, &all);
-        driver.install(&work_dir, &skills).context("installing skills")?;
-        if let Some(axel_md) = config.as_ref().and_then(|c| c.path.clone()) {
-            driver.install_context(&work_dir, &axel_md).ok();
-        }
+        install_skills(driver.as_ref(), &work_dir, &profile.skills, config.as_ref(), &paths::global_skills_dir())?;
     }
 
     // 5. Session, signed by the agent itself.
@@ -529,8 +524,73 @@ fn build_profile(agent: &axel_store::Agent) -> AgentProfile {
 /// Every skill a launch in this project can use: the project's sources (remote ones
 /// resolved to their pinned checkout, fetched and pinned on first use), then the
 /// global directory. A source that can't be used is reported and skipped.
+/// Give the agent its skills in `work_dir` (the project's, remote ones, and
+/// `global`'s, as `requested` names them) and link `AXEL.md` where the
+/// harness reads its context.  The links are this machine's: each goes in
+/// the repository's `.git/info/exclude`, so a `git add -A` never commits it.
+/// The skills installed, by name.
+pub fn install_skills(
+    driver: &dyn axel_config::drivers::SkillDriver,
+    work_dir: &Path,
+    requested: &[String],
+    config: Option<&WorkspaceConfig>,
+    global: &Path,
+) -> Result<Vec<String>> {
+    let all = skills_from(config, global)?;
+    let skills = axel_config::resolve_skills(requested, &all);
+    driver.install(work_dir, &skills).context("installing skills")?;
+    let dir = driver.skills_dir(work_dir);
+    let mut local: Vec<PathBuf> = skills.iter().map(|s| dir.join(&s.name)).collect();
+    if let Some(axel_md) = config.and_then(|c| c.path.clone())
+        && driver.install_context(work_dir, &axel_md).unwrap_or(false)
+    {
+        local.push(work_dir.join(driver.context_filename()));
+    }
+    exclude_from_git(work_dir, &local);
+    Ok(skills.into_iter().map(|s| s.name).collect())
+}
+
+/// Add `paths` (inside `dir`'s repository) to its `.git/info/exclude`,
+/// each once.  Nothing outside a repository; worktrees share their repo's.
+fn exclude_from_git(dir: &Path, paths: &[PathBuf]) {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let (Some(top), Some(exclude)) = (git(&["rev-parse", "--show-toplevel"]), git(&["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])) else {
+        return;
+    };
+    let top = PathBuf::from(&top).canonicalize().unwrap_or_else(|_| PathBuf::from(&top));
+    let exclude = PathBuf::from(exclude);
+    let have = std::fs::read_to_string(&exclude).unwrap_or_default();
+    let mut add = String::new();
+    for p in paths {
+        let abs = p.parent().and_then(|d| d.canonicalize().ok()).map(|d| d.join(p.file_name().unwrap_or_default())).unwrap_or_else(|| p.clone());
+        let Ok(rel) = abs.strip_prefix(&top) else { continue };
+        let line = format!("/{}", rel.to_string_lossy());
+        if !have.lines().any(|l| l.trim() == line) && !add.lines().any(|l| l == line) {
+            add.push_str(&line);
+            add.push('\n');
+        }
+    }
+    if add.is_empty() {
+        return;
+    }
+    if let Some(parent) = exclude.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let sep = if have.is_empty() || have.ends_with('\n') { "" } else { "\n" };
+    let header = if have.contains("# axel:") { "" } else { "# axel: skill links installed for agents on this machine\n" };
+    let _ = std::fs::write(&exclude, format!("{have}{sep}{header}{add}"));
+}
+
 pub fn project_skills(config: Option<&WorkspaceConfig>) -> Result<axel_config::IndexMap<String, axel_config::Skill>> {
-    let global = paths::global_skills_dir();
+    skills_from(config, &paths::global_skills_dir())
+}
+
+/// Every skill `config` names, then `global`'s.
+fn skills_from(config: Option<&WorkspaceConfig>, global: &Path) -> Result<axel_config::IndexMap<String, axel_config::Skill>> {
+    let global = global.to_path_buf();
     let Some(config) = config else {
         return Ok(axel_config::find_skills(&[], Some(global.as_path()))?);
     };
@@ -738,7 +798,7 @@ fn truncate(s: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_repo_url;
+    use super::{WorkspaceConfig, drivers, install_skills, normalize_repo_url};
 
     #[test]
     fn the_session_tool_server_gets_identity_but_not_the_prompt() {
@@ -759,6 +819,45 @@ mod tests {
         let keys: Vec<&str> = s.env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, vec!["PATH", "AXEL_AGENT", "AXEL_THREAD"]);
         assert!(s.env.contains(&("AXEL_AGENT".into(), "pk".into())), "the later value wins");
+    }
+
+    #[test]
+    fn every_agent_gets_the_global_skills_and_git_never_sees_them() {
+        let global = tempfile::tempdir().unwrap();
+        let skill = global.path().join("conventional-commits");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: conventional-commits\ndescription: Commit messages.\n---\nfeat: …\n").unwrap();
+        std::fs::write(global.path().join("tone.md"), "Be brief.\n").unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(repo.path()).args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.path().join("AXEL.md"), "Run the tests.\n").unwrap();
+        let config = WorkspaceConfig::load(repo.path()).unwrap();
+        for kind in [axel_config::HarnessKind::Claude, axel_config::HarnessKind::Codex] {
+            let driver = drivers::for_harness(kind).unwrap();
+            let names = install_skills(driver.as_ref(), repo.path(), &["*".to_string()], config.as_ref(), global.path()).unwrap();
+            assert_eq!(names, vec!["conventional-commits".to_string(), "tone".to_string()], "{kind:?}: `*` is all of them");
+            let linked = driver.skills_dir(repo.path()).join("conventional-commits").join("SKILL.md");
+            assert!(std::fs::read_to_string(&linked).unwrap().contains("feat:"), "{kind:?}: the skill is where the harness looks");
+        }
+        // The links are this machine's: git doesn't see them, or the linked context.
+        assert_eq!(git(&["status", "--porcelain"]).trim(), "?? AXEL.md", "only the project's own file shows");
+        // Installing again adds no lines.
+        let driver = drivers::for_harness(axel_config::HarnessKind::Claude).unwrap();
+        install_skills(driver.as_ref(), repo.path(), &["*".to_string()], config.as_ref(), global.path()).unwrap();
+        let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.matches("/.claude/skills/conventional-commits").count(), 1, "{exclude}");
+        // An agent given named skills gets those.
+        let named = install_skills(driver.as_ref(), repo.path(), &["tone".to_string()], config.as_ref(), global.path()).unwrap();
+        assert_eq!(named, vec!["tone".to_string()]);
+    }
+
+    #[test]
+    fn the_global_skills_live_in_dot_config() {
+        assert!(crate::paths::global_skills_dir().ends_with(".config/axel/skills"), "{:?}", crate::paths::global_skills_dir());
     }
 
     #[test]

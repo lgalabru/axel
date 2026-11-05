@@ -904,7 +904,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(AXEL_MD),
-            "---\nskills:\n  - path: ./skills\n  - ~/.config/axel/skills\n  - /abs\n---\n",
+            // A home directory that can't exist: the test can't depend on this machine's.
+            "---\nskills:\n  - path: ./skills\n  - ~/.axel-no-such-dir/skills\n  - /abs\n---\n",
         )
         .unwrap();
         std::fs::create_dir(dir.path().join("skills")).unwrap();
@@ -915,7 +916,7 @@ mod tests {
             Some(dir.path().join(AXEL_MD).as_path())
         );
         assert_eq!(config.skills[0], SkillSource::new(dir.path().join("skills")));
-        assert_eq!(config.skills[1], SkillSource::new("~/.config/axel/skills"));
+        assert_eq!(config.skills[1], SkillSource::new("~/.axel-no-such-dir/skills"));
         assert_eq!(config.skills[2], SkillSource::new("/abs"));
         assert_eq!(config.skills_dirs(), vec![dir.path().join("skills")]);
         assert_eq!(
