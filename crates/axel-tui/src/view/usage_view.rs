@@ -332,7 +332,9 @@ fn window_spans(w: &LimitRow, detail: Detail) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!("{} ", "▱".repeat(CELLS - full)), theme::dim()));
     }
     spans.push(Span::styled(format!("{:>3.0}%", pct), pct_style(pct)));
-    if detail != Detail::Share
+    // A window used up stops every agent on that plan: when it comes back is
+    // the one thing worth knowing, so it stays even when nothing else fits.
+    if (detail != Detail::Share || pct >= 100.0)
         && let Some(s) = w.resets_in
     {
         spans.push(Span::styled(format!(" ↻{:<3}", until(s)), theme::dim()));
@@ -540,6 +542,12 @@ mod tests {
         assert!(narrow[at + 1].contains("5h  84%") && !narrow[at + 1].contains('↻'), "{narrow:?}");
         // Too short for the section: left out whole.
         assert!(!screen(60, 7, &d).iter().any(|l| l.contains("plan limits")));
+        // Used up: the reset time stays however narrow the pane.
+        let mut gone = d.clone();
+        gone.limits[0].windows[0].used_pct = Some(100.0);
+        let narrow = screen(26, 12, &gone);
+        let at = narrow.iter().position(|l| l.contains("plan limits")).unwrap();
+        assert!(narrow[at + 1].contains("5h 100% ↻2h"), "{narrow:?}");
     }
 
     #[test]
