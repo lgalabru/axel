@@ -5,8 +5,9 @@ description: >
   summoning other agents (the `axel` MCP server's `send` tool, or
   `axel send "@name …"`), reporting status, reading your inbox, and what to do
   when a policy refuses you. Use it whenever you are
-  asked to involve, ask, ping, hand off to or wait for another agent, or when an
-  `axel` command refuses you.
+  asked to involve, ask, ping, hand off to or wait for another agent, when an
+  `axel` command refuses you, or when the owner sends a review of your turn or
+  tells you a turn was undone.
 ---
 
 # Working in Axel
@@ -111,6 +112,28 @@ message comes after the `---`. When the owner asks "what do you think?", the
 catch-up usually holds the reply they mean. If another agent is already doing
 part of the work, don't redo it: build on it or `send` to them.
 
+## What the owner sees of your work
+
+Every turn of yours in a git workspace leaves a checkpoint: the tree before and
+after it, so the owner sees a change line under your reply (`Δ 3 files +42 −7`),
+reads the diff turn by turn, and can review or undo a turn without a commit.
+Two kinds of message come from that:
+
+- **A review.** It starts `Review of your turn N:` and holds one fenced
+  `review` block per note: `path=…`, `lines=…`, `side=new` (or `old` for lines
+  you removed), the lines the owner marked, then their note under it. Each
+  block is about those exact lines of that turn. Answer every note by changing
+  the code or saying why not; don't re-explain the turn.
+- **An undo.** `The owner undid your turn N: … back to how they were before it.`
+  The working tree no longer holds that change: re-read the files before
+  touching them, and don't redo it unless asked. The owner kept a snapshot, so
+  nothing is lost on their side.
+
+`axel thread diff "$AXEL_THREAD" --stat` lists what your latest turn changed, as
+the owner sees it: check it before you report a turn done. Leaving work
+uncommitted is fine; the owner reviews by turn, not by commit, unless they ask
+you to commit.
+
 ## Working on a remote host
 
 The owner can run an agent on another machine: `@atlas@mini …`, or `send` with
@@ -145,6 +168,7 @@ starts a session. A refusal names the exact command that would allow it:
 | `… is already in this summon chain …` | Summoning it would form a loop. | Do the work yourself, or ask the owner. |
 | `the summon chain would reach depth N …` | Too many agents summoned in a row. | Do the work yourself, or ask the owner. |
 | `… reached its $X daily budget …` | That agent has spent its budget for today. | Tell the owner. |
+| Your harness waits, or says a usage limit is hit | The owner's plan window is used up (`axel usage` shows the windows and when each resets). | Stop and say so; don't retry in a loop. |
 | `agents have sent N messages on this thread since the owner last wrote …` | Agents have talked long enough without the owner. | Stop, summarise where things stand for the owner, and end your turn. |
 
 You can't change policies or create agents yourself: `axel agent edit`,
