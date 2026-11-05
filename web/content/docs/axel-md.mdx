@@ -47,6 +47,15 @@ Which skills an agent gets is up to the agent: `axel agent new terra --skills gr
 When two sources define the same name, directories on disk win over remote skills, so
 copying a skill into `./skills` overrides it. The first source listed wins otherwise.
 
+### Your own skills
+
+Skills that are yours rather than the project's, such as how you like commits written, go in
+`~/.config/axel/skills`, one `<name>.md` or `<name>/SKILL.md` each. Every project sees
+them, after its own, and an agent with `--skills '*'` gets them all. They're linked into
+each project where its harness looks (`.claude/skills`, `.codex/skills`), and each link is
+listed in the repo's `.git/info/exclude`, so it never shows in `git status` or gets
+committed.
+
 ### Pinned, never silently updated
 
 A remote skill is instructions an agent follows with your permissions, so Axel treats an
