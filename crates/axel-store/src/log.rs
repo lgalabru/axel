@@ -515,7 +515,18 @@ pub(crate) fn replay_thread(
     Ok(())
 }
 
+/// Whether `usage_log` exists yet: an older migration replaying threads
+/// runs before the one that adds it.
+fn has_usage_log(conn: &Connection) -> Result<bool, Error> {
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'usage_log'")?
+        .exists([])?)
+}
+
 fn clear_thread(conn: &Connection, thread_id: &str) -> Result<(), Error> {
+    if has_usage_log(conn)? {
+        conn.execute("DELETE FROM usage_log WHERE thread_id = ?1", [thread_id])?;
+    }
     for table in [
         "usage_samples",
         "usage",
@@ -811,6 +822,16 @@ fn apply(conn: &Connection, e: &Envelope, thread_id: &str) -> Result<Applied, Er
                     "INSERT OR IGNORE INTO usage_samples (event_id, session_id, thread_id, at, input_tokens, output_tokens)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![e.id, session_id, thread_id, at, d.input, d.output],
+                )?;
+            }
+            // Every delta, kept, under the agent whose session spent it.
+            if has_usage_log(conn)? {
+                conn.execute(
+                    "INSERT OR IGNORE INTO usage_log (event_id, session_id, thread_id, agent_pubkey, at, model,
+                        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, turns, cost_usd_est)
+                     VALUES (?1, ?2, ?3, COALESCE((SELECT agent_pubkey FROM sessions WHERE id = ?2), ?4), ?5, ?6,
+                        ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![e.id, session_id, thread_id, e.from, at, d.model, d.input, d.output, d.cache_read, d.cache_write, d.reasoning, d.turns, d.cost_usd_est],
                 )?;
             }
         }

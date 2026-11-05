@@ -185,6 +185,15 @@ pub struct TerminalSize {
     pub cell_height_px: Option<u16>,
 }
 
+/// A terminal to the right of another in the same row: `(label, command)`,
+/// the left one keeping `keep` of the width.
+#[derive(Clone, Debug)]
+pub struct Beside<'a> {
+    pub label: &'a str,
+    pub command: &'a [String],
+    pub keep: f64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Layer {
     pub layer_id: String,
@@ -362,6 +371,13 @@ impl Rex {
         })
     }
 
+    /// `bottom`, with `beside` (if any) to its right in the same row.
+    fn row(bottom: Value, beside: Option<&Beside>, cwd: Option<&Path>, env: &[(String, String)]) -> Result<Value, Error> {
+        let Some(b) = beside else { return Ok(bottom) };
+        let other = payload::terminal_block(b.label, b.command, cwd, env)?;
+        payload::row(bottom, other, b.keep)
+    }
+
     /// Open a window with two terminals, `top` above `bottom`, each
     /// `(label, command)`; the top gets `ratio` of the height.  Block ids come
     /// back top first.
@@ -371,13 +387,14 @@ impl Rex {
         label: &str,
         top: (&str, &[String]),
         bottom: (&str, &[String]),
+        beside: Option<&Beside>,
         ratio: f64,
         cwd: Option<&Path>,
         env: &[(String, String)],
         focus: bool,
     ) -> Result<Window, Error> {
         let t = payload::terminal_block(top.0, top.1, cwd, env)?;
-        let b = payload::terminal_block(bottom.0, bottom.1, cwd, env)?;
+        let b = Self::row(payload::terminal_block(bottom.0, bottom.1, cwd, env)?, beside, cwd, env)?;
         let args = payload::new_window_stacked(label, t, b, ratio, focus)?;
         let result = self.api_call("session.new_window", args)?;
         Ok(Window {
@@ -396,6 +413,7 @@ impl Rex {
         anchor: &str,
         top: (&str, &[String]),
         bottom: (&str, &[String]),
+        beside: Option<&Beside>,
         keep: f64,
         stack: f64,
         cwd: Option<&Path>,
@@ -403,14 +421,34 @@ impl Rex {
         focus: bool,
     ) -> Result<Vec<String>, Error> {
         let t = payload::terminal_block(top.0, top.1, cwd, env)?;
-        let b = payload::terminal_block(bottom.0, bottom.1, cwd, env)?;
+        let b = Self::row(payload::terminal_block(bottom.0, bottom.1, cwd, env)?, beside, cwd, env)?;
         let args = payload::new_split_right_stacked(anchor, t, b, keep, stack, focus)?;
         let result = self.api_call("session.new_split", args)?;
         let ids = ids_field(&result, "block_ids");
-        if ids.len() != 2 {
+        if ids.len() < 2 {
             return Err(Error::Invalid(format!("session.new_split returned {} blocks, wanted 2", ids.len())));
         }
         Ok(ids)
+    }
+
+    /// One terminal below `anchor` (which keeps `ratio` of the height), with
+    /// `beside` to its right in the same row.  Block ids come back left first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_below_beside(
+        &self,
+        anchor: &str,
+        label: &str,
+        command: &[String],
+        beside: Option<&Beside>,
+        ratio: f64,
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+        focus: bool,
+    ) -> Result<Vec<String>, Error> {
+        let block = Self::row(payload::terminal_block(label, command, cwd, env)?, beside, cwd, env)?;
+        let args = payload::new_split_below(anchor, block, ratio, focus)?;
+        let result = self.api_call("session.new_split", args)?;
+        Ok(ids_field(&result, "block_ids"))
     }
 
     /// Run `command` in a new terminal that isn't in any window (detached):
@@ -789,10 +827,25 @@ mod tests {
     }
 
     #[test]
+    fn a_composer_and_the_pane_beside_it_are_one_row() {
+        let (rex, fake) = client(vec![Ok(r#"{"anchor_id":"block:s","block_ids":["block:c","block:u"],"revision":3}"#.into())]);
+        let usage = vec!["usage".to_string()];
+        let beside = Beside { label: "tokens", command: &usage, keep: 0.7 };
+        let ids = rex.split_below_beside("block:s", "compose", &["c".into()], Some(&beside), 0.85, None, &[], true).unwrap();
+        assert_eq!(ids, vec!["block:c".to_string(), "block:u".to_string()]);
+        let sent: Value = serde_json::from_str(&fake.calls.borrow()[0][5]).unwrap();
+        assert_eq!(sent["direction"], "vertical");
+        assert_eq!(sent["layout"]["split"]["direction"], "horizontal");
+        assert_eq!(sent["layout"]["split"]["ratio"], 0.7);
+        assert_eq!(sent["layout"]["split"]["before"]["block"]["label"], "compose");
+        assert_eq!(sent["layout"]["split"]["after"]["block"]["label"], "tokens");
+    }
+
+    #[test]
     fn split_right_stacked_payload_and_result() {
         let (rex, fake) = client(vec![Ok(r#"{"anchor_id":"split:1","block_ids":["block:a","block:b"],"revision":3}"#.into())]);
         let ids = rex
-            .split_right_stacked("split:1", ("Ship it", &["s".into()]), ("compose", &["c".into()]), 0.4, 0.85, None, &[], true)
+            .split_right_stacked("split:1", ("Ship it", &["s".into()]), ("compose", &["c".into()]), None, 0.4, 0.85, None, &[], true)
             .unwrap();
         assert_eq!(ids, vec!["block:a".to_string(), "block:b".to_string()]);
         let calls = fake.calls.borrow();

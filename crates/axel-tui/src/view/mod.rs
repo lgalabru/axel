@@ -6,6 +6,7 @@ pub mod launcher_view;
 pub mod picker_view;
 pub mod markdown;
 pub mod thread_view;
+pub mod usage_view;
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -517,7 +518,7 @@ mod tests {
         let next = lines.iter().position(|l| l.contains("⧗ next") && l.contains("check logout too")).expect(&t);
         assert!(lines[next + 1].contains("⧗ queued") && lines[next + 1].contains("then update the docs"), "{t}");
         assert!(lines[next + 3].contains("+2 more"), "collapsed to three rows {t}");
-        assert!(lines[next + 4].starts_with('─'), "composer's top rule right below {t}");
+        assert!(lines[next + 4].starts_with("› "), "the composer right below, no rule above it {t}");
         assert!(t.lines().filter(|l| l.contains("check logout too")).all(|l| l.contains('⧗')), "queued prompts are not timeline rows {t}");
         assert!(t.contains("Enter sends into its turn") && t.contains("^S interrupts"), "{t}");
         // Tab focuses the strip: every row shows, with the selection marker.
@@ -529,7 +530,7 @@ mod tests {
             println!("{t}");
         }
         assert!(t.contains("▸ ⧗ queued   then update the docs"), "{t}");
-        assert!(t.contains("and tag it") && !t.contains("more"), "{t}");
+        assert!(t.contains("and tag it") && !t.lines().any(|l| l.contains('⧗') && l.contains("more")), "{t}");
         assert!(t.contains("send now"), "{t}");
     }
 
@@ -554,11 +555,11 @@ mod tests {
             // leading "\n\n" of the assistant chunk is trimmed: the text starts right after the label
             assert!(t.contains("Looking at the auth"), "{w}x{h}\n{t}");
             let after = t.lines().position(|l| l.contains("Looking at the auth")).unwrap() + 1;
-            assert!(t.lines().nth(after).unwrap().contains("▸ 5 tool calls"), "no trailing blank lines {w}x{h}\n{t}");
-            // fold line
-            assert!(t.contains("▸ 5 tool calls · 3.2s"), "{w}x{h}\n{t}");
-            if w >= 80 {
-                assert!(t.contains("▸ 5 tool calls · 3.2s · read ×2, search, edit, execute"), "{w}x{h}\n{t}");
+            assert!(t.lines().nth(after).unwrap().contains("▸ Read "), "no trailing blank lines {w}x{h}\n{t}");
+            // fold line: what the calls did, then how many and how long
+            assert!(t.contains("· 5 calls · 3.2s"), "{w}x{h}\n{t}");
+            if w >= 100 {
+                assert!(t.contains("▸ Read auth.rs, login.rs, search for “session_token”, edit login.rs, run tests · 5 calls · 3.2s"), "{w}x{h}\n{t}");
             }
             assert!(!t.contains("Read src/auth.rs"), "collapsed by default {w}x{h}\n{t}");
             // pending permission card with options, first highlighted
@@ -576,7 +577,7 @@ mod tests {
             v.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
             term.draw(|f| super::thread_view::render(f, &v, 5_000)).unwrap();
             let t = text(&term);
-            assert!(t.contains("✓ Read src/auth.rs"), "{w}x{h}\n{t}");
+            assert!(t.contains("✓ Read auth.rs") && t.contains("Read src/auth.rs"), "its words, then what it ran {w}x{h}\n{t}");
             assert!(t.contains("line 1") && t.contains("line 12") && !t.contains("line 13"), "{w}x{h}\n{t}");
             if h >= 24 {
                 // At 18 rows the output's last line sits below the fold (↓ shows it).
@@ -658,14 +659,14 @@ mod tests {
         // attachments of the stored message under it, and the pending chip in the composer
         assert!(t.contains("📎 shot.png  📎 trace.log"), "{t}");
         assert!(t.contains("📎 next.pdf"), "{t}");
-        // composer = rule · text row · chips row · rule · footer (no box)
+        // composer = text row · chips row · rule · footer (no box, no rule above)
         let lines: Vec<&str> = t.lines().collect();
         let chips_row = lines.iter().position(|l| l.contains("📎 next.pdf")).unwrap();
         let text_row = lines.iter().position(|l| l.contains("send a message to decline")).unwrap();
         assert_eq!(chips_row - text_row, 1, "chips right under the text at 80x24: {t}");
         assert!(lines[text_row].starts_with("› "), "{t}");
-        assert!(lines[text_row - 1].starts_with('─') && lines[chips_row + 1].starts_with('─'), "two rules {t}");
-        assert!(lines[chips_row + 2].contains("autopilot on"), "footer under the rules {t}");
+        assert!(!lines[text_row - 1].starts_with('─') && lines[chips_row + 1].starts_with('─'), "one rule, under the input {t}");
+        assert!(lines[chips_row + 2].contains("autopilot on"), "footer under the rule {t}");
         assert!(!t.contains('╭') && !t.contains('╰') && !t.contains('│'), "no box {t}");
         // the same at the 3-row size, and a long lone chip uses the row
         v.attachments = vec![PathBuf::from("/tmp/2D1AF3B4-91C7-4C4A-B359-0123456789AB.png")];
@@ -750,7 +751,8 @@ mod tests {
         assert_eq!(wrap("", 4), vec![""]);
         let items = crate::thread::fixtures::items();
         let tools: Vec<&crate::model::ThreadItem> = items[2..7].iter().collect();
-        assert_eq!(fold_summary(&tools), "read ×2, search, edit, execute");
+        assert_eq!(fold_summary(&tools, 200), "Read auth.rs, login.rs, search for “session_token”, edit login.rs, run tests");
+        assert_eq!(fold_summary(&tools[..1], 200), "Read auth.rs", "one call: its own words");
     }
 
     #[test]
@@ -902,7 +904,7 @@ mod tests {
         let reply = plain(&super::thread_view::row_lines(&v, &Row::Prose(1), 80, false));
         assert_eq!(reply, vec!["I've asked orion.".to_string()], "no second atlas badge");
         let other = plain(&super::thread_view::row_lines(&v, &Row::Prose(2), 80, false));
-        assert!(other[0].contains(" nova "), "a different agent gets its own badge: {other:?}");
+        assert!(other[0].is_empty() && other[1].contains(" nova "), "a different agent gets its own badge, a blank line above: {other:?}");
     }
 
     #[test]

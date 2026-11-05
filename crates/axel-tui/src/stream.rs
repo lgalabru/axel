@@ -655,7 +655,7 @@ mod tests {
         let mut v = ThreadView::new("T1", fixtures::data());
         let mut s = Stream::default();
         let f1 = plain(&s.frame(&v, 80, 40));
-        assert!(f1.contains("Fix the login bug") && f1.contains("5 tool calls"), "{f1}");
+        assert!(f1.contains("Fix the login bug") && f1.contains("5 calls"), "{f1}");
         assert!(f1.contains("Atlas asks permission: Run cargo test"), "pending card in the tail: {f1}");
         assert!(f1.contains("1 Allow once  2 Always allow  3 Reject · answer below"), "{f1}");
         assert_eq!(s.committed.len(), 3, "user, assistant, fold are settled");
@@ -679,7 +679,7 @@ mod tests {
         v.set_data(d);
         let f3 = plain(&s.frame(&v, 80, 40));
         assert!(f3.contains("Running the") && f3.contains("Atlas is working…"), "{f3}");
-        assert_eq!(s.live_lines, 3, "header, text, spinner");
+        assert_eq!(s.live_lines, 4, "a blank line, header, text, spinner");
         // A tail taller than the pane is cut from the top, keeping the newest line.
         let f4 = plain(&s.frame(&v, 80, 3));
         assert_eq!(s.live_lines, 1);
@@ -730,10 +730,10 @@ mod tests {
         let v = ThreadView::new("T1", d);
         let mut s = Stream::default();
         let first = s.frame(&v, 120, 40);
-        let tail_start = first.rfind("1 tool call").expect("the fold line is in the tail");
+        let tail_start = first.rfind("Read main.rs").expect("the fold line is in the tail");
         let line = &first[first[..tail_start].rfind("\r\n").map_or(0, |i| i + 2)..];
         assert_eq!(line.matches('\n').count(), s.live_lines, "one row per counted row: {line:?}");
-        assert!(plain(line).contains("python3 - <<'PY' …"), "the command's first line: {line:?}");
+        assert!(!plain(line).contains("<<'PY'"), "what it does, not the command: {line:?}");
         s.tick += 1;
         let again = s.frame(&v, 120, 40);
         assert!(again.starts_with(&format!("\x1b[{}F\x1b[J", s.live_lines)), "{again:?}");

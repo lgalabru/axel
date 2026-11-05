@@ -9,8 +9,9 @@
 //! - **the log**: `events`, every envelope ever received;
 //! - **projections**, rebuildable from the log at any time: `threads`,
 //!   `thread_projects`, `thread_participants`, `sessions`, `status`, `usage`,
-//!   `usage_samples`, `mentions`, `message_refs`;
+//!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
+//!   `session_context`, `plan_limits`,
 //!   plus the `sessions.transcript_offset` column.
 
 use rusqlite::Connection;
@@ -22,6 +23,7 @@ pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Projection tables, in an order that is safe to truncate.
 pub(crate) const PROJECTION_TABLES: &[&str] = &[
+    "usage_log",
     "usage_samples",
     "usage",
     "status",
@@ -331,6 +333,50 @@ const MIGRATIONS: &[&str] = &[
         host_id       TEXT NOT NULL
     );
     "#,
+    // v6: token accounting by agent and over time.  `usage_log` projects
+    // every usage envelope, with no retention, so any window (last hour,
+    // last day, all time) is a sum; `post_migrate` replays the threads that
+    // already hold some.  `session_context` is how full each session's
+    // context window is right now: a snapshot, local-only.
+    r#"
+    CREATE TABLE IF NOT EXISTS usage_log (
+        event_id            TEXT PRIMARY KEY,
+        session_id          TEXT NOT NULL,
+        thread_id           TEXT NOT NULL,
+        agent_pubkey        TEXT NOT NULL,
+        at                  INTEGER NOT NULL,
+        model               TEXT,
+        input_tokens        INTEGER NOT NULL,
+        output_tokens       INTEGER NOT NULL,
+        cache_read_tokens   INTEGER NOT NULL,
+        cache_write_tokens  INTEGER NOT NULL,
+        reasoning_tokens    INTEGER NOT NULL,
+        turns               INTEGER NOT NULL,
+        cost_usd_est        REAL    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS usage_log_at     ON usage_log(at);
+    CREATE INDEX IF NOT EXISTS usage_log_agent  ON usage_log(agent_pubkey, at);
+    CREATE INDEX IF NOT EXISTS usage_log_thread ON usage_log(thread_id, at);
+    CREATE TABLE IF NOT EXISTS session_context (
+        session_id  TEXT PRIMARY KEY,
+        used        INTEGER NOT NULL,
+        size        INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
+    "#,
+    // v7: plan limits (Claude's and Codex's five-hour and weekly windows),
+    // as each harness last reported them for the account signed in here.
+    // Local-only.
+    r#"
+    CREATE TABLE IF NOT EXISTS plan_limits (
+        harness     TEXT NOT NULL,
+        window      TEXT NOT NULL,
+        used_pct    REAL NOT NULL,
+        resets_at   INTEGER,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (harness, window)
+    );
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.
@@ -363,6 +409,18 @@ fn add_column_if_missing(
 
 /// Rust work that a migration needs after its SQL, inside the same transaction.
 fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
+    if version == 6 {
+        let threads: Vec<String> = {
+            let mut st = tx.prepare(
+                "SELECT DISTINCT thread_id FROM events WHERE kind = ?1 AND thread_id IS NOT NULL",
+            )?;
+            let rows = st.query_map([crate::kind::USAGE], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for thread_id in &threads {
+            crate::log::replay_thread(tx, thread_id, None)?;
+        }
+    }
     if version == 4 {
         add_column_if_missing(tx, "environments", "ssh_target", "TEXT")?;
         add_column_if_missing(tx, "environments", "host_pubkey", "TEXT")?;

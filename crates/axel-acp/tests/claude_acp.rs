@@ -175,7 +175,16 @@ fn a_turn_streams_asks_permission_and_runs_the_tool() {
             json!({ "outcome": { "outcome": "selected", "optionId": "allow" } })
         },
     );
-    assert_eq!(reply["result"], json!({ "stopReason": "end_turn" }));
+    assert_eq!(reply["result"]["stopReason"], "end_turn");
+    // What the turn spent rides in the reply: Claude's own counts and cost.
+    let usage = &reply["result"]["usage"];
+    assert_eq!((usage["inputTokens"].as_u64(), usage["outputTokens"].as_u64(), usage["cachedReadTokens"].as_u64()), (Some(3), Some(40), Some(1000)));
+    assert_eq!(reply["result"]["_meta"]["axel"], json!({ "costUsd": 0.25, "model": "claude-sonnet-test" }));
+    // And where the plan's windows stand.
+    let limits = seen.iter().find(|m| m["method"] == "_axel/limits").expect("limits sent");
+    let mut windows: Vec<(String, f64)> = limits["params"]["windows"].as_array().unwrap().iter().map(|w| (w["window"].as_str().unwrap().to_string(), w["usedPercent"].as_f64().unwrap())).collect();
+    windows.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(windows, vec![("five_hour".to_string(), 25.0), ("week".to_string(), 50.0)]);
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0]["method"], "session/request_permission");
     assert_eq!(asked[0]["params"]["toolCall"], json!({ "toolCallId": "toolu_1", "rawInput": { "command": "ls", "description": "List files" }, "title": "`ls`" }));

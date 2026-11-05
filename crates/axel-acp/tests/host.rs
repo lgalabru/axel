@@ -1104,3 +1104,26 @@ fn a_message_sent_mid_turn_goes_into_it_and_can_be_edited_until_read() {
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }
+
+#[test]
+fn a_turns_spend_and_context_fill_land_in_the_store() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("spend"));
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    let u = f.store.usage(&f.session_id).unwrap().expect("usage recorded");
+    assert_eq!((u.input_tokens, u.output_tokens, u.cache_read_tokens, u.turns), (10, 50, 100, 1));
+    assert!((u.cost_usd_est - 0.5).abs() < 1e-9, "the reported cost, not an estimate");
+    let ctx = f.store.session_contexts().unwrap();
+    assert_eq!((ctx[0].used, ctx[0].size), (1234, 200_000));
+    let limits = f.store.plan_limits().unwrap();
+    assert_eq!((limits[0].window, limits[0].used_pct, limits[0].resets_at), (axel_store::LimitWindow::FiveHour, 30.0, Some(1000)));
+    assert_eq!(limits[0].harness, fake_harness(), "kept under the harness that said it");
+
+    // Usage not in Axel's terms isn't summed.
+    send_ok(&sock, Command::Prompt { text: "spend-unmarked".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 2", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    assert_eq!(f.store.usage(&f.session_id).unwrap().unwrap().turns, 1);
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+}

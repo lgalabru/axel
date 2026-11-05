@@ -10,7 +10,7 @@ use crate::wire::kind;
 use crate::{
     Error, Harness, INBOX_SCOPE, Participant, Session, SessionFilter, Status, Store, Thread,
     ThreadFilter, ThreadProject, ThreadSummary, ThreadWorkspace, Turn, TurnSummary, Usage,
-    UsageSample,
+    UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit,
 };
 
 fn conv<E: std::error::Error + Send + Sync + 'static>(e: E) -> rusqlite::Error {
@@ -492,6 +492,95 @@ impl Store {
                 })
             },
         )?)
+    }
+
+    /// What each agent spent, most recent spender first.
+    pub fn usage_by_agent(&self, now: i64) -> Result<Vec<UsageWindows>, Error> {
+        self.usage_windows("agent_pubkey", now, None)
+    }
+
+    /// What each thread spent, most recent first, at most `limit` of them.
+    pub fn usage_by_thread(&self, now: i64, limit: usize) -> Result<Vec<UsageWindows>, Error> {
+        self.usage_windows("thread_id", now, Some(limit))
+    }
+
+    fn usage_windows(&self, key: &str, now: i64, limit: Option<usize>) -> Result<Vec<UsageWindows>, Error> {
+        // One pass: each window is a sum over the rows inside it.
+        let sums = |w: &str| {
+            ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "turns", "cost_usd_est"]
+                .iter()
+                .map(|c| format!("COALESCE(SUM(CASE WHEN {w} THEN {c} END), 0)"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let sql = format!(
+            "SELECT {key}, {}, {}, {}, MAX(at) FROM usage_log GROUP BY {key} ORDER BY MAX(at) DESC, {key} LIMIT ?3",
+            sums("at >= ?1"),
+            sums("at >= ?2"),
+            sums("1"),
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let limit = limit.map(|l| l as i64).unwrap_or(-1);
+        let rows = st.query_map(params![now - 3600, now - 86_400, limit], |r| {
+            let totals = |at: usize| -> rusqlite::Result<UsageTotals> {
+                Ok(UsageTotals {
+                    input_tokens: r.get(at)?,
+                    output_tokens: r.get(at + 1)?,
+                    cache_read_tokens: r.get(at + 2)?,
+                    cache_write_tokens: r.get(at + 3)?,
+                    reasoning_tokens: r.get(at + 4)?,
+                    turns: r.get(at + 5)?,
+                    cost_usd: r.get(at + 6)?,
+                })
+            };
+            Ok(UsageWindows { key: r.get(0)?, last_hour: totals(1)?, last_day: totals(8)?, total: totals(15)?, last_at: r.get(22)? })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Tokens spent in each of `buckets` slices of `bucket_secs` ending at
+    /// `now`, oldest first: a sparkline's worth.  `agent` `None` is everyone.
+    pub fn usage_series(&self, agent: Option<&str>, now: i64, bucket_secs: i64, buckets: usize) -> Result<Vec<i64>, Error> {
+        let bucket_secs = bucket_secs.max(1);
+        let since = now - bucket_secs * buckets as i64;
+        let mut out = vec![0i64; buckets];
+        let mut st = self.conn.prepare(
+            "SELECT (at - ?1) / ?2, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
+             FROM usage_log WHERE at >= ?1 AND at < ?3 AND (?4 IS NULL OR agent_pubkey = ?4) GROUP BY 1",
+        )?;
+        let rows = st.query_map(params![since, bucket_secs, now + 1, agent], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (i, n) = row?;
+            if let Some(slot) = usize::try_from(i).ok().and_then(|i| out.get_mut(i.min(buckets.saturating_sub(1)))) {
+                *slot += n;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every plan window a harness reported, by harness then window.
+    pub fn plan_limits(&self) -> Result<Vec<PlanLimit>, Error> {
+        let mut st = self.conn.prepare("SELECT harness, window, used_pct, resets_at, updated_at FROM plan_limits ORDER BY harness, window")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (harness, window, used_pct, resets_at, updated_at) = row?;
+            // A window this build doesn't know is skipped, not an error.
+            let Ok(window) = window.parse::<LimitWindow>() else { continue };
+            out.push(PlanLimit { harness: Harness::parse(&harness), window, used_pct, resets_at, updated_at });
+        }
+        out.sort_by_key(|l| (l.harness.to_string(), LimitWindow::ALL.iter().position(|w| *w == l.window)));
+        Ok(out)
+    }
+
+    /// How full each live session's context window is.
+    pub fn session_contexts(&self) -> Result<Vec<SessionContext>, Error> {
+        let mut st = self.conn.prepare(
+            "SELECT c.session_id, c.used, c.size, c.updated_at FROM session_context c
+             JOIN sessions s ON s.id = c.session_id WHERE s.state <> 'ended' ORDER BY c.updated_at DESC",
+        )?;
+        let rows = st.query_map([], |r| Ok(SessionContext { session_id: r.get(0)?, used: r.get(1)?, size: r.get(2)?, updated_at: r.get(3)? }))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Samples at or after `since` (Unix seconds), oldest first; `session_id`

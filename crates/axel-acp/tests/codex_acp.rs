@@ -101,7 +101,7 @@ fn a_turn_streams_asks_for_approvals_and_runs() {
     let caps = init(&mut agent);
     assert_eq!(caps["agentCapabilities"]["loadSession"], true);
 
-    let (_, new) = agent.call(
+    let (new_seen, new) = agent.call(
         "session/new",
         json!({ "cwd": dir.path(), "mcpServers": [{ "name": "axel", "command": "/bin/axel", "args": ["mcp"], "env": [] }],
                 "_meta": { "systemPrompt": { "append": "You are atlas." } } }),
@@ -124,7 +124,7 @@ fn a_turn_streams_asks_for_approvals_and_runs() {
     assert_eq!(start["config"]["mcp_servers"]["axel"]["command"], "/bin/axel");
     assert_eq!(logged(&log, "initialized").len(), 1);
 
-    let (_, set) = agent.call("session/set_model", json!({ "sessionId": sid, "modelId": "gpt-big" }), |_| json!({}));
+    let (set_seen, set) = agent.call("session/set_model", json!({ "sessionId": sid, "modelId": "gpt-big" }), |_| json!({}));
     assert!(set.get("result").is_some());
 
     let mut asked = Vec::new();
@@ -133,6 +133,15 @@ fn a_turn_streams_asks_for_approvals_and_runs() {
         json!({ "outcome": { "outcome": "selected", "optionId": "approved" } })
     });
     assert_eq!(reply["result"]["stopReason"], "end_turn");
+    // The thread's first report counts its newest response only (a resumed
+    // thread's running total holds its history); input excludes the cached part.
+    let usage = &reply["result"]["usage"];
+    assert_eq!((usage["inputTokens"].as_u64(), usage["cachedReadTokens"].as_u64(), usage["outputTokens"].as_u64()), (Some(2), Some(6), Some(4)));
+    assert_eq!(reply["result"]["_meta"]["axel"]["model"], "gpt-big");
+    // The plan's limits, read as the session starts.
+    let limits = new_seen.iter().chain(&set_seen).chain(&seen).find(|m| m["method"] == "_axel/limits").expect("limits sent");
+    assert_eq!(limits["params"]["windows"][0], json!({ "window": "five_hour", "usedPercent": 42.0, "resetsAt": 1000 }));
+    assert_eq!(limits["params"]["windows"][1]["window"], "week");
 
     // Two approvals: the file change, then the command, with codex-acp's options.
     assert_eq!(asked.len(), 2);

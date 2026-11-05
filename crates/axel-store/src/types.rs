@@ -662,12 +662,107 @@ pub struct Usage {
 /// What one [`crate::Store::add_usage`] call adds.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageDelta {
+    /// Input not read from the prompt cache (cache reads and writes are
+    /// their own counts, never included here).
+    pub input_tokens: i64,
+    /// Output, reasoning included.
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    /// The part of `output_tokens` spent reasoning.
+    pub reasoning_tokens: i64,
+    pub turns: i64,
+    /// The harness's own figure when it reports one, else an estimate.
+    pub cost_usd_est: f64,
+    /// The model that did most of the work.
+    pub model: Option<String>,
+}
+
+/// Token counts and cost summed over some window.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct UsageTotals {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
+    pub reasoning_tokens: i64,
     pub turns: i64,
-    pub cost_usd_est: f64,
+    pub cost_usd: f64,
+}
+
+impl UsageTotals {
+    /// Every token the model processed: input (cached or not) and output.
+    pub fn tokens(&self) -> i64 {
+        self.input_tokens + self.output_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+}
+
+/// What one agent (or one thread) spent: in the last hour, the last 24
+/// hours, and ever.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct UsageWindows {
+    /// The agent's public key, or the thread id.
+    pub key: String,
+    pub last_hour: UsageTotals,
+    pub last_day: UsageTotals,
+    pub total: UsageTotals,
+    /// When it last spent anything (Unix seconds).
+    pub last_at: i64,
+}
+
+str_enum! {
+    /// One of a plan's usage windows, as harnesses report them.
+    LimitWindow {
+        /// The rolling five hours (Claude's and Codex's session limit).
+        FiveHour => "five_hour",
+        Week => "week",
+        /// Free and lower plans' monthly allowance.
+        Month => "month",
+    }
+}
+
+impl LimitWindow {
+    /// The window lasting `mins` minutes.
+    pub fn from_minutes(mins: u64) -> LimitWindow {
+        if mins >= 28 * 24 * 60 {
+            LimitWindow::Month
+        } else if mins >= 7 * 24 * 60 {
+            LimitWindow::Week
+        } else {
+            LimitWindow::FiveHour
+        }
+    }
+
+    /// As few characters as say it: `5h`, `wk`, `mo`.
+    pub fn short(self) -> &'static str {
+        match self {
+            LimitWindow::FiveHour => "5h",
+            LimitWindow::Week => "wk",
+            LimitWindow::Month => "mo",
+        }
+    }
+}
+
+/// How much of a plan window a harness's account has used, as it last said.
+/// Local-only: it describes the account signed in on this machine.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlanLimit {
+    pub harness: Harness,
+    pub window: LimitWindow,
+    /// 0–100.
+    pub used_pct: f64,
+    /// When the window starts over (Unix seconds).
+    pub resets_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+/// How full a session's context window is, as its harness last said.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionContext {
+    pub session_id: String,
+    pub used: i64,
+    pub size: i64,
+    pub updated_at: i64,
 }
 
 /// One usage envelope, kept for 24 hours.

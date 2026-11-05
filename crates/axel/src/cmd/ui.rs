@@ -34,6 +34,20 @@ pub const PROMPT_LABEL: &str = "why not today?";
 /// The usage HUD older versions opened beside the launcher; still closed by the toggle.
 const USAGE_LABEL: &str = "usage";
 pub const THREADS_LABEL: &str = "threads";
+/// The tokens pane beside a composer: this many columns (its summary line
+/// and a row per agent fit)…
+const DOCK_USAGE_COLS: u16 = 34;
+/// …and never more than this share of the row…
+const DOCK_USAGE_MAX_SHARE: f64 = 0.35;
+/// …and only when the composer keeps at least this many.
+const DOCK_COMPOSE_MIN_COLS: u16 = 50;
+/// The usage pane's label. Not one of the launcher's: `axel` leaves it open.
+const TOKENS_LABEL: &str = "tokens";
+/// The usage pane's size in cells: room for each agent's last hour, day,
+/// all time and cost, and a few agents.
+const TOKENS_CELLS: (f64, f64) = (48.0, 9.0);
+/// Its bounds when our pane's size is unknown.
+const TOKENS_FALLBACK: [f64; 4] = [0.66, 0.02, 0.32, 0.24];
 
 /// Harness names the new-agent form cycles through: the builtins installed on
 /// this machine, in order (all of them when none is, so the form still offers some).
@@ -102,8 +116,50 @@ fn prompt_ratio(rex: &axel_rex::Rex, prompt: &str, threads: &str, want: u16) -> 
     ((f64::from(want) + 0.5) / total).clamp(PROMPT_RATIO, PROMPT_RATIO_EXPANDED)
 }
 
+/// `axel usage`: the tokens pane in the top-right corner of this Rex window,
+/// or, when it's open, closed. Outside Rex, the same screen right here.
+pub fn toggle_usage() -> Result<()> {
+    let Some(env) = axel_rex::detect() else {
+        return run_inline(Some(ScreenArg::Usage), None);
+    };
+    let rex = axel_rex::Rex::new(env);
+    let open = floating_layers(&rex, &[TOKENS_LABEL])?;
+    if !open.is_empty() {
+        for layer in open {
+            rex.close_layer(&layer).ok();
+        }
+        return Ok(());
+    }
+    let bounds = rex
+        .terminal_size(&rex.env().block)
+        .ok()
+        .filter(|s| s.columns > 0 && s.rows > 0)
+        .map_or(TOKENS_FALLBACK, |s| corner_bounds(s.columns, s.rows));
+    let exe = std::env::current_exe().context("locating the axel binary")?.to_string_lossy().into_owned();
+    let cmd = vec![exe, "ui".into(), "--screen".into(), "usage".into()];
+    let cwd = std::env::current_dir().ok();
+    rex.new_floating_terminal_with_focus(TOKENS_LABEL, bounds, &cmd, cwd.as_deref(), &passthrough_env(), false)
+        .context("opening the usage pane in Rex")?;
+    Ok(())
+}
+
+/// [`TOKENS_CELLS`] as window fractions, in the top-right corner, from a
+/// pane of `columns` × `rows` (ours: the window is at least that big, so the
+/// pane comes out that size or a little larger). One more row for its title bar.
+fn corner_bounds(columns: u16, rows: u16) -> [f64; 4] {
+    const MARGIN: f64 = 0.01;
+    let w = (TOKENS_CELLS.0 / f64::from(columns)).clamp(0.18, 0.6);
+    let h = ((TOKENS_CELLS.1 + 1.0) / f64::from(rows)).clamp(0.12, 0.5);
+    [(1.0 - w - MARGIN).max(0.0), MARGIN * 2.0, w, h]
+}
+
 /// Floating layers in the current window whose first block is one of ours.
 fn axel_layers(rex: &axel_rex::Rex) -> Result<Vec<String>> {
+    floating_layers(rex, &[PROMPT_LABEL, "prompt", USAGE_LABEL, "axel"])
+}
+
+/// Floating layers in the current window whose first block has one of `labels`.
+fn floating_layers(rex: &axel_rex::Rex, labels: &[&str]) -> Result<Vec<String>> {
     let view = rex.view()?;
     let active = view.get("active_window_id").and_then(|w| w.as_str()).unwrap_or("");
     let mut out = Vec::new();
@@ -116,7 +172,7 @@ fn axel_layers(rex: &axel_rex::Rex) -> Result<Vec<String>> {
                 continue;
             }
             let label = layer.pointer("/blocks/0/label").and_then(|l| l.as_str()).unwrap_or("");
-            if (label == PROMPT_LABEL || label == "prompt" || label == USAGE_LABEL || label == "axel")
+            if labels.contains(&label)
                 && let Some(id) = layer.get("layer_id").and_then(|i| i.as_str()) {
                     out.push(id.to_string());
                 }
@@ -311,6 +367,7 @@ fn initial_screen(screen: Option<ScreenArg>) -> Result<Screen> {
         Some(ScreenArg::Dashboard) => Screen::Dashboard,
         Some(ScreenArg::Thread) => Screen::Dashboard,
         Some(ScreenArg::Threads) => Screen::Threads,
+        Some(ScreenArg::Usage) => Screen::Usage,
         None => {
             let ctx = Ctx::open()?;
             let owner_pk = ctx.owner()?.public().to_string();
@@ -431,7 +488,13 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread_id.to_string()];
     let mut env = passthrough_env();
     env.push(("AXEL_STREAM_BLOCK".into(), me.clone()));
-    rex.split_below(&me, COMPOSE_LABEL, &compose, DOCK_STREAM, None, &env, true)?;
+    let usage = usage_command();
+    let size = rex.terminal_size(&me).ok();
+    let width = size.as_ref().map(|s| s.columns);
+    let ids = rex.split_below_beside(&me, COMPOSE_LABEL, &compose, usage_beside(&usage, width).as_ref(), DOCK_STREAM, None, &env, true)?;
+    if let Some(compose) = ids.first() {
+        settle_thread_row(rex, &me, compose, ids.get(1).map(String::as_str), size.map(|s| s.rows), width);
+    }
     let owner_pk = ctx.owner()?.public().to_string();
     axel_tui::run_stream(&ctx.store, &owner_pk, thread_id)
 }
@@ -451,13 +514,21 @@ fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     let title = axel_tui::util::ellipsize(&thread.title, 48);
     let cwd = std::env::current_dir().ok();
     let mut env = passthrough_env();
+    let usage = usage_command();
     let ids = if let Some(origin) = reusable_origin(rex, &me) {
         env.push((ORIGIN_BLOCK_ENV.into(), origin.clone()));
-        let ids = rex.split_right_stacked(&origin, (&title, &stream), (COMPOSE_LABEL, &compose), 0.5, DOCK_STREAM, cwd.as_deref(), &env, true)?;
+        // The shell leaves once the thread is in: the column takes its width.
+        let size = rex.terminal_size(&origin).ok();
+        let width = size.as_ref().map(|s| s.columns);
+        let ids = rex.split_right_stacked(&origin, (&title, &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), 0.5, DOCK_STREAM, cwd.as_deref(), &env, true)?;
         let _ = rex.api_call("session.detach_block", serde_json::json!({ "block_id": origin }));
+        settle_thread_row(rex, &ids[0], &ids[1], ids.get(2).map(String::as_str), size.map(|s| s.rows), width);
         ids
     } else if let Some(anchor) = rex.view().ok().and_then(|v| tiled_root(&v, &me)) {
-        rex.split_right_stacked(&anchor, (&title, &stream), (COMPOSE_LABEL, &compose), DOCK_KEEP, DOCK_STREAM, cwd.as_deref(), &env, true)?
+        let width = window_columns(rex, &me).map(|w| (f64::from(w) * (1.0 - DOCK_KEEP)) as u16);
+        let ids = rex.split_right_stacked(&anchor, (&title, &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), DOCK_KEEP, DOCK_STREAM, cwd.as_deref(), &env, true)?;
+        settle_thread_row(rex, &ids[0], &ids[1], ids.get(2).map(String::as_str), None, width);
+        ids
     } else {
         // A window with nothing tiled in it: open the thread in its own tab.
         open_split_tab(ctx, thread_id)?;
@@ -532,7 +603,22 @@ fn tiled_root(view: &serde_json::Value, block: &str) -> Option<String> {
 /// The block above `block` in a top/bottom split: the stream a composer serves.
 fn block_above(view: &serde_json::Value, block: &str) -> Option<String> {
     let layout = tiled_layer_of(view, block)?.get("layout")?;
-    find_split(layout, &|_, after| after == block).map(|(before, _)| before)
+    find_split(layout, &|_, after| after == block).map(|(before, _)| before).or_else(|| above_row(layout, block))
+}
+
+/// The block above a row whose left block is `block` (a composer with the
+/// tokens pane beside it).
+fn above_row(node: &serde_json::Value, block: &str) -> Option<String> {
+    let split = node.get("split")?;
+    let id = |n: &serde_json::Value| n.get("block_id").and_then(|i| i.as_str()).map(String::from);
+    if split.get("direction").and_then(|d| d.as_str()) == Some("vertical")
+        && let (Some(before), Some(row)) = (split.get("before").and_then(id), split.get("after").and_then(|a| a.get("split")))
+        && row.get("direction").and_then(|d| d.as_str()) == Some("horizontal")
+        && row.get("before").and_then(id).as_deref() == Some(block)
+    {
+        return Some(before);
+    }
+    above_row(split.get("before")?, block).or_else(|| above_row(split.get("after")?, block))
 }
 
 /// The first vertical split, depth first, whose halves are two blocks
@@ -557,7 +643,12 @@ fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
     let label = axel_tui::util::ellipsize(&thread.title, 40);
-    let w = rex.new_window_stacked(&label, ("thread", &stream), (COMPOSE_LABEL, &compose), 0.8, None, &passthrough_env(), true)?;
+    let usage = usage_command();
+    let width = window_columns(rex, &rex.env().block);
+    let w = rex.new_window_stacked(&label, ("thread", &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), 0.8, None, &passthrough_env(), true)?;
+    if let [stream, compose, rest @ ..] = &w.block_ids[..] {
+        settle_thread_row(rex, stream, compose, rest.first().map(String::as_str), None, width);
+    }
     if let Some(b) = w.block_ids.get(1) {
         let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": b }));
     }
@@ -583,14 +674,26 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
     let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None };
     let stream = ctx.rex.as_ref().and_then(stream_block);
+    // The tokens pane opened beside us, in the same row, if there is one.
+    let usage = ctx.rex.as_ref().and_then(|rex| rex.view().ok().and_then(|v| block_beside(&v, &rex.env().block, TOKENS_LABEL)));
+    if let (Some(rex), Some(stream), Some(usage)) = (&ctx.rex, &stream, &usage) {
+        fit_usage_pane(rex, usage, stream);
+    }
+    let usage_fit = usage.clone();
     let fit = |want: u16, now: u16| {
         if let (Some(rex), Some(stream)) = (&ctx.rex, &stream) {
             fit_compose_pane(rex, stream, want, now);
+            if let Some(usage) = &usage_fit {
+                fit_usage_pane(rex, usage, stream);
+            }
         }
     };
     // A docked thread stands in for a shell: leaving brings that shell back.
     let origin = std::env::var(ORIGIN_BLOCK_ENV).ok().filter(|o| !o.is_empty());
     let leave = move |rex: &axel_rex::Rex, stream: Option<&str>| {
+        if let Some(usage) = &usage {
+            let _ = rex.api_call("block.close", serde_json::json!({ "block_id": usage }));
+        }
         if let Some(origin) = &origin {
             restore_origin(rex, origin, stream);
         }
@@ -630,6 +733,67 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
         leave(rex, stream.as_deref());
     }
     res
+}
+
+/// What the tokens pane beside a composer runs.
+fn usage_command() -> Vec<String> {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+    vec![exe, "ui".into(), "--screen".into(), "usage".into()]
+}
+
+/// The tokens pane for a composer row `columns` wide, if it has room:
+/// created with the composer, in the same layout call, so they appear together.
+fn usage_beside(command: &[String], columns: Option<u16>) -> Option<axel_rex::Beside<'_>> {
+    Some(axel_rex::Beside { label: TOKENS_LABEL, command, keep: usage_keep(columns?)? })
+}
+
+/// The share of a composer row `columns` wide that the composer keeps
+/// beside a tokens pane [`DOCK_USAGE_COLS`] wide (at most
+/// [`DOCK_USAGE_MAX_SHARE`] of it); `None` when the composer would be left
+/// under [`DOCK_COMPOSE_MIN_COLS`].
+fn usage_keep(columns: u16) -> Option<f64> {
+    let total = f64::from(columns);
+    let usage = f64::from(DOCK_USAGE_COLS).min(total * DOCK_USAGE_MAX_SHARE);
+    (total - usage >= f64::from(DOCK_COMPOSE_MIN_COLS)).then(|| (total - usage) / total)
+}
+
+/// How many columns the window holding `block` is wide, from a tiled
+/// block's columns and its share of the window's width.
+fn window_columns(rex: &axel_rex::Rex, block: &str) -> Option<u16> {
+    let view = rex.view().ok()?;
+    let layout = tiled_layer_of(&view, block)?.get("layout")?;
+    fn first(node: &serde_json::Value) -> Option<(String, f64)> {
+        if let Some(id) = node.get("block_id").and_then(|b| b.as_str()) {
+            let w = node.get("rect")?.as_array()?.get(2)?.as_f64()?;
+            return Some((id.to_string(), w));
+        }
+        let split = node.get("split")?;
+        first(split.get("before")?).or_else(|| first(split.get("after")?))
+    }
+    let (id, share) = first(layout)?;
+    let cols = rex.terminal_size(&id).ok()?.columns;
+    (share > 0.0 && cols > 0).then(|| (f64::from(cols) / share).round() as u16)
+}
+
+/// The block labelled `label` right beside `block` in a row of two.
+fn block_beside(view: &serde_json::Value, block: &str, label: &str) -> Option<String> {
+    fn walk(node: &serde_json::Value, block: &str) -> Option<String> {
+        let split = node.get("split")?;
+        let id = |n: &serde_json::Value| n.get("block_id").and_then(|i| i.as_str()).map(String::from);
+        if split.get("direction").and_then(|d| d.as_str()) == Some("horizontal")
+            && split.get("before").and_then(id).as_deref() == Some(block)
+            && let Some(after) = split.get("after").and_then(id)
+        {
+            return Some(after);
+        }
+        walk(split.get("before")?, block).or_else(|| walk(split.get("after")?, block))
+    }
+    let layer = tiled_layer_of(view, block)?;
+    let found = walk(layer.get("layout")?, block)?;
+    let labelled = layer.get("blocks")?.as_array()?.iter().any(|b| {
+        b.get("block_id").and_then(|i| i.as_str()) == Some(found.as_str()) && b.get("label").and_then(|l| l.as_str()) == Some(label)
+    });
+    labelled.then_some(found)
 }
 
 /// Show an agent's session pane right of `beside` when it's minimized
@@ -749,6 +913,8 @@ fn fit_compose_pane(rex: &axel_rex::Rex, stream_id: &str, want: u16, now: u16) {
     // This pane's rows as Rex has them, read with the layout, so both come
     // from the same moment (the composer's own size can lag a resize).
     let now = rex.terminal_size(&me).map(|s| s.rows).unwrap_or(now);
+    // Rex won't go below its least: asking for less only moves the border.
+    let want = want.max(PANE_MIN_ROWS);
     if want == now {
         return;
     }
@@ -758,14 +924,68 @@ fn fit_compose_pane(rex: &axel_rex::Rex, stream_id: &str, want: u16, now: u16) {
         None => None,
     }
     .unwrap_or_else(|| {
-        // No geometry: rows alone, aiming half a row past `want`.
+        // No geometry: rows alone, aiming a quarter row past `want`.
         let total = f64::from(sz.rows) + f64::from(now);
-        ((total - f64::from(want) - 0.5) / total).clamp(0.2, 0.95)
+        ((total - f64::from(want) - 0.25) / total).clamp(0.2, 0.95)
     });
-    let _ = rex.api_call(
+    let sent = rex.api_call(
         "session.resize_pane",
         serde_json::json!({ "direction": "vertical", "before_block_id": stream_id, "after_block_id": me, "ratio": ratio }),
     );
+    // What each fit asked and got, to see why a pane lands off its size.
+    let got = rex.terminal_size(&me).map(|s| s.rows).ok();
+    fit_log(&format!(
+        "fit want={want} now={now} stream_rows={} rects={rects:?} ratio={ratio:.4} sent={} rows_after={got:?}",
+        sz.rows,
+        if sent.is_ok() { "ok".to_string() } else { format!("{sent:?}") }
+    ));
+}
+
+/// Rows Rex gives a pane at the least: the composer can't be shorter.
+const PANE_MIN_ROWS: u16 = 5;
+
+/// Put a new thread's borders where they belong right away, from sizes we
+/// already know (the pane it replaces: `rows` tall, `width` wide), instead
+/// of the half-and-half Rex's app first lays a new split out at.  The
+/// composer then only fine-tunes.
+fn settle_thread_row(rex: &axel_rex::Rex, stream: &str, compose: &str, usage: Option<&str>, rows: Option<u16>, width: Option<u16>) {
+    if let (Some(usage), Some(keep)) = (usage, width.and_then(usage_keep)) {
+        let _ = rex.api_call(
+            "session.resize_pane",
+            serde_json::json!({ "direction": "horizontal", "before_block_id": compose, "after_block_id": usage, "ratio": keep }),
+        );
+    }
+    if let Some(rows) = rows.filter(|r| *r > PANE_MIN_ROWS * 2) {
+        let ratio = ((f64::from(rows) - f64::from(PANE_MIN_ROWS) - 0.25) / f64::from(rows)).clamp(0.5, 0.95);
+        let _ = rex.api_call(
+            "session.resize_pane",
+            serde_json::json!({ "direction": "vertical", "before_block_id": stream, "after_block_id": compose, "ratio": ratio }),
+        );
+    }
+}
+
+/// The tokens pane beside this composer at its width: Rex's app lays a new
+/// row out on its own, so the border is put where it belongs once we're up
+/// (and again on each fit).
+fn fit_usage_pane(rex: &axel_rex::Rex, usage: &str, stream: &str) {
+    let me = rex.env().block.clone();
+    // 80×24 is a pane Rex hasn't laid out yet: its width says nothing.
+    let size = rex.terminal_size(stream).ok().filter(|s| (s.columns, s.rows) != (80, 24));
+    let Some(keep) = size.and_then(|s| usage_keep(s.columns)) else { return };
+    let sent = rex.api_call(
+        "session.resize_pane",
+        serde_json::json!({ "direction": "horizontal", "before_block_id": me, "after_block_id": usage, "ratio": keep }),
+    );
+    fit_log(&format!("usage keep={keep:.4} sent={}", if sent.is_ok() { "ok".to_string() } else { format!("{sent:?}") }));
+}
+
+/// A line in `~/.axel/logs/compose-fit.log`.
+fn fit_log(line: &str) {
+    use std::io::Write;
+    let path = crate::paths::home().join("logs").join("compose-fit.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{} {line}", chrono::Local::now().format("%H:%M:%S%.3f"));
+    }
 }
 
 /// The split ratio (share of the pair's height for the pane above) that gives
@@ -785,8 +1005,9 @@ fn split_ratio_for(above: (f64, u16), below: (f64, u16), want: u16) -> Option<f6
     if !(k.is_finite() && k >= 10.0 && (0.0..=8.0).contains(&c)) {
         return None;
     }
-    // Half a row past `want`, so Rex rounding the split lands on it.
-    let below_h = (f64::from(want) + c + 0.5) / k;
+    // A quarter row past `want`: Rex rounding the split, down or to the
+    // nearest row, lands on it. (Half a row rounded up to a spare row.)
+    let below_h = (f64::from(want) + c + 0.25) / k;
     Some((1.0 - below_h / (ha + hb)).clamp(0.2, 0.95))
 }
 
@@ -1047,13 +1268,46 @@ mod dock_tests {
         // A 40-row window, title bars of a row per pane: the conversation has
         // 0.8 of it (32 → 31 rows), the composer 0.2 (8 → 7 rows).
         let r = split_ratio_for((0.8, 31), (0.2, 7), 9).unwrap();
-        // 9 rows + its title bar + half a row is 10.5 of 40: 0.2625 of the pair.
-        assert!((r - (1.0 - 10.5 / 40.0)).abs() < 1e-9, "{r}");
-        // Shrinking back: 7 rows asks for the 0.2 it has, give or take the half row.
+        // 9 rows + its title bar + a quarter row is 10.25 of 40.
+        assert!((r - (1.0 - 10.25 / 40.0)).abs() < 1e-9, "{r}");
+        // Shrinking back: 7 rows asks for the 0.2 it has, give or take the quarter row.
         let back = split_ratio_for((0.75, 29), (0.25, 9), 7).unwrap();
-        assert!((back - (1.0 - 8.5 / 40.0)).abs() < 1e-9, "{back}");
+        assert!((back - (1.0 - 8.25 / 40.0)).abs() < 1e-9, "{back}");
+        // Rounded to the nearest row, or down, that is exactly 9 rows, not a spare 10th.
+        let rows = |ratio: f64| (1.0 - ratio) * 40.0 - 1.0;
+        assert_eq!((rows(r).round(), rows(r).floor()), (9.0, 9.0));
         assert_eq!(split_ratio_for((0.5, 19), (0.5, 19), 5), None, "equal panes: can't tell rows from chrome");
         assert_eq!(split_ratio_for((0.85, 54), (0.15, 54), 4), None, "a reading from mid-resize: not trusted");
+    }
+
+    #[test]
+    fn the_tokens_pane_beside_the_composer_is_34_columns() {
+        let keep = usage_keep(160).unwrap();
+        assert!((keep - 126.0 / 160.0).abs() < 1e-9, "{keep}");
+        assert!((usage_keep(120).unwrap() - 86.0 / 120.0).abs() < 1e-9, "a 120-column row: 34 of it, not half");
+        // Never more than 35% of the row.
+        assert!((usage_keep(80).unwrap() - 0.65).abs() < 1e-9);
+        assert_eq!(usage_keep(70), None, "a narrow composer keeps its width");
+    }
+
+    #[test]
+    fn the_composer_finds_its_stream_and_tokens_pane_in_a_row() {
+        let view = serde_json::json!({ "windows": [{ "layers": [{ "kind": "tiled",
+            "blocks": [{ "block_id": "S", "label": "thread" }, { "block_id": "C", "label": "compose" }, { "block_id": "U", "label": "tokens" }],
+            "layout": { "split": { "direction": "vertical", "before": { "block_id": "S" },
+                "after": { "split": { "direction": "horizontal", "before": { "block_id": "C" }, "after": { "block_id": "U" } } } } } }] }] });
+        assert_eq!(block_above(&view, "C").as_deref(), Some("S"));
+        assert_eq!(block_beside(&view, "C", "tokens").as_deref(), Some("U"));
+        assert_eq!(block_beside(&view, "C", "other"), None, "only the tokens pane");
+    }
+
+    #[test]
+    fn the_usage_pane_sits_in_the_top_right_corner() {
+        let [x, y, w, h] = corner_bounds(200, 50);
+        assert!((w - 48.0 / 200.0).abs() < 1e-9 && (h - 10.0 / 50.0).abs() < 1e-9, "48×9 cells and a title bar");
+        assert!((x + w - 0.99).abs() < 1e-9 && y < 0.05, "against the right edge, at the top");
+        let [x, _, w, h] = corner_bounds(60, 12);
+        assert!(w <= 0.6 && h <= 0.5 && x >= 0.0, "a small window keeps room for the rest: {w} {h}");
     }
 
     #[test]

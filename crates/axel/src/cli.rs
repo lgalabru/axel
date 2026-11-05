@@ -106,6 +106,9 @@ pub enum Command {
     /// The built-in Codex ACP agent (what managed Codex sessions run).
     #[command(name = "codex-acp", hide = true)]
     CodexAcp,
+    /// Show the tokens each agent spent, in the top-right corner of this
+    /// Rex window (again to hide it); outside Rex, right here.
+    Usage,
     /// Check Rex, keystore and database health.
     Doctor,
     /// `axel-links://` links (a click on a run of tool calls opens its details).
@@ -378,6 +381,8 @@ pub enum ScreenArg {
     Thread,
     /// Recent threads (the pane under the prompt).
     Threads,
+    /// Tokens spent per agent (the corner pane).
+    Usage,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]

@@ -101,6 +101,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             inbox::send(&text.join(" "), &to, kind)
         }
         Some(Command::Inbox { agent, json }) => inbox::show(agent.as_deref(), json),
+        Some(Command::Usage) => ui::toggle_usage(),
         Some(Command::Doctor) => doctor::run(),
         Some(Command::Mcp) => mcp::run(),
         Some(Command::Links { command: crate::cli::LinksCommand::Install }) => {

@@ -47,6 +47,7 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use crate::agent_rpc::{Client, Lines, RpcError, RpcResult};
+use crate::usage::{ClaudeMeter, claude_limits, limits_params};
 
 /// One Claude Code process and what we know about its conversation.
 struct Session {
@@ -70,6 +71,8 @@ struct Session {
     /// sent into it that Claude hasn't taken in yet (our uuid → the host's
     /// message id). One lock, so a steer can't slip in as the turn ends.
     steering: Mutex<Steering>,
+    /// What the turn spent, from Claude's messages and results.
+    meter: Mutex<ClaudeMeter>,
 }
 
 /// Messages sent into a running turn (`_axel/steer`). Claude takes each in
@@ -367,6 +370,7 @@ impl Agent {
             tool_uses: Mutex::new(HashMap::new()),
             hooked: Mutex::new(HashSet::new()),
             steering: Mutex::new(Steering::default()),
+            meter: Mutex::new(ClaudeMeter::default()),
         });
         self.spawn_reader(session.clone(), stdout, tx);
         self.sessions.lock().expect("sessions lock").insert(session_id.clone(), session.clone());
@@ -704,10 +708,18 @@ impl Agent {
         session.cancelled.store(false, Ordering::SeqCst);
         session.steering.lock().expect("steering lock").prompting = true;
         let result = self.relay_prompt(&session, params);
-        let mut steering = session.steering.lock().expect("steering lock");
-        steering.prompting = false;
-        steering.pending.clear();
-        result
+        {
+            let mut steering = session.steering.lock().expect("steering lock");
+            steering.prompting = false;
+            steering.pending.clear();
+        }
+        // The prompt's spend goes in its reply; a failed one's counts toward the next.
+        let Ok(reply) = result else { return result };
+        let mut meter = session.meter.lock().expect("meter lock");
+        if let Some((used, size)) = meter.context() {
+            self.client.update(&session.id, json!({ "sessionUpdate": "usage_update", "used": used, "size": size }));
+        }
+        Ok(meter.take().into_reply(reply))
     }
 
     fn relay_prompt(&self, session: &Arc<Session>, params: &Value) -> RpcResult {
@@ -722,9 +734,16 @@ impl Agent {
                 return Err(RpcError::invalid("Session did not end in result"));
             };
             match message.get("type").and_then(Value::as_str).unwrap_or("") {
-                // `rate_limit_event` is newer than the adapter; neither acts on it.
-                "system" | "tool_progress" | "tool_use_summary" | "auth_status" | "rate_limit_event" => {}
+                "system" | "tool_progress" | "tool_use_summary" | "auth_status" => {}
+                // How much of the plan's windows the account has used.
+                "rate_limit_event" => {
+                    let limits = claude_limits(&message);
+                    if !limits.is_empty() {
+                        self.client.notify("_axel/limits", limits_params(&limits));
+                    }
+                }
                 "result" => {
+                    session.meter.lock().expect("meter lock").on_result(&message);
                     if session.cancelled.load(Ordering::SeqCst) {
                         return Ok(json!({ "stopReason": "cancelled" }));
                     }
@@ -789,6 +808,9 @@ impl Agent {
                     }
                 }
                 kind @ ("user" | "assistant") => {
+                    if kind == "assistant" {
+                        session.meter.lock().expect("meter lock").on_assistant(&message);
+                    }
                     if session.cancelled.load(Ordering::SeqCst) {
                         continue;
                     }

@@ -41,6 +41,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::agent_rpc::{Client, Lines, RpcError, RpcResult};
+use crate::usage::{CodexMeter, codex_limits, limits_params};
 
 /// codex-acp's `/init` prompt.
 const INIT_PROMPT: &str = include_str!("init_prompt.md");
@@ -103,6 +104,8 @@ struct Session {
     mode: Mutex<String>,
     model: Mutex<Option<String>>,
     turn: Mutex<Option<String>>,
+    /// What each turn spent, from Codex's token reports.
+    meter: Mutex<CodexMeter>,
 }
 
 struct Agent {
@@ -282,8 +285,21 @@ impl Agent {
             mode: Mutex::new("default".into()),
             model: Mutex::new(None),
             turn: Mutex::new(None),
+            meter: Mutex::new(CodexMeter::new(current_model.clone())),
         });
         self.sessions.lock().expect("sessions lock").insert(thread_id.clone(), session.clone());
+        // Where the plan's limits stand, without holding up the session.
+        {
+            let (codex, client) = (codex.clone(), self.client.clone());
+            std::thread::spawn(move || {
+                if let Ok(reply) = codex.request("account/rateLimits/read", Value::Null, Duration::from_secs(30)) {
+                    let limits = codex_limits(&reply);
+                    if !limits.is_empty() {
+                        client.notify("_axel/limits", limits_params(&limits));
+                    }
+                }
+            });
+        }
 
         if resume.is_some() {
             let mut items = Items::default();
@@ -347,7 +363,13 @@ impl Agent {
         *s.turn.lock().expect("turn lock") = turn_id.clone();
         let result = self.relay(&s, turn_id.as_deref());
         *s.turn.lock().expect("turn lock") = None;
-        result
+        // The turn's spend goes in its reply; a failed one's counts toward the next.
+        let reply = result?;
+        let mut meter = s.meter.lock().expect("meter lock");
+        if let Some(m) = s.model.lock().expect("model lock").clone() {
+            meter.model = Some(m);
+        }
+        Ok(meter.take().into_reply(reply))
     }
 
     /// Relay Codex's events for a turn to the client until `turn/completed`.
@@ -397,8 +419,10 @@ impl Agent {
                         .collect();
                     self.client.update(&s.id, json!({ "sessionUpdate": "plan", "entries": entries }));
                 }
+                "account/rateLimits/updated" => self.notify_limits(&p),
                 "thread/tokenUsage/updated" => {
                     let usage = p.get("tokenUsage").cloned().unwrap_or(Value::Null);
+                    s.meter.lock().expect("meter lock").observe(&usage);
                     if let Some(size) = usage.get("modelContextWindow").and_then(Value::as_u64) {
                         let used = usage.pointer("/last/totalTokens").and_then(Value::as_u64).unwrap_or(0);
                         self.client.update(&s.id, json!({ "sessionUpdate": "usage_update", "used": used, "size": size }));
@@ -424,6 +448,14 @@ impl Agent {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Tell the host where the plan's limits stand.
+    fn notify_limits(&self, params: &Value) {
+        let limits = codex_limits(params);
+        if !limits.is_empty() {
+            self.client.notify("_axel/limits", limits_params(&limits));
         }
     }
 

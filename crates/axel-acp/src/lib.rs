@@ -20,6 +20,7 @@ mod host;
 pub mod log;
 pub mod policy;
 pub mod socket;
+pub mod usage;
 mod transport;
 
 pub use adapter::{adapter_command, env_var_name, shell_split};

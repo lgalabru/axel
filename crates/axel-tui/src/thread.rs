@@ -1215,15 +1215,25 @@ pub(crate) mod fixtures {
         }
     }
 
+    /// A tool call with the input its harness would send for that title:
+    /// `Read src/a.rs`, `Grep pattern`, `` `command` ``.
     pub fn tool(id: &str, title: &str, kind: &str, at_ms: i64) -> ThreadItem {
+        let rest = title.split_once(' ').map(|(_, r)| r).unwrap_or("");
+        let raw = match kind {
+            "execute" => serde_json::json!({ "command": title.trim_matches('`') }),
+            "search" => serde_json::json!({ "pattern": rest, "path": "src" }),
+            _ => serde_json::json!({ "file_path": rest }),
+        };
         item(
             id,
             ItemKind::ToolCall,
             ItemBody::Tool {
                 title: title.into(),
                 kind: Some(kind.into()),
-                input: format!("{{\"path\":\"{title}\"}}"),
+                input: raw.to_string(),
                 output: (1..=20).map(|i| format!("line {i}")).collect(),
+                summary: crate::tools::describe_line(title, Some(kind), &raw),
+                actions: crate::tools::describe_all(title, Some(kind), &raw),
             },
             at_ms,
         )
@@ -1240,7 +1250,7 @@ pub(crate) mod fixtures {
             tool("t2", "Read src/login.rs", "read", 3_400),
             tool("t3", "Grep session_token", "search", 3_900),
             tool("t4", "Edit src/login.rs", "edit", 4_800),
-            tool("t5", "Run cargo test", "execute", 6_200),
+            tool("t5", "`cargo test`", "execute", 6_200),
             item(
                 "p1",
                 ItemKind::Permission,

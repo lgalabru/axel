@@ -39,7 +39,7 @@ doc = false
 axel-identity.workspace = true
 axel-rex.workspace = true
 axel-store.workspace = true
-agent-client-protocol = "3"
+agent-client-protocol = { version = "3", features = ["unstable_end_turn_token_usage"] }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

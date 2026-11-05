@@ -53,6 +53,9 @@ fn main() {
                 { "type": "commandExecution", "id": "c0", "command": "ls", "cwd": "/w", "status": "completed", "exitCode": 0, "aggregatedOutput": "a\n",
                   "commandActions": [{ "type": "listFiles", "command": "ls" }] }
             ] }] }, "model": "gpt-test" })),
+            "account/rateLimits/read" => reply(json!({ "rateLimits": { "limitId": "codex", "planType": "plus",
+                "primary": { "usedPercent": 42.0, "windowDurationMins": 300, "resetsAt": 1000 },
+                "secondary": { "usedPercent": 7.0, "windowDurationMins": 10080, "resetsAt": 2000 } } })),
             "model/list" => reply(json!({ "data": [
                 { "id": "gpt-test", "displayName": "GPT Test", "description": "fast", "hidden": false, "isDefault": true },
                 { "id": "gpt-big", "displayName": "GPT Big", "description": "smart", "hidden": false, "isDefault": false },
@@ -107,7 +110,10 @@ fn main() {
                 ended["exitCode"] = if accepted { json!(0) } else { Value::Null };
                 note("item/completed", json!({ "item": ended }));
                 note("turn/plan/updated", json!({ "plan": [{ "step": "write", "status": "completed" }, { "step": "read", "status": "inProgress" }] }));
-                note("thread/tokenUsage/updated", json!({ "tokenUsage": { "total": { "totalTokens": 30 }, "last": { "totalTokens": 12 }, "modelContextWindow": 1000 } }));
+                note("thread/tokenUsage/updated", json!({ "tokenUsage": {
+                    "total": { "inputTokens": 20, "cachedInputTokens": 15, "outputTokens": 10, "reasoningOutputTokens": 4, "totalTokens": 30 },
+                    "last": { "inputTokens": 8, "cachedInputTokens": 6, "outputTokens": 4, "reasoningOutputTokens": 1, "totalTokens": 12 },
+                    "modelContextWindow": 1000 } }));
                 note("item/completed", json!({ "item": { "type": "agentMessage", "id": "m2", "text": "DONE" } }));
                 let status = if accepted { "completed" } else { "failed" };
                 note("turn/completed", json!({ "threadId": THREAD, "turn": { "id": turn, "status": status, "error": if accepted { Value::Null } else { json!({ "message": "command refused" }) } } }));

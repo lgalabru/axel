@@ -8,6 +8,8 @@ use ratatui::text::{Line, Span};
 
 /// Inline code and fenced blocks.
 pub const CODE: Color = Color::Indexed(110);
+/// Behind code and tables: a shade darker than the terminal's own.
+pub const CODE_BG: Color = Color::Rgb(7, 9, 13);
 
 /// One character and its style.
 type Cell = (char, Style);
@@ -15,25 +17,43 @@ type Cell = (char, Style);
 /// `text` as lines at most `width` columns wide.
 pub fn md_lines(text: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     let width = width.max(8);
-    let code = base.fg(CODE);
+    let code = base.fg(CODE).bg(CODE_BG);
+    let block_bg = base.bg(CODE_BG);
     let mut out = Vec::new();
     let mut fenced = false;
-    for raw in text.split('\n') {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let raw = lines[i];
+        i += 1;
         let trimmed = raw.trim_start();
+        // | a | b |, then | --- | --- |: a table, up to its last `|` row.
+        if !fenced && trimmed.starts_with('|') && lines.get(i).is_some_and(|l| is_rule(l)) {
+            let mut end = i + 1;
+            while lines.get(end).is_some_and(|l| l.trim_start().starts_with('|')) {
+                end += 1;
+            }
+            out.extend(table(raw, lines[i], &lines[i + 1..end], width, block_bg, code));
+            i = end;
+            continue;
+        }
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             fenced = !fenced;
             continue;
         }
         if fenced {
             // Kept as written, spaces and all, broken only at the width.
+            // On the darker ground, filled to the width so it reads as a block.
             let cells: Vec<Cell> = raw.chars().map(|c| (c, code)).collect();
-            for chunk in cells.chunks(width.saturating_sub(2).max(1)) {
-                let mut line = vec![(' ', base), (' ', base)];
+            let room = width.saturating_sub(2).max(1);
+            for chunk in cells.chunks(room) {
+                let mut line = vec![(' ', block_bg), (' ', block_bg)];
                 line.extend_from_slice(chunk);
+                line.extend(std::iter::repeat_n((' ', block_bg), room - chunk.len()));
                 out.push(to_line(&line));
             }
             if cells.is_empty() {
-                out.push(Line::from(""));
+                out.push(to_line(&vec![(' ', block_bg); width]));
             }
             continue;
         }
@@ -159,11 +179,142 @@ fn closes_single(chars: &[char], from: usize, marker: char) -> bool {
     })
 }
 
+/// A table's `| --- | :---: |` line.
+fn is_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+/// How a column lines up, from its rule cell.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+/// A table row's cells, split at the `|`s outside code (and not escaped).
+fn row_cells(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let mut cells = vec![String::new()];
+    let mut code = false;
+    let mut chars = t.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                cells.last_mut().unwrap().push('|');
+                chars.next();
+            }
+            '`' => {
+                code = !code;
+                cells.last_mut().unwrap().push(c);
+            }
+            '|' if !code => cells.push(String::new()),
+            _ => cells.last_mut().unwrap().push(c),
+        }
+    }
+    // The closing `|` leaves an empty cell behind.
+    if cells.len() > 1 && cells.last().is_some_and(|c| c.trim().is_empty()) {
+        cells.pop();
+    }
+    cells.into_iter().map(|c| c.trim().to_string()).collect()
+}
+
+/// A table as aligned columns: the header bold, a rule under it, columns
+/// split by `│`. Columns too wide for `width` share it, widest first, and
+/// their text wraps within the column.
+fn table(header: &str, rule: &str, body: &[&str], width: usize, base: Style, code: Style) -> Vec<Line<'static>> {
+    let aligns: Vec<Align> = row_cells(rule)
+        .iter()
+        .map(|c| match (c.starts_with(':'), c.ends_with(':')) {
+            (true, true) => Align::Center,
+            (false, true) => Align::Right,
+            _ => Align::Left,
+        })
+        .collect();
+    let bold = base.add_modifier(Modifier::BOLD);
+    let mut rows: Vec<Vec<Vec<Cell>>> = vec![row_cells(header).iter().map(|c| inline(c, bold, code.add_modifier(Modifier::BOLD))).collect()];
+    rows.extend(body.iter().map(|l| row_cells(l).iter().map(|c| inline(c, base, code)).collect()));
+    let n = rows.iter().map(Vec::len).max().unwrap_or(0).max(aligns.len());
+    for r in &mut rows {
+        r.resize(n, Vec::new());
+    }
+    if n == 0 {
+        return Vec::new();
+    }
+    // Widths: each column's longest cell, then the widest ones shrunk until
+    // the row fits (down to a few columns each).
+    let mut widths: Vec<usize> = (0..n).map(|c| rows.iter().map(|r| r[c].len()).max().unwrap_or(0).max(1)).collect();
+    let room = width.saturating_sub(3 * (n - 1));
+    const MIN: usize = 6;
+    while widths.iter().sum::<usize>() > room {
+        let (at, w) = widths.iter().copied().enumerate().max_by_key(|(_, w)| *w).unwrap();
+        if w <= MIN {
+            break;
+        }
+        widths[at] -= 1;
+    }
+    let dim = base.add_modifier(Modifier::DIM);
+    let mut out = Vec::new();
+    for (ri, row) in rows.iter().enumerate() {
+        let wrapped: Vec<Vec<Vec<Cell>>> = row.iter().zip(&widths).map(|(cell, w)| wrap_words(cell, *w)).collect();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for li in 0..height {
+            let mut line: Vec<Cell> = Vec::new();
+            for (c, w) in widths.iter().enumerate() {
+                if c > 0 {
+                    line.extend([(' ', base), ('│', dim), (' ', base)]);
+                }
+                let text = wrapped[c].get(li).map(Vec::as_slice).unwrap_or(&[]);
+                let gap = w.saturating_sub(text.len());
+                let (before, after) = match aligns.get(c).copied().unwrap_or(Align::Left) {
+                    Align::Left => (0, gap),
+                    Align::Right => (gap, 0),
+                    Align::Center => (gap / 2, gap - gap / 2),
+                };
+                line.extend((0..before).map(|_| (' ', base)));
+                line.extend_from_slice(text);
+                // No trailing spaces after the last column.
+                if c + 1 < n {
+                    line.extend((0..after).map(|_| (' ', base)));
+                }
+            }
+            out.push(to_line(&line));
+        }
+        if ri == 0 {
+            let mut line: Vec<Cell> = Vec::new();
+            for (c, w) in widths.iter().enumerate() {
+                if c > 0 {
+                    line.extend([('─', dim), ('┼', dim), ('─', dim)]);
+                }
+                line.extend((0..*w).map(|_| ('─', dim)));
+            }
+            out.push(to_line(&line));
+        }
+    }
+    out
+}
+
 /// Word-wrap styled text to `width`, `prefix` before the first line and as
 /// much space before the rest (so a list item's lines line up under its text).
 fn wrap_cells(prefix: &[Cell], cells: &[Cell], width: usize) -> Vec<Line<'static>> {
     let hang: Vec<Cell> = prefix.iter().map(|(_, s)| (' ', *s)).collect();
     let room = width.saturating_sub(prefix.len()).max(4);
+    wrap_words(cells, room)
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut full = if i == 0 { prefix.to_vec() } else { hang.clone() };
+            full.extend(l);
+            to_line(&full)
+        })
+        .collect()
+}
+
+/// Styled text word-wrapped to lines of at most `room` cells.
+fn wrap_words(cells: &[Cell], room: usize) -> Vec<Vec<Cell>> {
+    let room = room.max(1);
     let mut lines: Vec<Vec<Cell>> = Vec::new();
     let mut cur: Vec<Cell> = Vec::new();
     // Words, each with the space cell that came before it (its own style).
@@ -199,14 +350,6 @@ fn wrap_cells(prefix: &[Cell], cells: &[Cell], width: usize) -> Vec<Line<'static
     }
     lines.push(cur);
     lines
-        .into_iter()
-        .enumerate()
-        .map(|(i, l)| {
-            let mut full = if i == 0 { prefix.to_vec() } else { hang.clone() };
-            full.extend(l);
-            to_line(&full)
-        })
-        .collect()
 }
 
 /// Cells as a line, runs of one style as one span.
@@ -273,8 +416,48 @@ mod tests {
 
     #[test]
     fn a_fenced_block_keeps_its_spacing_and_drops_its_fences() {
-        let l = md_lines("run:\n```sh\n  cargo test  -p axel\n```\nthen", 200, Style::default());
-        assert_eq!(text(&l), vec!["run:", "    cargo test  -p axel", "then"]);
-        assert_eq!(span(&l, "  cargo test  -p axel").style.fg, Some(CODE));
+        let l = md_lines("run:\n```sh\n  cargo test  -p axel\n```\nthen", 40, Style::default());
+        let rows = text(&l);
+        assert_eq!(rows[1].trim_end(), "    cargo test  -p axel");
+        assert_eq!((rows[0].as_str(), rows[2].as_str()), ("run:", "then"));
+        assert_eq!(rows[1].chars().count(), 40, "filled to the width: a block");
+        let code = span(&l, "  cargo test  -p axel").style;
+        assert_eq!((code.fg, code.bg), (Some(CODE), Some(CODE_BG)), "on the darker ground");
+    }
+
+    #[test]
+    fn a_table_is_drawn_as_aligned_columns() {
+        let md = "before\n| | Message | Thinking |\n| --- | --- | ---: |\n| Who sees it | The user | **Nobody** |\n| Here | `text` | pill |\nafter";
+        let l = md_lines(md, 200, Style::default());
+        assert_eq!(
+            text(&l),
+            vec![
+                "before",
+                "            │ Message  │ Thinking",
+                "────────────┼──────────┼─────────",
+                "Who sees it │ The user │   Nobody",
+                "Here        │ text     │     pill",
+                "after",
+            ]
+        );
+        assert!(span(&l, "Message").style.add_modifier.contains(Modifier::BOLD), "the header is bold");
+        assert!(span(&l, "Nobody").style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(span(&l, "text").style.fg, Some(CODE));
+    }
+
+    #[test]
+    fn a_table_too_wide_wraps_within_its_columns() {
+        let md = "| a | b |\n| - | - |\n| one | the quick brown fox jumps over the lazy dog |";
+        let l = md_lines(md, 20, Style::default());
+        assert!(text(&l).iter().all(|r| r.chars().count() <= 20), "{:?}", text(&l));
+        assert_eq!(text(&l)[2], "one │ the quick");
+        assert_eq!(text(&l)[3], "    │ brown fox");
+    }
+
+    #[test]
+    fn pipes_in_code_or_escaped_stay_in_their_cell() {
+        assert_eq!(row_cells("| `a|b` | c \\| d |"), vec!["`a|b`", "c | d"]);
+        // A lone `|` line with no rule under it is just text.
+        assert_eq!(text(&md_lines("| not a table", 80, Style::default())), vec!["| not a table"]);
     }
 }

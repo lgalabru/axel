@@ -161,6 +161,22 @@ fn continues_speaker(items: &[ThreadItem], i: usize) -> bool {
     items[..i].iter().rev().find(|it| it.kind != ItemKind::TurnEnd).and_then(speaker).is_some_and(|prev| prev == me)
 }
 
+/// The badge over item `i`, a blank line above it so each new message
+/// stands apart (except right after your own, which ends in one), or
+/// nothing when the same speaker goes on.
+fn header_lines(items: &[ThreadItem], i: usize, base: Style, width: usize) -> Vec<Line<'static>> {
+    if continues_speaker(items, i) {
+        return Vec::new();
+    }
+    let Some(h) = speaker_header(&items[i], base, width) else { return Vec::new() };
+    let after_yours = items[..i]
+        .iter()
+        .rev()
+        .find(|it| it.kind != ItemKind::TurnEnd)
+        .is_none_or(|it| it.kind == ItemKind::UserMessage && it.agent.is_none() && it.author.is_none() && it.relay_to.is_none());
+    if after_yours { vec![h] } else { vec![Line::from(""), h] }
+}
+
 pub fn speaker_header(it: &ThreadItem, base: Style, width: usize) -> Option<Line<'static>> {
     let (name, color) = match (&it.agent, &it.author) {
         (Some((name, color)), _) => (name.clone(), theme::agent_color(*color)),
@@ -279,25 +295,21 @@ pub fn one_line(s: &str) -> String {
     if lines.next().is_some() { format!("{first} …") } else { first.to_string() }
 }
 
-/// `read ×2, edit, execute` from the tool kinds (titles' first word when kinds are unknown).
-pub fn fold_summary(items: &[&ThreadItem]) -> String {
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    for it in items {
-        let key = match &it.body {
-            ItemBody::Tool { kind: Some(k), .. } => k.to_lowercase(),
-            ItemBody::Tool { title, .. } => title.split_whitespace().next().unwrap_or("tool").to_lowercase(),
-            _ => "tool".into(),
-        };
-        match counts.iter_mut().find(|(k, _)| *k == key) {
-            Some(e) => e.1 += 1,
-            None => counts.push((key, 1)),
-        }
+/// What a run of tool calls did, in at most `room` characters: one call's
+/// own words, or every call's actions merged by verb ([`crate::tools::summarize`]).
+pub fn fold_summary(items: &[&ThreadItem], room: usize) -> String {
+    let calls: Vec<(&String, &Vec<crate::tools::Action>)> = items
+        .iter()
+        .filter_map(|it| match &it.body {
+            ItemBody::Tool { summary, actions, .. } => Some((summary, actions)),
+            _ => None,
+        })
+        .collect();
+    if let [(summary, _)] = calls[..] {
+        return summary.clone();
     }
-    counts
-        .into_iter()
-        .map(|(k, n)| if n > 1 { format!("{k} ×{n}") } else { k })
-        .collect::<Vec<_>>()
-        .join(", ")
+    let actions: Vec<crate::tools::Action> = calls.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
+    crate::tools::summarize(&actions, room)
 }
 
 /// Lines for one visible row. `selected` paints the background when the timeline has focus.
@@ -331,7 +343,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 (ItemKind::UserMessage, ItemBody::Text(t)) if it.relay_to.is_some() => {
                     // One agent to another: under the sender's badge (unless its
                     // previous message already shows it), marked and set off.
-                    let mut lines: Vec<Line<'static>> = if continues_speaker(items, *i) { Vec::new() } else { speaker_header(it, base, width).into_iter().collect() };
+                    let mut lines = header_lines(items, *i, base, width);
                     let to = it.relay_to.clone().unwrap_or_default();
                     lines.push(Line::from(vec![Span::styled("→ ", dim), Span::styled(to.to_lowercase(), dim.bold())]));
                     let gutter = Span::styled(RELAY_GUTTER, dim);
@@ -347,7 +359,10 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                     let mut lines = user_lines(prefix, t.trim(), width, base, &mention_names(&v.data));
                     match speaker_header(it, base, width) {
                         // Another participant: header line, text below.
-                        Some(h) => lines.insert(0, h),
+                        Some(_) => {
+                            let head = header_lines(items, *i, base, width);
+                            lines.splice(0..0, head);
+                        }
                         // You: no badge, the time on your first line.
                         None => {
                             if let Some(first) = lines.first_mut() {
@@ -372,7 +387,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 (_, ItemBody::Text(t)) => {
                     // Agent: header line (badge + time), the response starts below
                     // it. Right after its own message, the same agent goes on under it.
-                    let mut lines: Vec<Line<'static>> = if continues_speaker(items, *i) { Vec::new() } else { speaker_header(it, base, width).into_iter().collect() };
+                    let mut lines = header_lines(items, *i, base, width);
                     // Agents write Markdown: show it styled, its markers dropped.
                     lines.extend(super::markdown::md_lines(&clean_text(t), width, base));
                     lines
@@ -403,22 +418,26 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
             let failed = tools.iter().any(|t| matches!(t.status, Some(ItemStatus::Failed)));
             let running = tools.iter().any(|t| matches!(t.status, Some(ItemStatus::Running | ItemStatus::Pending)));
             let marker = if selected { base.fg(theme::ACCENT) } else { dim };
-            let mut text = format!("{n} tool call{} · {}", if n == 1 { "" } else { "s" }, duration_label(dur.max(0)));
-            if n == 1
-                && let ItemBody::Tool { title, .. } = &tools[0].body
-            {
-                // A command's title is the command: its first line, on one row.
-                text.push_str(&format!(" · {}", one_line(title)));
-            } else {
-                text.push_str(&format!(" · {}", fold_summary(&tools)));
+            // What the calls did first, in the room the rest leaves:
+            // "Read send.rs, main.rs, search for “x” · 4 calls · 12.4s".
+            let mut tail = String::new();
+            // A lone call has no span to time.
+            if n > 1 {
+                tail.push_str(&format!(" · {n} calls · {}", duration_label(dur.max(0))));
             }
             if running {
-                text.push_str(" · running");
+                tail.push_str(" · running");
             }
             if failed {
-                text.push_str(" · failed");
+                tail.push_str(" · failed");
             }
-            vec![Line::from(vec![Span::styled("▸ ", marker), Span::styled(ellipsize(&text, width.saturating_sub(2)), dim)])]
+            let room = width.saturating_sub(2 + tail.chars().count()).max(12);
+            let what = fold_summary(&tools, room);
+            vec![Line::from(vec![
+                Span::styled("▸ ", marker),
+                Span::styled(ellipsize(&what, room), base),
+                Span::styled(ellipsize(&tail, width.saturating_sub(2 + what.chars().count().min(room))), dim),
+            ])]
         }
         Row::Tool { idx, .. } => {
             let it = &items[*idx];
@@ -429,8 +448,13 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 ItemStatus::Completed | ItemStatus::Allowed | ItemStatus::Answered => theme::OK,
                 ItemStatus::Cancelled => theme::DIM,
             });
+            // What it did, then (dim) what it ran: the command, or its input.
             let (title, input, output) = match &it.body {
-                ItemBody::Tool { title, input, output, .. } => (title.clone(), input.clone(), output.clone()),
+                ItemBody::Tool { title, input, output, summary, .. } => {
+                    let ran = one_line(title.trim_matches('`'));
+                    let detail = if summary.as_str() != ran && !ran.is_empty() { ran } else { input.clone() };
+                    (summary.clone(), detail, output.clone())
+                }
                 _ => ("tool".into(), String::new(), Vec::new()),
             };
             let head = format!("  {} ", status.glyph());
@@ -695,14 +719,14 @@ pub fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(usize, u
     (rows, at)
 }
 
-/// Composer height: rule · text rows · chips row · rule · footer.
+/// Composer height: text rows · chips row · rule · footer.
 pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
     // The composer pane is sized to its text (see `compose::desired_height`):
     // it always takes up to the most rows, so the size it asks for and the
     // size it draws agree. In the full view, a short screen keeps two.
     let max = if v.compose_only || area.height >= 20 { MAX_INPUT_ROWS } else { 2 };
     let chips = u16::from(!v.attachments.is_empty());
-    2 + composer_text_rows(v, area.width, max) as u16 + chips + 1
+    composer_text_rows(v, area.width, max) as u16 + chips + 2
 }
 
 /// `→ atlas · ⏵⏵ autopilot on (shift+tab to cycle)`: who the composer's text
@@ -735,7 +759,7 @@ fn mode_spans(v: &ThreadView) -> Vec<Span<'static>> {
     spans
 }
 
-/// Two rules around the input (no box), then a footer: the mode on the left,
+/// The input, a rule under it (no box), then a footer: the mode on the left,
 /// the status or the key help on the right.
 /// Per-character styles for the composer: an `@name` naming a known agent
 /// (case-insensitive, the whole name typed) takes that agent's colour.
@@ -801,22 +825,17 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     let width = area.width as usize;
     let rule = Line::from(Span::styled("─".repeat(width), theme::dim()));
     // A pane shorter than the full layout (it opened small, or the split
-    // hasn't settled yet) still shows the input: the bottom rule goes first,
-    // then the top rule, then the footer.
+    // hasn't settled yet) still shows the input: the rule goes first, then
+    // the footer.
     let chips_h = u16::from(!v.attachments.is_empty()).min(area.height - 1);
     let spare = area.height - 1 - chips_h;
-    let (has_footer, has_top, has_bottom) = (spare >= 1, spare >= 2, spare >= 3);
-    let chrome = u16::from(has_footer) + u16::from(has_top) + u16::from(has_bottom);
+    let (has_footer, has_bottom) = (spare >= 1, spare >= 2);
+    let chrome = u16::from(has_footer) + u16::from(has_bottom);
     let text_rows = (area.height - chips_h - chrome).max(1) as usize;
-    let text_y = area.y + u16::from(has_top);
-    let top = Rect::new(area.x, area.y, area.width, 1);
-    let text_area = Rect::new(area.x, text_y, area.width, text_rows as u16);
-    let chips_row = Rect::new(area.x, text_y + text_rows as u16, area.width, chips_h);
+    let text_area = Rect::new(area.x, area.y, area.width, text_rows as u16);
+    let chips_row = Rect::new(area.x, area.y + text_rows as u16, area.width, chips_h);
     let bottom = Rect::new(area.x, chips_row.y + chips_h, area.width, 1);
     let footer = Rect::new(area.x, bottom.y + u16::from(has_bottom), area.width, 1);
-    if has_top {
-        frame.render_widget(Paragraph::new(rule.clone()), top);
-    }
     if has_bottom {
         frame.render_widget(Paragraph::new(rule), bottom);
     }

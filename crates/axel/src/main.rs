@@ -7,7 +7,6 @@
 mod cli;
 mod cmd;
 mod paths;
-mod pricing;
 
 use clap::Parser;
 

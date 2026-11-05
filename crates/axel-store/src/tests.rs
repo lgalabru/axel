@@ -720,6 +720,7 @@ fn build_history(a: &Store) -> (String, Vec<Envelope>, Keypair, Keypair) {
             cost_usd_est: 0.1,
             cache_read_tokens: 4,
             cache_write_tokens: 1,
+            ..Default::default()
         },
         None,
     )
@@ -2402,4 +2403,127 @@ fn two_agents_on_one_host_and_thread_sign_as_themselves() {
     sync_all(&mini, &laptop);
     assert_eq!(laptop.get_session(&sr.id).unwrap().unwrap().agent_pubkey, pk(&orion));
     assert_eq!(laptop.get_session(&sl.id).unwrap().unwrap().agent_pubkey, pk(&lyra));
+}
+
+#[test]
+fn usage_is_kept_per_agent_over_the_last_hour_day_and_ever() {
+    let s = store();
+    let owner = Keypair::generate();
+    let (terra, opus) = (Keypair::generate(), Keypair::generate());
+    let t = s.create_thread(&owner, "t", "i", None).unwrap();
+    let other = s.create_thread(&owner, "other", "i", None).unwrap();
+    for (th, a) in [(&t.id, &terra), (&t.id, &opus), (&other.id, &terra)] {
+        s.add_participant(&owner, th, &pk(a), ParticipantRole::Agent)
+            .unwrap();
+    }
+    let st = s
+        .start_session(&terra, &new_session(&t.id, &terra, "mac"))
+        .unwrap();
+    let so = s
+        .start_session(&opus, &new_session(&t.id, &opus, "mac"))
+        .unwrap();
+    let st2 = s
+        .start_session(&terra, &new_session(&other.id, &terra, "mac"))
+        .unwrap();
+
+    let now = crate::now();
+    // terra: 30 min ago, 5 hours ago, 3 days ago (the 24h samples drop that
+    // one; the usage log keeps it).
+    let spend = |signer: &Keypair, thread: &str, session: &str, ago: i64, input: i64, cost: f64| {
+        let env = EnvelopeBuilder::new(
+            kind::USAGE,
+            format!(r#"{{"input": {input}, "output": 1, "cache_read": 10, "reasoning": 1, "turns": 1, "cost_usd_est": {cost}, "model": "claude-opus-5-5"}}"#),
+        )
+        .thread(thread)
+        .tag(vec!["s".into(), session.into()])
+        .created_at((now - ago) as u64)
+        .sign(signer)
+        .unwrap();
+        assert!(s.append(&env).unwrap().projected);
+    };
+    spend(&terra, &t.id, &st.id, 1800, 100, 1.0);
+    spend(&terra, &t.id, &st.id, 5 * 3600, 200, 2.0);
+    spend(&terra, &other.id, &st2.id, 3 * 86_400, 400, 4.0);
+    spend(&opus, &t.id, &so.id, 60, 7, 0.5);
+
+    let by_agent = s.usage_by_agent(now).unwrap();
+    assert_eq!(by_agent.len(), 2);
+    assert_eq!(by_agent[0].key, pk(&opus), "the most recent spender first");
+    let terra_u = by_agent.iter().find(|u| u.key == pk(&terra)).unwrap();
+    assert_eq!(terra_u.last_hour.input_tokens, 100);
+    assert_eq!(terra_u.last_day.input_tokens, 300);
+    assert_eq!(terra_u.total.input_tokens, 700);
+    assert_eq!(terra_u.total.turns, 3);
+    assert_eq!(terra_u.total.reasoning_tokens, 3);
+    assert!((terra_u.total.cost_usd - 7.0).abs() < 1e-9);
+    assert_eq!(
+        terra_u.last_hour.tokens(),
+        100 + 1 + 10,
+        "input, output and cache reads"
+    );
+
+    let by_thread = s.usage_by_thread(now, 10).unwrap();
+    let t_u = by_thread.iter().find(|u| u.key == t.id).unwrap();
+    assert_eq!(
+        (t_u.last_hour.input_tokens, t_u.total.input_tokens),
+        (107, 307)
+    );
+    assert_eq!(s.usage_by_thread(now, 1).unwrap().len(), 1);
+
+    // An hour in four 15-minute slices: terra's 30-minute-old turn and opus's.
+    assert_eq!(
+        s.usage_series(Some(&pk(&terra)), now, 900, 4).unwrap(),
+        vec![0, 0, 111, 0]
+    );
+    assert_eq!(
+        s.usage_series(None, now, 900, 4).unwrap(),
+        vec![0, 0, 111, 18]
+    );
+
+    // The log is a projection: rebuilt, it holds the same.
+    s.rebuild_projections().unwrap();
+    assert_eq!(s.usage_by_agent(now).unwrap(), by_agent);
+}
+
+#[test]
+fn a_sessions_context_fill_is_a_snapshot() {
+    let s = store();
+    let owner = Keypair::generate();
+    let t = s.create_thread(&owner, "t", "i", None).unwrap();
+    let sess = s
+        .start_session(&owner, &new_session(&t.id, &owner, "mac"))
+        .unwrap();
+    s.set_session_context(&sess.id, 10_000, 200_000).unwrap();
+    s.set_session_context(&sess.id, 42_000, 200_000).unwrap();
+    let c = s.session_contexts().unwrap();
+    assert_eq!(
+        (c.len(), c[0].used, c[0].size),
+        (1, 42_000, 200_000),
+        "replaced, not summed"
+    );
+    s.end_session(&owner, &sess.id, None).unwrap();
+    assert!(
+        s.session_contexts().unwrap().is_empty(),
+        "only live sessions"
+    );
+}
+
+#[test]
+fn a_plans_windows_are_kept_per_harness_and_replaced() {
+    let s = store();
+    s.set_plan_limit(&Harness::Codex, LimitWindow::Week, 40.0, Some(2_000)).unwrap();
+    s.set_plan_limit(&Harness::Claude, LimitWindow::Week, 9.0, Some(3_000)).unwrap();
+    s.set_plan_limit(&Harness::Claude, LimitWindow::FiveHour, 13.0, Some(1_000)).unwrap();
+    s.set_plan_limit(&Harness::Claude, LimitWindow::FiveHour, 140.0, None).unwrap();
+    let l = s.plan_limits().unwrap();
+    let got: Vec<(Harness, LimitWindow, f64)> = l.iter().map(|l| (l.harness.clone(), l.window, l.used_pct)).collect();
+    assert_eq!(
+        got,
+        vec![(Harness::Claude, LimitWindow::FiveHour, 100.0), (Harness::Claude, LimitWindow::Week, 9.0), (Harness::Codex, LimitWindow::Week, 40.0)],
+        "replaced, clamped, five hours before the week"
+    );
+    assert_eq!(l[0].resets_at, None);
+    assert_eq!(LimitWindow::from_minutes(300), LimitWindow::FiveHour);
+    assert_eq!(LimitWindow::from_minutes(10_080), LimitWindow::Week);
+    assert_eq!(LimitWindow::from_minutes(43_200), LimitWindow::Month);
 }

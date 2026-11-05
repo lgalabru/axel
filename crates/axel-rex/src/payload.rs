@@ -180,6 +180,14 @@ pub fn new_split_right(anchor: &str, block: Value, keep: f64, focus: bool) -> Re
     Ok(json!({ "anchor_id": anchor, "direction": "horizontal", "side": "after", "ratio": keep, "focus": focus, "layout": block }))
 }
 
+/// Two layout nodes side by side, `left` keeping `keep` of the width.
+pub fn row(left: Value, right: Value, keep: f64) -> Result<Value, Error> {
+    if !(keep > 0.0 && keep < 1.0) {
+        return Err(Error::Invalid("ratio must be between 0 and 1".into()));
+    }
+    Ok(json!({ "split": { "direction": "horizontal", "before": left, "after": right, "ratio": keep } }))
+}
+
 /// `session.new_split`: one terminal below `anchor`, which keeps `ratio` of the height.
 pub fn new_split_below(anchor: &str, block: Value, ratio: f64, focus: bool) -> Result<Value, Error> {
     if !(ratio > 0.0 && ratio < 1.0) {

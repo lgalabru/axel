@@ -526,7 +526,15 @@ pub(crate) fn decode_body(kind: ItemKind, content: &Value) -> ItemBody {
                 .and_then(|v| text_of(v).or_else(|| Some(compact_json(v, 4000))))
                 .map(|t| t.lines().map(str::to_string).collect())
                 .unwrap_or_default();
-            ItemBody::Tool { title, kind, input, output }
+            let raw = ["rawInput", "raw_input", "input", "arguments"].iter().find_map(|k| content.get(k)).cloned().unwrap_or(Value::Null);
+            // A long input is stored cut off, as a string: read what's there.
+            let raw = match raw {
+                Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
+                v => v,
+            };
+            let actions = crate::tools::describe_all(&title, kind.as_deref(), &raw);
+            let summary = crate::tools::describe_line(&title, kind.as_deref(), &raw);
+            ItemBody::Tool { title, kind, input, output, summary, actions }
         }
         ItemKind::Permission | ItemKind::Question => {
             let prompt = str_of(content, &["title", "question", "prompt", "text"])
@@ -724,6 +732,68 @@ fn session_live_state(s: &Session) -> axel_store::StatusState {
     }
 }
 
+/// Everything the usage pane shows.
+pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
+    use crate::model::{AgentSpend, ThreadSpend, UsageData};
+    let agents: HashMap<String, axel_store::Agent> = store.list_agents().map_err(se)?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
+    // The fullest live context of each agent.
+    let mut context: HashMap<String, (i64, i64)> = HashMap::new();
+    for c in store.session_contexts().map_err(se)? {
+        let Some(s) = store.get_session(&c.session_id).map_err(se)? else { continue };
+        let fill = |u: i64, n: i64| u as f64 / n.max(1) as f64;
+        let e = context.entry(s.agent_pubkey).or_insert((c.used, c.size));
+        if fill(c.used, c.size) > fill(e.0, e.1) {
+            *e = (c.used, c.size);
+        }
+    }
+    let mut data = UsageData::default();
+    for w in store.usage_by_agent(now).map_err(se)? {
+        let agent = agents.get(&w.key);
+        add(&mut data.last_hour, &w.last_hour);
+        add(&mut data.last_day, &w.last_day);
+        add(&mut data.total, &w.total);
+        data.agents.push(AgentSpend {
+            name: agent.map(|a| a.name.clone()).unwrap_or_else(|| w.key.chars().take(8).collect()),
+            color: agent.and_then(|a| a.color),
+            spark: if w.last_hour.turns > 0 { store.usage_series(Some(&w.key), now, 60, 60).map_err(se)? } else { vec![0; 60] },
+            context: context.get(&w.key).copied(),
+            last_hour: w.last_hour,
+            last_day: w.last_day,
+            total: w.total,
+        });
+    }
+    for w in store.usage_by_thread(now, 20).map_err(se)? {
+        if w.last_day.turns == 0 {
+            break; // most recent first: the rest are older still
+        }
+        let title = store.get_thread(&w.key).map_err(se)?.map(|t| t.title).unwrap_or_else(|| w.key.chars().take(8).collect());
+        data.threads.push(ThreadSpend { title, last_day: w.last_day, total: w.total });
+    }
+    for l in store.plan_limits().map_err(se)? {
+        let harness = l.harness.to_string();
+        let row = crate::model::LimitRow {
+            window: l.window,
+            used_pct: if l.resets_at.is_some_and(|r| r <= now) { None } else { Some(l.used_pct) },
+            resets_in: l.resets_at.map(|r| r - now).filter(|s| *s > 0),
+        };
+        match data.limits.last_mut() {
+            Some(p) if p.harness == harness => p.windows.push(row),
+            _ => data.limits.push(crate::model::PlanRow { harness, windows: vec![row] }),
+        }
+    }
+    Ok(data)
+}
+
+fn add(to: &mut axel_store::UsageTotals, u: &axel_store::UsageTotals) {
+    to.input_tokens += u.input_tokens;
+    to.output_tokens += u.output_tokens;
+    to.cache_read_tokens += u.cache_read_tokens;
+    to.cache_write_tokens += u.cache_write_tokens;
+    to.reasoning_tokens += u.reasoning_tokens;
+    to.turns += u.turns;
+    to.cost_usd += u.cost_usd;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +812,8 @@ mod tests {
                 kind: Some("read".into()),
                 input: "{\"path\":\"src/main.rs\"}".into(),
                 output: vec!["fn main() {}".into(), "ok".into()],
+                summary: "Read main.rs".into(),
+                actions: vec![crate::tools::Action { verb: crate::tools::Verb::Read, object: Some("main.rs".into()), text: "Read main.rs".into() }],
             }
         );
         let perm = decode_body(
@@ -768,3 +840,4 @@ mod tests {
         assert!(attachments_of(&json!({"text": "none"})).is_empty());
     }
 }
+

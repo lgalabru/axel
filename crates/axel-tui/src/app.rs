@@ -64,6 +64,7 @@ struct App<'a> {
     inbox: Inbox,
     thread: Option<ThreadView>,
     picker: ThreadPicker,
+    usage: crate::model::UsageData,
     /// Whether this terminal has focus (from focus reports).  The picker
     /// starts without it: the prompt above is focused first.
     focused: bool,
@@ -93,6 +94,7 @@ impl<'a> App<'a> {
             inbox,
             thread: None,
             picker: ThreadPicker { can_manage: deps.manage_thread.is_some(), ..Default::default() },
+            usage: Default::default(),
             focused,
             prompt_first,
             prompt_size: None,
@@ -180,6 +182,10 @@ impl<'a> App<'a> {
                 Ok(t) => self.picker.set_threads(t),
                 Err(e) => eprintln!("axel: refresh failed: {e}"),
             },
+            Screen::Usage => match glue::load_usage(self.deps.store, now) {
+                Ok(u) => self.usage = u,
+                Err(e) => eprintln!("axel: refresh failed: {e}"),
+            },
             Screen::Launcher => {}
         }
     }
@@ -229,6 +235,7 @@ impl<'a> App<'a> {
             Screen::Launcher => view::launcher_view::render(frame, &self.launcher, now),
             Screen::Inbox => view::inbox_view::render(frame, &self.inbox, now),
             Screen::Threads => view::picker_view::render(frame, &self.picker, self.focused, now),
+            Screen::Usage => view::usage_view::render(frame, &self.usage, frame.area()),
             Screen::Thread(_) => {
                 if let Some(t) = &self.thread {
                     view::thread_view::render(frame, t, now);
@@ -266,6 +273,8 @@ impl<'a> App<'a> {
                     let action = self.picker.handle_key(key);
                     self.on_picker(action)
                 }
+                // Nothing to pick: Esc or q closes it.
+                Screen::Usage => matches!(key.code, KeyCode::Esc | KeyCode::Char('q')).then_some(Outcome::Quit),
             },
             Event::FocusGained => {
                 self.focused = true;

@@ -11,7 +11,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::wire::{self, kind, tag};
 use crate::{
-    Error, NewSession, ParticipantRole, Relationship, Session, SessionUpdate, StatusReport, Store,
+    Error, Harness, LimitWindow, NewSession, ParticipantRole, Relationship, Session, SessionUpdate, StatusReport, Store,
     Thread, ThreadState, ThreadWorkspace, TurnSummary, Usage, UsageDelta, new_id, now,
 };
 
@@ -384,6 +384,28 @@ impl Store {
             session_id: session_id.to_string(),
             ..Default::default()
         }))
+    }
+
+    /// Note how full a session's context window is (local-only: a snapshot
+    /// that each report replaces, never shared).
+    pub fn set_session_context(&self, session_id: &str, used: u64, size: u64) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT INTO session_context (session_id, used, size, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (session_id) DO UPDATE SET used = excluded.used, size = excluded.size, updated_at = excluded.updated_at",
+            params![session_id, used as i64, size as i64, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Note how much of a plan window `harness`'s account has used: each
+    /// report replaces the last for that window (local-only).
+    pub fn set_plan_limit(&self, harness: &Harness, window: LimitWindow, used_pct: f64, resets_at: Option<i64>) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT INTO plan_limits (harness, window, used_pct, resets_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (harness, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, updated_at = excluded.updated_at",
+            params![harness.as_str(), window.as_str(), used_pct.clamp(0.0, 100.0), resets_at, now()],
+        )?;
+        Ok(())
     }
 
     /// Share a completed turn of a managed session (kind 40).  Only the

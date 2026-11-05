@@ -22,6 +22,7 @@ pub mod model;
 pub mod picker;
 pub mod theme;
 pub mod thread;
+pub mod tools;
 pub mod util;
 pub mod view;
 
@@ -49,6 +50,8 @@ pub enum Screen {
     Thread(String),
     /// Recent threads: the pane under the launcher's prompt.
     Threads,
+    /// Tokens spent, per agent: the corner pane.
+    Usage,
 }
 
 /// A completed launcher form, ready for the CLI to turn into a thread.

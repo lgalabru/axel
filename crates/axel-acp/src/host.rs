@@ -23,6 +23,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::adapter::adapter_command;
+use crate::usage::TurnUsage;
 use crate::attach::{self, PromptCaps};
 use crate::log::FrameLog;
 use crate::policy::{self, Decision, ToolKind};
@@ -1073,7 +1074,7 @@ impl<W: Write> Host<W> {
 
     /// The adapter's own notifications: a prompt sent into the turn landed
     /// (`_axel/steered`), or went back unread when the turn was cancelled
-    /// (`_axel/unsteered`).
+    /// (`_axel/unsteered`); where the plan's limits stand (`_axel/limits`).
     fn on_ext(&mut self, method: &str, params: &Value) {
         match method {
             "_axel/steered" => {
@@ -1084,6 +1085,13 @@ impl<W: Write> Host<W> {
                     self.line(RED, "✖", &format!("store: {e}"));
                 }
                 self.line(BLUE, "↳", &format!("read  {DIM}{}{RESET}", head(&q.text, 100)));
+            }
+            "_axel/limits" => {
+                for l in crate::usage::limits_from_params(params) {
+                    if let Err(e) = self.store.set_plan_limit(&self.cfg.harness, l.window, l.used_pct, l.resets_at) {
+                        self.line(RED, "✖", &format!("store: {e}"));
+                    }
+                }
             }
             "_axel/unsteered" => {
                 let ids: Vec<String> = params.get("messageIds").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
@@ -1280,6 +1288,18 @@ impl<W: Write> Host<W> {
         Box::pin(fut)
     }
 
+    /// What the turn spent, when the reply says it in Axel's terms (our own
+    /// adapters do). ACP leaves what `usage` counts open, so a reply without
+    /// `_meta.axel` isn't summed.
+    fn record_usage(&mut self, resp: &acp::PromptResponse) {
+        let Some(usage) = serde_json::to_value(resp).ok().as_ref().and_then(TurnUsage::from_reply) else {
+            return;
+        };
+        if let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &usage_delta(&usage), None) {
+            self.line(RED, "✖", &format!("usage: {e}"));
+        }
+    }
+
     fn end_turn(&mut self, res: Result<acp::PromptResponse, acp::Error>) {
         self.finalize_text();
         self.cancel_pending("turn ended");
@@ -1312,6 +1332,9 @@ impl<W: Write> Host<W> {
                 ("error".to_string(), ItemStatus::Failed)
             }
         };
+        if let Ok(resp) = &res {
+            self.record_usage(resp);
+        }
         if let Err(e) = self.push(
             ItemKind::TurnEnd,
             Some(status),
@@ -1548,6 +1571,12 @@ impl<W: Write> Host<W> {
                     }
                 }
                 self.line(BLUE, "☰", &format!("plan · {} steps", plan.entries.len()));
+                Ok(())
+            }
+            acp::SessionUpdate::UsageUpdate(u) => {
+                if u.size > 0 {
+                    self.store.set_session_context(&self.cfg.session_id, u.used, u.size)?;
+                }
                 Ok(())
             }
             other => {
@@ -2156,6 +2185,25 @@ fn input_summary(v: &Value) -> String {
     String::new()
 }
 
+/// A turn's spend as the store keeps it: the harness's cost when it gave
+/// one, else an estimate from the model's list prices.
+fn usage_delta(u: &TurnUsage) -> axel_store::UsageDelta {
+    let n = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+    let (input, output, cache_read, cache_write) = (n(u.input), n(u.output), n(u.cache_read), n(u.cache_write));
+    axel_store::UsageDelta {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+        reasoning_tokens: n(u.reasoning),
+        turns: 1,
+        cost_usd_est: u
+            .cost_usd
+            .unwrap_or_else(|| axel_store::pricing::estimate(u.model.as_deref(), input, output, cache_read, cache_write)),
+        model: u.model.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2205,3 +2253,4 @@ mod tests {
         assert_eq!(input_summary(&json!({})), "");
     }
 }
+

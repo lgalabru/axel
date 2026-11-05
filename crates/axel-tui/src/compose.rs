@@ -439,7 +439,8 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(90, 3)).unwrap();
         term.draw(|f| render(f, &v)).unwrap();
         let t = text(&term);
-        assert!(t.lines().next().unwrap().starts_with('─') && t.contains("autopilot"), "rule · input · footer: {t}");
+        let lines: Vec<&str> = t.lines().collect();
+        assert!(lines[0].starts_with("› ") && lines[1].starts_with('─') && lines[2].contains("autopilot"), "input · rule · footer, no rule above: {t}");
     }
 
     #[test]

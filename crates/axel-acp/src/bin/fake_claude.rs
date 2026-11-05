@@ -200,7 +200,10 @@ fn main() {
                         { "type": "tool_result", "tool_use_id": "toolu_1", "content": "User refused permission to run tool", "is_error": true }
                     ] } }));
                 }
-                send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done" }));
+                send(json!({ "type": "rate_limit_event", "rate_limit_info": { "status": "allowed", "unifiedWindows": { "five_hour": { "utilization": 0.25, "resetsAt": 1000 }, "seven_day": { "utilization": 0.5, "resetsAt": 2000 } } } }));
+                send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done", "total_cost_usd": 0.25,
+                    "usage": { "input_tokens": 3, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200, "output_tokens": 40 },
+                    "modelUsage": { "claude-sonnet-test": { "costUSD": 0.25, "contextWindow": 200000 } } }));
             }
             _ => {}
         }

@@ -244,6 +244,10 @@ pub enum ItemBody {
         input: String,
         /// Output lines (head only is rendered).
         output: Vec<String>,
+        /// What it does, in words ([`crate::tools`]): "Read lines 1–140 of send.rs".
+        summary: String,
+        /// The same, as actions, for merging a run of calls into one line.
+        actions: Vec<crate::tools::Action>,
     },
     Choice {
         /// Question text, or the tool title asking for permission.
@@ -314,4 +318,54 @@ pub struct ThreadData {
     pub last_agent_name: Option<String>,
     /// Every local agent (name, colour): what an `@name` in the composer can summon.
     pub known_agents: Vec<(String, Option<AgentColor>)>,
+}
+
+/// What the usage pane shows: spend per agent and per thread, over the last
+/// hour, the last 24 hours and all time.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageData {
+    pub agents: Vec<AgentSpend>,
+    /// Threads that spent in the last 24 hours, most recent first.
+    pub threads: Vec<ThreadSpend>,
+    pub last_hour: axel_store::UsageTotals,
+    pub last_day: axel_store::UsageTotals,
+    pub total: axel_store::UsageTotals,
+    /// Each harness's plan windows, by harness.
+    pub limits: Vec<PlanRow>,
+}
+
+/// One harness's plan windows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanRow {
+    pub harness: String,
+    pub windows: Vec<LimitRow>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitRow {
+    pub window: axel_store::LimitWindow,
+    /// 0–100; `None` once the window has started over since the report.
+    pub used_pct: Option<f64>,
+    /// Seconds until it starts over.
+    pub resets_in: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AgentSpend {
+    pub name: String,
+    pub color: Option<AgentColor>,
+    pub last_hour: axel_store::UsageTotals,
+    pub last_day: axel_store::UsageTotals,
+    pub total: axel_store::UsageTotals,
+    /// Tokens per minute over the last hour, oldest first.
+    pub spark: Vec<i64>,
+    /// The fullest context window among its live sessions: `(used, size)`.
+    pub context: Option<(i64, i64)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThreadSpend {
+    pub title: String,
+    pub last_day: axel_store::UsageTotals,
+    pub total: axel_store::UsageTotals,
 }

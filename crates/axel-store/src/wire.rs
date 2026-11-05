@@ -175,10 +175,18 @@ pub struct UsageWire {
     pub cache_read: i64,
     #[serde(default, alias = "cache_write_tokens")]
     pub cache_write: i64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reasoning: i64,
     #[serde(default)]
     pub turns: i64,
     #[serde(default)]
     pub cost_usd_est: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 impl From<&UsageDelta> for UsageWire {
@@ -188,8 +196,10 @@ impl From<&UsageDelta> for UsageWire {
             output: d.output_tokens,
             cache_read: d.cache_read_tokens,
             cache_write: d.cache_write_tokens,
+            reasoning: d.reasoning_tokens,
             turns: d.turns,
             cost_usd_est: d.cost_usd_est,
+            model: d.model.clone(),
         }
     }
 }
@@ -201,8 +211,10 @@ impl From<&UsageWire> for UsageDelta {
             output_tokens: w.output,
             cache_read_tokens: w.cache_read,
             cache_write_tokens: w.cache_write,
+            reasoning_tokens: w.reasoning,
             turns: w.turns,
             cost_usd_est: w.cost_usd_est,
+            model: w.model.clone(),
         }
     }
 }

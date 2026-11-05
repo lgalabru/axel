@@ -111,6 +111,19 @@ fn prompt(
         respond(id, json!({ "stopReason": "end_turn" }));
         return;
     }
+    // A turn that spends: context fill, then the usage in the reply. `spend`
+    // marks it as Axel's adapters do; `spend-unmarked` doesn't.
+    if text == "spend" || text == "spend-unmarked" {
+        update(json!({ "sessionUpdate": "usage_update", "used": 1234, "size": 200000 }));
+        send(json!({ "jsonrpc": "2.0", "method": "_axel/limits", "params": { "windows": [{ "window": "five_hour", "usedPercent": 30.0, "resetsAt": 1000 }] } }));
+        let mut reply = json!({ "stopReason": "end_turn",
+            "usage": { "totalTokens": 160, "inputTokens": 10, "outputTokens": 50, "cachedReadTokens": 100, "cachedWriteTokens": 0, "thoughtTokens": 5 } });
+        if text == "spend" {
+            reply["_meta"] = json!({ "axel": { "costUsd": 0.5, "model": "fake-model" } });
+        }
+        respond(id, reply);
+        return;
+    }
     if text == "sleep" {
         // Wait for session/cancel.
         for l in lines.by_ref() {
