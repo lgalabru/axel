@@ -304,6 +304,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "ratatui",
+ "serde",
  "serde_json",
  "unicode-width",
 ]

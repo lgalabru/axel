@@ -10,7 +10,7 @@ use axel_inbox::{Envelope, EnvelopeBuilder};
 use rusqlite::{OptionalExtension, params};
 
 use crate::wire::{self, kind, tag};
-use crate::{
+use crate::{TurnMark, 
     Error, Harness, LimitWindow, NewSession, ParticipantRole, Relationship, Session, SessionUpdate, StatusReport, Store,
     Thread, ThreadState, ThreadWorkspace, TurnSummary, Usage, UsageDelta, new_id, now,
 };
@@ -393,6 +393,30 @@ impl Store {
             "INSERT INTO session_context (session_id, used, size, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (session_id) DO UPDATE SET used = excluded.used, size = excluded.size, updated_at = excluded.updated_at",
             params![session_id, used as i64, size as i64, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Remember where a pane session's turn stands (local-only; one row per session).
+    pub fn put_turn_mark(&self, m: &TurnMark) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT INTO turn_marks (session_id, ordinal, open, before_commit, before_tree, last_after_tree, user_text, authored_json, tool_calls, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT (session_id) DO UPDATE SET ordinal = excluded.ordinal, open = excluded.open,
+                 before_commit = excluded.before_commit, before_tree = excluded.before_tree, last_after_tree = excluded.last_after_tree,
+                 user_text = excluded.user_text, authored_json = excluded.authored_json, tool_calls = excluded.tool_calls, started_at = excluded.started_at",
+            params![
+                m.session_id,
+                m.ordinal,
+                m.open as i64,
+                m.before_commit,
+                m.before_tree,
+                m.last_after_tree,
+                m.user_text,
+                serde_json::to_string(&m.authored)?,
+                m.tool_calls,
+                m.started_at
+            ],
         )?;
         Ok(())
     }

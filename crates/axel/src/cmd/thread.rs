@@ -65,6 +65,14 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
             drop(ctx);
             super::links::show_tools(&thread, &fold)
         }
+        ThreadCommand::Diff { thread, session, turn, stat, pane } => {
+            drop(ctx);
+            super::diff::run(&thread, session.as_deref(), turn, stat, pane)
+        }
+        ThreadCommand::Undo { thread, session, turn, restore, yes } => {
+            drop(ctx);
+            super::undo::run(&thread, session.as_deref(), turn, restore, yes)
+        }
         ThreadCommand::Answer { thread, item } => {
             let t = resolve(&ctx, &thread)?;
             drop(ctx);
@@ -242,6 +250,10 @@ pub fn set_state(ctx: &Ctx, thread_id: &str, op: ThreadOp) -> Result<()> {
         stop_thread(ctx, thread_id)?;
     }
     ctx.store.update_thread(&ctx.owner()?, thread_id, None, Some(state))?;
+    if matches!(op, ThreadOp::Archive | ThreadOp::Delete) {
+        // Old checkpoints go with it (this thread's a week from now; others due).
+        let _ = super::gc::run(ctx, true);
+    }
     Ok(())
 }
 
@@ -262,7 +274,7 @@ pub fn record_thread(ctx: &Ctx, title: &str, projects: &[std::path::PathBuf]) ->
 }
 
 /// Accept a full id or a unique prefix.
-fn resolve(ctx: &Ctx, id_or_prefix: &str) -> Result<Thread> {
+pub(super) fn resolve(ctx: &Ctx, id_or_prefix: &str) -> Result<Thread> {
     if let Some(t) = ctx.store.get_thread(id_or_prefix)? {
         return Ok(t);
     }

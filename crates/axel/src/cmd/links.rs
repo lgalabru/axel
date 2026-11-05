@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use axel_tui::util::{CopyLink, RevealLink, ToolsLink};
+use axel_tui::util::{CopyLink, DiffLink, RevealLink, ToolsLink};
 
 use crate::paths;
 
@@ -107,12 +107,40 @@ pub fn open_url(url: &str) -> Result<()> {
     if let Some(reveal) = RevealLink::parse(url) {
         return reveal_file(Path::new(&reveal.path));
     }
+    if let Some(diff) = DiffLink::parse(url) {
+        return open_diff(&diff);
+    }
     let link = ToolsLink::parse(url).with_context(|| format!("not an Axel link: {url}"))?;
     let rex = axel_rex::Rex::new(axel_rex::RexEnv { server: link.server.clone(), session: link.session.clone(), block: String::new() });
     let exe = std::env::current_exe()?.to_string_lossy().into_owned();
     let cmd = vec![exe, "thread".into(), "tools".into(), link.thread.clone(), link.fold.clone()];
     let label = super::Ctx::open().ok().and_then(|ctx| pane_label(&ctx, &link)).unwrap_or_else(|| TOOLS_LABEL.to_string());
     rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context("opening the tool calls in Rex")?;
+    Ok(())
+}
+
+/// A click on a change line: the turn's diff in a floating pane where the
+/// tool calls pane goes, titled `lyra · turn 4 · 3 files +42 −7`.
+fn open_diff(link: &DiffLink) -> Result<()> {
+    let rex = axel_rex::Rex::new(axel_rex::RexEnv { server: link.server.clone(), session: link.rex_session.clone(), block: String::new() });
+    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+    let cmd = vec![
+        exe,
+        "thread".into(),
+        "diff".into(),
+        link.thread.clone(),
+        "--session".into(),
+        link.session_id.clone(),
+        "--turn".into(),
+        link.turn.to_string(),
+        "--pane".into(),
+    ];
+    let label = super::Ctx::open()
+        .ok()
+        .and_then(|ctx| super::diff::pick(&ctx, &link.thread, Some(&link.session_id), Some(link.turn)).ok())
+        .map(|p| format!("{} · turn {} · {}", p.agent, p.turn.summary.ordinal, super::diff::headline(&p.changes)))
+        .unwrap_or_else(|| format!("turn {} changes", link.turn));
+    rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context("opening the diff in Rex")?;
     Ok(())
 }
 
@@ -332,7 +360,7 @@ impl Linker {
 }
 
 /// Where the thread works: its worktree, else its project's directory here.
-fn thread_dir(ctx: &super::Ctx, thread_id: &str) -> Option<PathBuf> {
+pub(super) fn thread_dir(ctx: &super::Ctx, thread_id: &str) -> Option<PathBuf> {
     let project = ctx.store.thread_projects(thread_id).ok()?.into_iter().next()?;
     if let Some(w) = project.workspace.worktree_path.filter(|p| p.is_dir()) {
         return Some(w);
@@ -352,7 +380,7 @@ const MAX_LINES: usize = 200;
 
 /// The pane's width once it has held for a few reads (it opens at a default
 /// size and is laid out right after).
-fn settled_width() -> usize {
+pub(super) fn settled_width() -> usize {
     let read = || crossterm::terminal::size().map(|(w, _)| w).unwrap_or(100);
     let (mut last, mut same) = (read(), 0);
     for _ in 0..15 {
@@ -1595,7 +1623,7 @@ fn output_text(v: Option<&serde_json::Value>) -> String {
 
 /// Wait for Esc, q or Enter (raw, so nothing echoes into the output):
 /// `None` then. A resize returns the width it settles on (a drag sends many).
-fn wait_for_close_or_resize() -> Option<usize> {
+pub(super) fn wait_for_close_or_resize() -> Option<usize> {
     use crossterm::event::{Event, KeyCode, KeyEventKind, poll, read};
     use std::time::Duration;
     let _ = crossterm::terminal::enable_raw_mode();

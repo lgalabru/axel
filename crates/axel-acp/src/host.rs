@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use axel_identity::Keypair;
 use axel_store::{
     BlockedKind, ConversationItem, Harness, ItemKind, ItemStatus, NewItem, RuntimeMode,
-    SessionState, SessionUpdate, StatusReport, StatusState, Store, TurnSummary,
+    SessionState, SessionUpdate, StatusReport, StatusState, Store, TurnChanges, TurnSummary,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -23,6 +23,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::adapter::adapter_command;
+use crate::checkpoint;
 use crate::usage::TurnUsage;
 use crate::attach::{self, PromptCaps};
 use crate::log::FrameLog;
@@ -362,6 +363,16 @@ struct Host<W: Write> {
     turn_assistant_text: String,
     turn_tool_calls: i64,
     turn_files_edited: i64,
+    /// The tree when this turn started (its `before` checkpoint), if the
+    /// workspace is a git repository.
+    turn_before: Option<checkpoint::Snapshot>,
+    /// The tree when the previous turn ended: a different tree at the next
+    /// start means edits were made between turns.
+    last_after: Option<checkpoint::Snapshot>,
+    /// Files this turn's edit tools named (absolute), for `authored`.
+    turn_authored: Vec<PathBuf>,
+    /// A slow checkpoint has been pointed out once already.
+    checkpoint_slow_told: bool,
     cur_text: Option<TextItem>,
     /// Pending `Permission` items by item id.  Permission items carry
     /// `ref_id = "permission:<toolCallId>"` so tool-call updates never touch them.
@@ -400,6 +411,10 @@ impl<W: Write> Host<W> {
             turn_assistant_text: String::new(),
             turn_tool_calls: 0,
             turn_files_edited: 0,
+            turn_before: None,
+            last_after: None,
+            turn_authored: Vec::new(),
+            checkpoint_slow_told: false,
             cur_text: None,
             pending: HashMap::new(),
             queue: VecDeque::new(),
@@ -1235,6 +1250,9 @@ impl<W: Write> Host<W> {
         self.turn_assistant_text.clear();
         self.turn_tool_calls = 0;
         self.turn_files_edited = 0;
+        self.turn_authored.clear();
+        // Before the prompt goes out, so the agent's first edit is never in `before`.
+        self.turn_before = self.checkpoint(checkpoint::Which::Before);
         self.cur_text = None;
         let paths = attach::attachment_paths(&files);
         let mut content = json!({ "text": text, "attachments": paths });
@@ -1335,17 +1353,17 @@ impl<W: Write> Host<W> {
         if let Ok(resp) = &res {
             self.record_usage(resp);
         }
-        if let Err(e) = self.push(
-            ItemKind::TurnEnd,
-            Some(status),
-            None,
-            json!({
-                "stop_reason": stop_reason,
-                "tool_calls": self.turn_tool_calls,
-                "files_edited": self.turn_files_edited,
-                "duration_ms": duration_ms,
-            }),
-        ) {
+        let changes = self.turn_changes();
+        let mut turn_end = json!({
+            "stop_reason": stop_reason,
+            "tool_calls": self.turn_tool_calls,
+            "files_edited": self.turn_files_edited,
+            "duration_ms": duration_ms,
+        });
+        if let Some(c) = &changes {
+            turn_end["changes"] = serde_json::to_value(c).unwrap_or(Value::Null);
+        }
+        if let Err(e) = self.push(ItemKind::TurnEnd, Some(status), None, turn_end) {
             self.line(RED, "✖", &format!("store: {e}"));
         }
         let summary = TurnSummary {
@@ -1360,6 +1378,7 @@ impl<W: Write> Host<W> {
             files_edited: self.turn_files_edited,
             duration_ms,
             stop_reason: stop_reason.clone(),
+            changes,
         };
         if let Err(e) = self
             .store
@@ -1410,17 +1429,24 @@ impl<W: Write> Host<W> {
         let secs = duration_ms as f64 / 1000.0;
         let tools = self.turn_tool_calls;
         let turn = self.turn;
+        let changed = match summary.changes.as_ref().filter(|c| !c.files.is_empty()) {
+            Some(c) => {
+                let (a, r) = c.totals();
+                format!(" · {} file{} +{a} −{r}", c.files.len(), if c.files.len() == 1 { "" } else { "s" })
+            }
+            None => String::new(),
+        };
         match (&res, status) {
             (Ok(_), ItemStatus::Cancelled) => self.line(
                 YELLOW,
                 "■",
-                &format!("turn {turn} cancelled · {tools} tools · {secs:.1}s"),
+                &format!("turn {turn} cancelled · {tools} tools · {secs:.1}s{changed}"),
             ),
             (Ok(_), _) => self.line(
                 GREEN,
                 "✓",
                 &format!(
-                    "turn {turn} done · {tools} tools · {secs:.1}s{}",
+                    "turn {turn} done · {tools} tools · {secs:.1}s{changed}{}",
                     if stop_reason == "end_turn" {
                         String::new()
                     } else {
@@ -1452,6 +1478,7 @@ impl<W: Write> Host<W> {
                 self.turn_tool_calls += 1;
                 if matches!(kind, ToolKind::Edit | ToolKind::Delete | ToolKind::Move) {
                     self.turn_files_edited += 1;
+                    self.note_authored(&tc.locations, &raw_input);
                 }
                 let content = json!({
                     "title": tc.title,
@@ -1503,6 +1530,17 @@ impl<W: Write> Host<W> {
                 }
                 if let Some(l) = &f.locations {
                     patch.insert("locations".into(), locations_json(l));
+                    let edits = match &f.kind {
+                        Some(k) => matches!(ToolKind::parse(&enum_str(k)), ToolKind::Edit | ToolKind::Delete | ToolKind::Move),
+                        None => self
+                            .store
+                            .item_by_ref(&self.cfg.session_id, &ref_id)?
+                            .and_then(|it| it.content.get("kind").and_then(Value::as_str).map(|k| matches!(k, "edit" | "delete" | "move")))
+                            .unwrap_or(false),
+                    };
+                    if edits {
+                        self.note_authored(l, f.raw_input.as_ref().unwrap_or(&Value::Null));
+                    }
                 }
                 if let Some(c) = &f.content {
                     let v = serde_json::to_value(c).unwrap_or(Value::Null);
@@ -1898,6 +1936,75 @@ impl<W: Write> Host<W> {
     }
 
     // --- store helpers ---
+
+    /// Snapshot the workspace for this turn (`before` or `after`), kept under
+    /// its checkpoint ref.  `None` when there is nothing to checkpoint, or it
+    /// failed or took too long: the turn goes on without.
+    fn checkpoint(&mut self, which: checkpoint::Which) -> Option<checkpoint::Snapshot> {
+        let name = checkpoint::ref_name(&self.cfg.thread_id, &self.cfg.session_id, self.turn, which);
+        let started = Instant::now();
+        // `after` of an unchanged tree is `before` itself; `before` of an
+        // untouched tree is the previous turn's `after`.
+        let same_as = match which {
+            checkpoint::Which::Before => self.last_after.as_ref(),
+            checkpoint::Which::After => self.turn_before.as_ref(),
+        };
+        let snap = match checkpoint::capture(&self.cfg.cwd, &name, checkpoint::BUDGET, same_as) {
+            Ok(s) => s,
+            Err(e) => {
+                self.line(YELLOW, "!", &format!("turn {} checkpoint skipped: {e:#}", self.turn));
+                return None;
+            }
+        };
+        if started.elapsed() > checkpoint::SLOW && !self.checkpoint_slow_told {
+            self.checkpoint_slow_told = true;
+            self.line(
+                YELLOW,
+                "!",
+                &format!(
+                    "checkpoint took {:.1}s: a large file that isn't ignored? add it to .gitignore",
+                    started.elapsed().as_secs_f64()
+                ),
+            );
+        }
+        snap
+    }
+
+    /// The turn's `after` checkpoint and what differs from its `before`.
+    fn turn_changes(&mut self) -> Option<TurnChanges> {
+        self.turn_before.as_ref()?;
+        // `after` first: it reads `turn_before` to reuse it for an unchanged tree.
+        let after = self.checkpoint(checkpoint::Which::After);
+        let before = self.turn_before.take()?;
+        let after = after?;
+        let mut c = match checkpoint::changes(&self.cfg.cwd, &before, &after, &self.turn_authored) {
+            Ok(c) => c,
+            Err(e) => {
+                self.line(YELLOW, "!", &format!("turn {} changes unknown: {e:#}", self.turn));
+                return None;
+            }
+        };
+        c.between_turns = self.last_after.as_ref().is_some_and(|l| l.tree != before.tree);
+        self.last_after = Some(after);
+        Some(c)
+    }
+
+    /// Remember the files an edit tool call names: its locations, else the
+    /// path in its input.  Relative paths are taken from the workspace.
+    fn note_authored(&mut self, locations: &[acp::ToolCallLocation], raw_input: &Value) {
+        let mut paths: Vec<PathBuf> = locations.iter().map(|l| l.path.clone()).collect();
+        if paths.is_empty()
+            && let Some(p) = ["file_path", "path", "filePath", "notebook_path"].iter().find_map(|k| raw_input.get(k).and_then(Value::as_str))
+        {
+            paths.push(PathBuf::from(p));
+        }
+        for p in paths {
+            let p = resolve(&self.cfg.cwd, &p);
+            if !self.turn_authored.contains(&p) {
+                self.turn_authored.push(p);
+            }
+        }
+    }
 
     fn push(
         &self,

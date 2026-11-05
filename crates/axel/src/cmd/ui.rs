@@ -1036,7 +1036,7 @@ fn passthrough_env() -> Vec<(String, String)> {
 }
 
 /// Deliver a composer command to a managed session over its socket.
-fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<SendReply> {
+pub(super) fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<SendReply> {
     let session = ctx.store.get_session(session_id)?.with_context(|| format!("no session {session_id}"))?;
     if session.runtime != SessionRuntime::Managed {
         return Ok(SendReply::Error { message: "this agent runs in its own pane; press o to open it".into() });

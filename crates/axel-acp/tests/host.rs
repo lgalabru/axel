@@ -1127,3 +1127,71 @@ fn a_turns_spend_and_context_fill_land_in_the_store() {
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }
+
+#[test]
+fn a_turn_in_a_git_workspace_leaves_checkpoints_and_what_it_changed() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(&f.cfg.cwd).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    for args in [
+        &["init", "--quiet"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+        &["config", "commit.gpgsign", "false"],
+    ] {
+        git(args);
+    }
+    std::fs::write(f.cfg.cwd.join("notes.md"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    // Turn 1: the agent rewrites notes.md through the client's fs (no edit tool call).
+    send_ok(&sock, Command::Prompt { text: "writefile:notes.md:one\ntwo\n".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    // The owner adds a file between turns; turn 2 changes nothing itself.
+    std::fs::write(f.cfg.cwd.join("between.txt"), "owner\n").unwrap();
+    send_ok(&sock, Command::Prompt { text: "fix the login bug".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 2", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    send_ok(&sock, Command::Stop);
+    host.join().unwrap().unwrap();
+
+    let turns = f.store.turns(&f.thread_id).unwrap();
+    let c1 = turns[0].summary.changes.as_ref().expect("turn 1 left checkpoints");
+    assert_eq!(c1.before, head, "a clean tree before the turn is HEAD itself");
+    assert_ne!(c1.after, head);
+    assert_eq!(c1.files.len(), 1, "{:?}", c1.files);
+    let f1 = &c1.files[0];
+    assert_eq!((f1.path.as_str(), f1.added, f1.removed, f1.authored), ("notes.md", Some(1), Some(0), false));
+    assert!(!c1.between_turns && !c1.truncated);
+    let c2 = turns[1].summary.changes.as_ref().expect("turn 2 left checkpoints");
+    assert_ne!(c2.before, c1.after, "the owner's file makes the tree at the start of turn 2 another one…");
+    assert!(c2.between_turns, "…which the turn says");
+    // The owner's file is already in turn 2's `before`, so the turn's own diff is empty.
+    assert!(c2.files.is_empty(), "{:?}", c2.files);
+    assert_eq!(c2.before, c2.after);
+
+    // Both ends of both turns are kept as refs; HEAD, the index and the branches are untouched.
+    let refs = git(&["for-each-ref", "--format=%(refname)", "refs/axel/checkpoints"]);
+    let prefix = format!("refs/axel/checkpoints/{}/{}", f.thread_id, f.session_id);
+    assert_eq!(
+        refs.lines().collect::<Vec<_>>(),
+        vec![format!("{prefix}/1/after"), format!("{prefix}/1/before"), format!("{prefix}/2/after"), format!("{prefix}/2/before")]
+    );
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    assert!(git(&["diff", "--cached", "--name-only"]).is_empty());
+    assert_eq!(git(&["branch", "--list"]).lines().count(), 1);
+    // The local TurnEnd item carries the same, for the thread view.
+    let ends: Vec<_> = f.store.items(&f.session_id, 0, 500).unwrap().into_iter().filter(|i| i.kind == ItemKind::TurnEnd).collect();
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0].content["changes"]["files"][0]["path"], "notes.md");
+    assert_eq!(ends[1].content["changes"]["between_turns"], true);
+}

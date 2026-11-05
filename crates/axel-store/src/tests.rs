@@ -1909,6 +1909,16 @@ fn turn_roundtrip_projection_and_convergence() {
         files_edited: 2,
         duration_ms: 42_000,
         stop_reason: "end_turn".into(),
+        changes: Some(TurnChanges {
+            before: "a".repeat(40),
+            after: "b".repeat(40),
+            files: vec![
+                FileChange { path: "src/lib.rs".into(), old_path: None, status: ChangeStatus::Modified, added: Some(4), removed: Some(1), authored: true },
+                FileChange { path: "img.png".into(), old_path: None, status: ChangeStatus::Added, added: None, removed: None, authored: false },
+            ],
+            truncated: false,
+            between_turns: true,
+        }),
     };
     a.record_turn(&atlas, &s1.id, &summary).unwrap();
     a.record_turn(
@@ -1947,6 +1957,13 @@ fn turn_roundtrip_projection_and_convergence() {
         "assistant head is capped"
     );
     assert_eq!(turns[2].session_id, s2.id);
+    assert_eq!(turns[0].summary.changes.as_ref().unwrap().totals(), (4, 1), "binary files count for no lines");
+    assert_eq!(turns[0].summary.changes.as_ref().unwrap().authored(), 1);
+    assert!(turns[1].summary.changes.is_none(), "a turn without checkpoints carries none");
+    assert!(
+        !serde_json::to_string(&turns[1].summary).unwrap().contains("changes"),
+        "and its envelope doesn't mention them, so old readers see the same JSON"
+    );
     let env = a.get_event(&turns[0].id).unwrap().unwrap();
     assert_eq!(env.kind, kind::TURN);
     assert_eq!(env.first_tag("s"), Some(s1.id.as_str()));

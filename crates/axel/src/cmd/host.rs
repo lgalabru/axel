@@ -1207,6 +1207,25 @@ fn push_workspace(host: &Environment, dir: &Path, thread: &axel_store::Thread, a
     Ok(JobWorkspace { repo, start, branch: job_branch(thread, agent), reset: false })
 }
 
+/// Fetch the turn checkpoints of `thread_id` from the host's copy of the
+/// repository into `dir`'s, under the same ref names, so a turn that ran
+/// there can be read and undone here.
+pub fn fetch_checkpoints(host: &Environment, dir: &Path, thread_id: &str) -> Result<()> {
+    let target = host.ssh_target.as_deref().with_context(|| format!("host {} has no ssh target", host.label))?;
+    let Response::Repo { path } = call(host, &Request::PrepareRepo { repo: repo_name(dir) })? else { bail!("unexpected reply") };
+    let spec = format!("+{refs}/{thread_id}/*:{refs}/{thread_id}/*", refs = axel_acp::checkpoint::REFS);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_SSH_COMMAND", ssh_command_line())
+        .args(["fetch", "--quiet", &format!("{target}:{path}"), &spec])
+        .output()?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
 /// Fetch the job branches of `thread_id` from the host into the local repo:
 /// `axel/<…>` itself, and `refs/axel/<host>/<branch>` for uncommitted work.
 fn fetch_results(ctx: &Ctx, host: &Environment, thread_id: &str) -> Result<Vec<String>> {
@@ -1442,29 +1461,10 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 
 /// A commit of `dir`'s working tree on top of HEAD (tracked and untracked
 /// files, not ignored ones), or HEAD itself when nothing changed.  The
-/// user's index and branches are untouched.
+/// user's index and branches are untouched.  (Turn checkpoints use the same
+/// snapshots: `axel_acp::checkpoint`.)
 pub fn snapshot_commit(dir: &Path, message: &str) -> Result<String> {
-    let head = git(dir, &["rev-parse", "HEAD"])?;
-    let index = std::env::temp_dir().join(format!("axel-index-{}-{}", std::process::id(), axel_store::new_id()));
-    let run = |args: &[&str]| -> Result<String> {
-        let out = Command::new("git").arg("-C").arg(dir).env("GIT_INDEX_FILE", &index).args(args).output()?;
-        if !out.status.success() {
-            bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let result = (|| {
-        run(&["read-tree", "HEAD"])?;
-        run(&["add", "-A", "."])?;
-        let tree = run(&["write-tree"])?;
-        if tree == git(dir, &["rev-parse", "HEAD^{tree}"])? {
-            return Ok(head.clone());
-        }
-        // Never signed: a snapshot must not wait on a signing agent's prompt.
-        run(&["commit-tree", "--no-gpg-sign", &tree, "-p", &head, "-m", message])
-    })();
-    let _ = std::fs::remove_file(&index);
-    result
+    axel_acp::checkpoint::snapshot_commit(dir, message)
 }
 
 #[cfg(test)]
@@ -1483,22 +1483,6 @@ mod tests {
             git(d.path(), &args).unwrap();
         }
         d
-    }
-
-    #[test]
-    fn snapshots_carry_uncommitted_and_untracked_files_but_not_ignored_ones() {
-        let d = repo();
-        let head = git(d.path(), &["rev-parse", "HEAD"]).unwrap();
-        assert_eq!(snapshot_commit(d.path(), "s").unwrap(), head, "clean tree: HEAD itself");
-        std::fs::write(d.path().join(".gitignore"), ".env\n").unwrap();
-        std::fs::write(d.path().join(".env"), "SECRET=1").unwrap();
-        std::fs::write(d.path().join("new.rs"), "fn main() {}").unwrap();
-        let snap = snapshot_commit(d.path(), "s").unwrap();
-        assert_ne!(snap, head);
-        let files = git(d.path(), &["ls-tree", "--name-only", &snap]).unwrap();
-        assert!(files.contains("new.rs") && files.contains(".gitignore") && !files.contains(".env"), "{files}");
-        assert_eq!(git(d.path(), &["rev-parse", "HEAD"]).unwrap(), head, "HEAD untouched");
-        assert!(git(d.path(), &["diff", "--cached", "--name-only"]).unwrap().is_empty(), "index untouched");
     }
 
     #[test]

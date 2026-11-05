@@ -18,4 +18,5 @@ crossterm.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+serde.workspace = true
 serde_json.workspace = true

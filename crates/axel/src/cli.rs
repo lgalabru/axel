@@ -111,6 +111,9 @@ pub enum Command {
     Usage,
     /// Check Rex, keystore and database health.
     Doctor,
+    /// Prune old turn checkpoints (archived threads after a week; a month for
+    /// live ones, keeping each session's latest turns).
+    Gc,
     /// `axel-links://` links (a click on a run of tool calls opens its details).
     Links {
         #[command(subcommand)]
@@ -311,6 +314,41 @@ pub enum ThreadCommand {
     /// A run of tool calls in full (the floating pane a click on one opens).
     #[command(hide = true)]
     Tools { thread: String, fold: String },
+    /// What a turn changed, from its checkpoints: the files, then the patch.
+    /// Without --turn, the latest turn that changed a file.
+    Diff {
+        thread: String,
+        /// The session (id or prefix) whose turn to show.
+        #[arg(long)]
+        session: Option<String>,
+        /// The turn's ordinal within its session.
+        #[arg(long)]
+        turn: Option<i64>,
+        /// Only the file list.
+        #[arg(long)]
+        stat: bool,
+        /// As the floating pane a click on a change line opens.
+        #[arg(long, hide = true)]
+        pane: bool,
+    },
+    /// Take a turn's change back out of the working tree, keeping work done
+    /// since (a snapshot is kept first). Without --turn, the latest turn that
+    /// changed a file.
+    Undo {
+        thread: String,
+        /// The session (id or prefix) whose turn to undo.
+        #[arg(long)]
+        session: Option<String>,
+        /// The turn's ordinal within its session.
+        #[arg(long)]
+        turn: Option<i64>,
+        /// Rewrite the turn's files to how they were before it, even over later work.
+        #[arg(long)]
+        restore: bool,
+        /// Don't ask.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Continue a thread: a new session resuming its last harness conversation.
     Resume {
         thread: String,

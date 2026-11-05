@@ -288,6 +288,22 @@ pub mod policy {
 }
 ```
 
+```rust
+pub mod checkpoint {   // turn checkpoints: hidden commits of the tree before and after a turn
+    pub const REFS: &str = "refs/axel/checkpoints";   // …/<thread>/<session>/<ordinal>/{before,after}
+    pub const BUDGET: Duration;   // 10 s: the most a checkpoint may hold up a turn
+    pub struct Snapshot { pub commit: String, pub tree: String }
+    pub enum Which { Before, After }
+    pub fn ref_name(thread_id: &str, session_id: &str, ordinal: i64, which: Which) -> String;
+    pub fn capture(dir: &Path, ref_name: &str, budget: Duration) -> Result<Option<Snapshot>>;   // None: not a repo / no HEAD
+    pub fn snapshot_commit(dir: &Path, message: &str) -> Result<String>;   // the remote handoff's snapshot (moved here)
+    pub fn changes(dir: &Path, before: &Snapshot, after: &Snapshot, authored: &[PathBuf]) -> Result<TurnChanges>;
+}
+// The host snapshots in start_turn (before the prompt) and end_turn (after); the TurnEnd item and the
+// turn envelope carry `changes`.  The Claude pane hooks (`axel hook claude`) do the same from
+// UserPromptSubmit / PostToolUse / Stop, keeping the open turn in `TurnMark`.
+```
+
 ## axel-store additions (managed runtime)
 
 ```rust
@@ -309,13 +325,57 @@ impl Store {
     pub fn record_turn(&self, signer: &Keypair, session_id: &str, t: &TurnSummary) -> Result<(), Error>;
     pub fn turns(&self, thread_id: &str) -> Result<Vec<Turn>, Error>;
 }
-pub struct TurnSummary { pub ordinal: i64, pub user_text: String, pub assistant_text: String /* head ≤ 2000 chars */, pub tool_calls: i64, pub files_edited: i64, pub duration_ms: i64, pub stop_reason: String }
+pub struct TurnSummary { pub ordinal: i64, pub user_text: String, pub assistant_text: String /* head ≤ 2000 chars */, pub tool_calls: i64, pub files_edited: i64, pub duration_ms: i64, pub stop_reason: String, pub changes: Option<TurnChanges> /* serde default, omitted when None */ }
+// turn checkpoints: the shareable part (the diff stays in the repository that ran the turn)
+pub struct TurnChanges { pub before: String /* commit */, pub after: String /* == before when nothing changed */, pub files: Vec<FileChange> /* ≤ MAX_FILES = 200 */, pub truncated: bool, pub between_turns: bool }
+impl TurnChanges { pub const MAX_FILES: usize; pub fn totals(&self) -> (i64 /*added*/, i64 /*removed*/); pub fn authored(&self) -> usize }
+pub struct FileChange { pub path: String, pub old_path: Option<String>, pub status: ChangeStatus, pub added: Option<i64> /* None: binary */, pub removed: Option<i64>, pub authored: bool }
+#[serde(rename_all="snake_case")] pub enum ChangeStatus { Added, Modified, Deleted, Renamed }   // letter() / from_letter()
+// local-only: where a pane session's turn stands between hook runs (table turn_marks)
+pub struct TurnMark { pub session_id: String, pub ordinal: i64, pub open: bool, pub before_commit: Option<String>, pub before_tree: Option<String>, pub last_after_tree: Option<String>, pub user_text: String, pub authored: Vec<String>, pub tool_calls: i64, pub started_at: i64 /* unix ms */ }
+impl Store { pub fn turn_mark(&self, session_id: &str) -> Result<Option<TurnMark>, Error>; pub fn put_turn_mark(&self, m: &TurnMark) -> Result<(), Error>; }
 pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String, pub from_pubkey: String, pub created_at: u64, pub summary: TurnSummary }
 // Session gains: pub runtime: SessionRuntime, pub socket_path: Option<PathBuf>
 ```
 `axel_inbox::kind::TURN = 40` ("turn"); `is_message(k)` stays `k < 20`.
 
 ## axel-tui additions (thread view)
+
+```rust
+pub enum ItemBody { …, Changes { files: usize, authored: usize, added: i64, removed: i64, between_turns: bool } }   // a TurnEnd that changed files
+pub enum Row { …, Changes(usize) }   // the change line under a turn: "Δ 3 files  +42 −7"
+pub struct util::DiffLink { pub thread: String, pub session_id: String, pub turn: i64, pub rex_session: String, pub server: Option<String> }   // axel-links://diff?…
+pub mod diff {   // the diff pane (pure state + a loop), run by `axel thread diff --pane`
+    pub struct DiffData { pub agent, pub turn: i64, pub title, pub headline, pub files: Vec<FileEntry>, pub patches: Vec<FilePatch>, pub between_turns, pub truncated, pub note: Option<String>, pub offer_restore: bool, pub can_undo: bool }
+    pub struct FileEntry { pub path, pub label, pub status: char, pub added: Option<i64>, pub removed: Option<i64>, pub authored: bool }
+    pub struct FilePatch { pub path, pub lines: Vec<DiffLine> }   // from parse_patch(git diff --no-color)
+    pub struct DiffLine { pub kind: LineKind /* Hunk|Context|Add|Del|Meta */, pub old: Option<usize>, pub new: Option<usize>, pub text }
+    pub struct Draft { pub path, pub start, pub end, pub side: Side /* old|new */, pub text, pub note }   // serde; kept by the caller
+    pub enum Outcome { Close, Send(String), Undo, Restore, Turn(i64) }
+    pub fn parse_patch(diff: &str) -> Vec<FilePatch>;
+    pub fn review_message(turn: i64, drafts: &[Draft]) -> String;   // "Review of your turn N:" + one ```review block per note
+    pub fn run_diff(data: DiffData, drafts: Vec<Draft>) -> Result<(Outcome, Vec<Draft>)>;
+}
+```
+CLI: `axel thread diff THREAD [--session S] [--turn N] [--stat] [--pane]` (the pane flag is what a DiffLink click runs);
+`axel thread undo THREAD [--session S] [--turn N] [--restore] [-y]`; `axel gc`.
+
+## axel (bin) additions: checkpoints
+
+```rust
+mod undo {   // reverse a turn in the working tree; the index and HEAD are untouched
+    pub fn files_of(c: &TurnChanges) -> Vec<&FileChange>;   // authored files, or all when none is marked
+    pub fn blocked_reason(ctx: &Ctx, session_id: &str) -> Result<Option<String>>;   // Some while the agent is mid-turn
+    pub fn undo(dir: &Path, thread_id: &str, c: &TurnChanges) -> Result<UndoResult>;   // Done(Undone { files, snapshot_ref }) | Conflicts(paths)
+    pub fn restore(dir: &Path, thread_id: &str, c: &TurnChanges) -> Result<Undone>;   // files back to their `before` content
+    pub fn notify(ctx, thread_id, session_id, turn, files, restored) -> Result<()>;   // an fyi note to the session's agent
+}
+mod gc {   // prune refs/axel/checkpoints: ARCHIVED_KEEP_SECS = 7 d, LIVE_KEEP_SECS = 30 d, KEEP_TURNS = 20
+    pub fn prune(dir: &Path, now: i64, info: &dyn Fn(&str) -> ThreadInfo) -> Result<Vec<String>>;
+    pub fn run(ctx: &Ctx, quiet: bool) -> Result<usize>;
+}
+host::fetch_checkpoints(host: &Environment, dir: &Path, thread_id: &str) -> Result<()>;   // git fetch +refs/axel/checkpoints/<thread>/* from the host's repo
+```
 
 ```rust
 pub enum Screen { Dashboard, Launcher, Inbox, Thread(String /*thread_id*/) }

@@ -5,15 +5,19 @@
 //! 3. posts a `question` / `permission_request` message when a human is needed,
 //! 4. adds token usage from the harness transcript,
 //! 5. for `PreToolUse`, acts as the autopilot **guard**: denies a short list of
-//!    irreversible actions and lets everything else through.
+//!    irreversible actions and lets everything else through,
+//! 6. for Claude, checkpoints the workspace at each turn's start and end
+//!    (`UserPromptSubmit`, `Stop`) and shares the turn with what it changed.
 
 use std::io::Read;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use axel_acp::checkpoint::{self, Which};
 use axel_inbox::{EnvelopeBuilder, kind};
 use axel_rex::osc;
-use axel_store::{SessionState, SessionUpdate, StatusReport};
+use axel_store::{SessionState, SessionUpdate, StatusReport, TurnMark, TurnSummary};
 use serde_json::Value;
 
 use super::{Ctx, convert, launch, usage};
@@ -91,6 +95,12 @@ pub fn run(harness: HarnessArg, guard_only: bool) -> Result<()> {
         }
     }
 
+    if harness == HarnessArg::Claude
+        && let Err(e) = claude_turns(&ctx, &agent_kp, &session_id, &thread_id, &event)
+    {
+        eprintln!("axel: checkpoint: {e:#}");
+    }
+
     let Some(m) = mapped else { return Ok(()) };
 
     let app = match harness {
@@ -155,6 +165,148 @@ pub fn run(harness: HarnessArg, guard_only: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A pane session's turns, from Claude's hooks: `UserPromptSubmit` opens a
+/// turn and takes its `before` checkpoint, `PostToolUse` notes the files the
+/// edit tools name, `Stop` takes `after` and shares the turn (kind 40) with
+/// what changed, as the managed host does.  Each hook is a fresh process, so
+/// the turn in progress lives in the store (`TurnMark`).  A snapshot gets
+/// [`HOOK_BUDGET`]: the hook itself has 10 s.
+fn claude_turns(ctx: &Ctx, agent_kp: &axel_identity::Keypair, session_id: &str, thread_id: &str, event: &Value) -> Result<()> {
+    let name = event.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
+    if !matches!(name, "UserPromptSubmit" | "PostToolUse" | "Stop") {
+        return Ok(());
+    }
+    let cwd = event.get("cwd").and_then(Value::as_str).map(PathBuf::from).or_else(|| std::env::current_dir().ok());
+    let mut mark = ctx.store.turn_mark(session_id)?.unwrap_or_else(|| TurnMark { session_id: session_id.to_string(), ..Default::default() });
+    let snapshot = |ordinal: i64, which: Which, same_as: Option<&checkpoint::Snapshot>| -> Option<checkpoint::Snapshot> {
+        let dir = cwd.as_deref()?;
+        match checkpoint::capture(dir, &checkpoint::ref_name(thread_id, session_id, ordinal, which), HOOK_BUDGET, same_as) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("axel: turn {ordinal} checkpoint skipped: {e:#}");
+                None
+            }
+        }
+    };
+    match name {
+        "UserPromptSubmit" => {
+            mark.ordinal += 1;
+            mark.open = true;
+            mark.user_text = event.get("prompt").and_then(Value::as_str).unwrap_or("").to_string();
+            mark.authored.clear();
+            mark.tool_calls = 0;
+            mark.started_at = chrono::Utc::now().timestamp_millis();
+            let before = snapshot(mark.ordinal, Which::Before, None);
+            mark.before_commit = before.as_ref().map(|s| s.commit.clone());
+            mark.before_tree = before.map(|s| s.tree);
+        }
+        "PostToolUse" if mark.open => {
+            mark.tool_calls += 1;
+            let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
+            if matches!(tool, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+                && let Some(p) = event.get("tool_input").and_then(|i| ["file_path", "notebook_path"].iter().find_map(|k| i.get(k).and_then(Value::as_str)))
+            {
+                let p = PathBuf::from(p);
+                let full = if p.is_absolute() { p } else { cwd.as_deref().map_or(p.clone(), |d| d.join(&p)) };
+                let full = full.to_string_lossy().into_owned();
+                if !mark.authored.contains(&full) {
+                    mark.authored.push(full);
+                }
+            }
+        }
+        "Stop" if mark.open => {
+            let before = match (&mark.before_commit, &mark.before_tree) {
+                (Some(c), Some(t)) => Some(checkpoint::Snapshot { commit: c.clone(), tree: t.clone() }),
+                _ => None,
+            };
+            let after = before.as_ref().and_then(|b| snapshot(mark.ordinal, Which::After, Some(b)));
+            let changes = match (&before, &after, cwd.as_deref()) {
+                (Some(b), Some(a), Some(dir)) => {
+                    let authored: Vec<PathBuf> = mark.authored.iter().map(PathBuf::from).collect();
+                    match checkpoint::changes(dir, b, a, &authored) {
+                        Ok(mut c) => {
+                            c.between_turns = mark.last_after_tree.as_ref().is_some_and(|t| *t != b.tree);
+                            Some(c)
+                        }
+                        Err(e) => {
+                            eprintln!("axel: turn {} changes unknown: {e:#}", mark.ordinal);
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let assistant_text = event
+                .get("transcript_path")
+                .and_then(Value::as_str)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|t| last_assistant_text(&t))
+                .unwrap_or_default();
+            let summary = TurnSummary {
+                ordinal: mark.ordinal,
+                user_text: mark.user_text.clone(),
+                assistant_text,
+                tool_calls: mark.tool_calls,
+                files_edited: mark.authored.len() as i64,
+                duration_ms: (chrono::Utc::now().timestamp_millis() - mark.started_at).max(0),
+                stop_reason: "end_turn".into(),
+                changes,
+            };
+            ctx.store.record_turn(agent_kp, session_id, &summary)?;
+            mark.open = false;
+            mark.before_commit = None;
+            mark.before_tree = None;
+            if let Some(a) = after {
+                mark.last_after_tree = Some(a.tree);
+            }
+        }
+        _ => return Ok(()),
+    }
+    Ok(ctx.store.put_turn_mark(&mark)?)
+}
+
+/// The most a hook's snapshot may take (the hook has 10 s in all).
+const HOOK_BUDGET: Duration = Duration::from_secs(6);
+
+/// The assistant's prose of the last turn in a Claude transcript: the text
+/// blocks of the assistant lines after the last prompt the human wrote (a
+/// `user` line whose content is a tool result doesn't start a turn).
+fn last_assistant_text(transcript: &str) -> String {
+    let mut out = String::new();
+    for line in transcript.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let content = v.get("message").and_then(|m| m.get("content"));
+        match v.get("type").and_then(Value::as_str) {
+            Some("user") => {
+                let human = match content {
+                    Some(Value::String(_)) => true,
+                    Some(Value::Array(blocks)) => blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("text")),
+                    _ => false,
+                };
+                if human {
+                    out.clear();
+                }
+            }
+            Some("assistant") => {
+                if let Some(Value::Array(blocks)) = content {
+                    for b in blocks {
+                        if b.get("type").and_then(Value::as_str) == Some("text")
+                            && let Some(t) = b.get("text").and_then(Value::as_str)
+                        {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str(t);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 struct Mapped {
@@ -315,4 +467,22 @@ fn summarize_question(v: &Value) -> String {
         if opts.is_empty() { out.push(text.to_string()) } else { out.push(format!("{text} [{}]", opts.join(" / "))) }
     }
     out.join(" | ")
+}
+
+#[cfg(test)]
+mod turn_tests {
+    #[test]
+    fn the_last_turns_prose_comes_after_the_last_human_prompt() {
+        let t = concat!(
+            "{\"type\":\"user\",\"message\":{\"content\":\"first\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old answer\"}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Let me look.\"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"...\"}]}}\n",
+            "not json\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done.\"}]}}\n",
+        );
+        assert_eq!(super::last_assistant_text(t), "Let me look.\nDone.");
+        assert_eq!(super::last_assistant_text(""), "");
+    }
 }

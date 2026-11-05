@@ -16,6 +16,7 @@ pub mod claude;
 pub mod codex;
 pub mod attach;
 pub mod catchup;
+pub mod checkpoint;
 mod host;
 pub mod log;
 pub mod policy;

@@ -14,6 +14,7 @@ pub mod attach;
 mod compose;
 mod stream;
 pub mod dashboard;
+pub mod diff;
 mod glue;
 pub mod inbox;
 pub mod input;

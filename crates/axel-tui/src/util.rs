@@ -276,6 +276,54 @@ impl ToolsLink {
     }
 }
 
+/// A link to what one turn changed: what a click on the change line under a
+/// turn opens (`axel thread diff`), through the `axel-links://` handler.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffLink {
+    pub thread: String,
+    pub session_id: String,
+    pub turn: i64,
+    /// The Rex session to open the diff pane in, and its server.
+    pub rex_session: String,
+    pub server: Option<String>,
+}
+
+impl DiffLink {
+    /// `axel-links://diff?thread=…&session=…&turn=…&rex=…[&server=…]`, values percent-encoded.
+    pub fn url(&self) -> String {
+        let mut u = format!(
+            "{}://diff?thread={}&session={}&turn={}&rex={}",
+            ToolsLink::SCHEME,
+            pct_encode(&self.thread),
+            pct_encode(&self.session_id),
+            self.turn,
+            pct_encode(&self.rex_session)
+        );
+        if let Some(sv) = &self.server {
+            u.push_str(&format!("&server={}", pct_encode(sv)));
+        }
+        u
+    }
+
+    pub fn parse(url: &str) -> Option<DiffLink> {
+        let rest = url.strip_prefix(&format!("{}://diff?", ToolsLink::SCHEME))?;
+        let (mut thread, mut session_id, mut turn, mut rex_session, mut server) = (None, None, None, None, None);
+        for pair in rest.split('&') {
+            let (k, v) = pair.split_once('=')?;
+            let v = pct_decode(v)?;
+            match k {
+                "thread" => thread = Some(v),
+                "session" => session_id = Some(v),
+                "turn" => turn = v.parse().ok(),
+                "rex" => rex_session = Some(v),
+                "server" => server = Some(v),
+                _ => {}
+            }
+        }
+        Some(DiffLink { thread: thread?, session_id: session_id?, turn: turn?, rex_session: rex_session?, server })
+    }
+}
+
 /// A link that copies the command a tool call ran: `axel-links://copy?item=…`.
 /// It names the call, not the command, so it stays short whatever the command,
 /// and the handler copies it exactly as the agent ran it.
@@ -459,6 +507,11 @@ mod tests {
         assert_eq!(super::CopyLink::parse(&copy.url()), Some(copy));
         assert_eq!(super::CopyLink::parse("axel-links://copy?item="), None);
         assert_eq!(super::ToolsLink::parse("axel-links://copy?item=x"), None, "a copy link isn't a tools link");
+        let diff = super::DiffLink { thread: "01a19dee".into(), session_id: "01S".into(), turn: 4, rex_session: "session:01a18a1a-98e9".into(), server: None };
+        assert_eq!(diff.url(), "axel-links://diff?thread=01a19dee&session=01S&turn=4&rex=session%3A01a18a1a-98e9");
+        assert_eq!(super::DiffLink::parse(&diff.url()), Some(diff));
+        assert_eq!(super::DiffLink::parse("axel-links://diff?thread=t&session=s&turn=x&rex=r"), None, "the turn is a number");
+        assert_eq!(super::ToolsLink::parse("axel-links://diff?thread=t&session=s&turn=1&rex=r"), None);
         let r = super::RevealLink { path: "/tmp/a b/Screenshot 01.03.png".into() };
         assert_eq!(super::RevealLink::parse(&r.url()), Some(r));
         assert_eq!(super::RevealLink::parse("axel-links://copy?item=x"), None);

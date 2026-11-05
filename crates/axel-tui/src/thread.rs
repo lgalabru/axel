@@ -52,8 +52,9 @@ pub enum Entry {
     Fold(Vec<usize>),
 }
 
-/// Group items into timeline entries: `TurnEnd` is dropped and every run of
-/// consecutive `ToolCall` items becomes one [`Entry::Fold`].
+/// Group items into timeline entries: `TurnEnd` is dropped (unless it
+/// carries the turn's change line) and every run of consecutive `ToolCall`
+/// items becomes one [`Entry::Fold`].
 pub fn group_items(items: &[ThreadItem]) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut run: Vec<usize> = Vec::new();
@@ -65,7 +66,7 @@ pub fn group_items(items: &[ThreadItem]) -> Vec<Entry> {
         if !run.is_empty() {
             out.push(Entry::Fold(std::mem::take(&mut run)));
         }
-        if it.kind != ItemKind::TurnEnd {
+        if it.kind != ItemKind::TurnEnd || matches!(it.body, ItemBody::Changes { .. }) {
             out.push(Entry::Item(i));
         }
     }
@@ -88,13 +89,15 @@ pub enum Row {
     Fold(Vec<usize>),
     /// One tool call inside an expanded fold; `expanded` shows its output head.
     Tool { idx: usize, fold_first: usize },
+    /// The change line under a turn: files, lines added and removed.
+    Changes(usize),
 }
 
 impl Row {
     /// Stable identity used to keep the cursor across refreshes.
     pub fn key(&self, items: &[ThreadItem]) -> String {
         match self {
-            Row::Prose(i) | Row::Choice(i) | Row::Thought(i) | Row::Tool { idx: i, .. } => items[*i].id.clone(),
+            Row::Prose(i) | Row::Choice(i) | Row::Thought(i) | Row::Tool { idx: i, .. } | Row::Changes(i) => items[*i].id.clone(),
             Row::Fold(v) => format!("fold:{}", items[v[0]].id),
         }
     }
@@ -298,6 +301,7 @@ impl ThreadView {
                 Entry::Item(i) => match items[i].kind {
                     ItemKind::Permission | ItemKind::Question => rows.push(Row::Choice(i)),
                     ItemKind::Thought => rows.push(Row::Thought(i)),
+                    ItemKind::TurnEnd if matches!(items[i].body, ItemBody::Changes { .. }) => rows.push(Row::Changes(i)),
                     ItemKind::ToolCall | ItemKind::TurnEnd => {}
                     // Queued prompts live in the strip above the composer.
                     _ if is_queued(&items[i]) => {}
@@ -484,7 +488,7 @@ impl ThreadView {
     /// Session to open the raw log of: the item under the cursor, else the latest live one.
     pub fn log_target(&self) -> Option<String> {
         let from_cursor = self.current_row().map(|r| match r {
-            Row::Prose(i) | Row::Choice(i) | Row::Thought(i) | Row::Tool { idx: i, .. } => self.data.items[i].session_id.clone(),
+            Row::Prose(i) | Row::Choice(i) | Row::Thought(i) | Row::Tool { idx: i, .. } | Row::Changes(i) => self.data.items[i].session_id.clone(),
             Row::Fold(v) => self.data.items[v[0]].session_id.clone(),
         });
         from_cursor.filter(|s| !s.is_empty()).or_else(|| self.data.live_sessions.first().map(|s| s.id.clone()))
@@ -1301,6 +1305,23 @@ mod tests {
         for c in s.chars() {
             v.handle_key(key(KeyCode::Char(c)));
         }
+    }
+
+    #[test]
+    fn a_turn_that_changed_files_keeps_its_change_line() {
+        let mut items = items();
+        let changes = ItemBody::Changes { files: 3, authored: 2, added: 42, removed: 7, between_turns: false };
+        items.push(item("e1", ItemKind::TurnEnd, changes.clone(), 7_000));
+        items.push(item("e2", ItemKind::TurnEnd, ItemBody::Empty, 7_500));
+        let g = group_items(&items);
+        assert_eq!(g.last(), Some(&Entry::Item(8)), "the change line stays; a bare turn end goes: {g:?}");
+        let v = ThreadView::new("T1", ThreadData { items, ..data() });
+        let rows = v.rows();
+        assert_eq!(rows.last(), Some(&Row::Changes(8)));
+        assert_eq!(rows.last().unwrap().key(&v.data.items), "e1");
+        let line = crate::view::thread_view::row_lines(&v, &Row::Changes(8), 80, false);
+        let text: String = line[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "  Δ 2 files (+1 not this agent)  +42 −7");
     }
 
     #[test]

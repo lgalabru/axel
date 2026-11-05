@@ -578,6 +578,116 @@ pub struct TurnSummary {
     pub duration_ms: i64,
     #[serde(default)]
     pub stop_reason: String,
+    /// What the turn changed in the workspace, from its checkpoints (`None`
+    /// when the workspace isn't a git repository, or the build predates them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<TurnChanges>,
+}
+
+/// The tree before and after one turn, and what differs: the shareable part
+/// of a turn's checkpoints.  The diff itself stays in the repository that ran
+/// the turn (`refs/axel/checkpoints/<thread>/<session>/<ordinal>/{before,after}`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnChanges {
+    /// Commit of the tree when the turn started.
+    pub before: String,
+    /// Commit of the tree when it ended; equal to `before` when nothing changed.
+    pub after: String,
+    /// Changed files, at most [`TurnChanges::MAX_FILES`].
+    #[serde(default)]
+    pub files: Vec<FileChange>,
+    /// More files changed than `files` lists.
+    #[serde(default)]
+    pub truncated: bool,
+    /// The tree at the start didn't match the end of the session's previous
+    /// turn: `files` includes edits made between the two.
+    #[serde(default)]
+    pub between_turns: bool,
+}
+
+impl TurnChanges {
+    pub const MAX_FILES: usize = 200;
+
+    /// Lines added and removed over every listed file (binary files count for none).
+    pub fn totals(&self) -> (i64, i64) {
+        self.files.iter().fold((0, 0), |(a, r), f| (a + f.added.unwrap_or(0), r + f.removed.unwrap_or(0)))
+    }
+
+    /// Files this session's own edit tools touched.
+    pub fn authored(&self) -> usize {
+        self.files.iter().filter(|f| f.authored).count()
+    }
+}
+
+/// One file a turn changed.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileChange {
+    /// Relative to the workspace root.
+    pub path: String,
+    /// Where it was, for a rename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: ChangeStatus,
+    /// Lines added; `None` for a binary file.
+    pub added: Option<i64>,
+    pub removed: Option<i64>,
+    /// One of this session's edit tools touched it during the turn (a file
+    /// a shell command changed, or another agent did, is not authored).
+    #[serde(default)]
+    pub authored: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeStatus {
+    Added,
+    #[default]
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+impl ChangeStatus {
+    /// git's one-letter status.
+    pub fn letter(self) -> char {
+        match self {
+            ChangeStatus::Added => 'A',
+            ChangeStatus::Modified => 'M',
+            ChangeStatus::Deleted => 'D',
+            ChangeStatus::Renamed => 'R',
+        }
+    }
+
+    /// From git's `--name-status` letter (`R100` → `Renamed`); anything else
+    /// (copies, type changes) reads as modified.
+    pub fn from_letter(s: &str) -> ChangeStatus {
+        match s.chars().next() {
+            Some('A') => ChangeStatus::Added,
+            Some('D') => ChangeStatus::Deleted,
+            Some('R') => ChangeStatus::Renamed,
+            _ => ChangeStatus::Modified,
+        }
+    }
+}
+
+/// Where a pane session's turn stands, for hooks that run once per event
+/// (local-only).  `open` while a turn runs: `before_*` is its checkpoint.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnMark {
+    pub session_id: String,
+    /// The current (open) or last turn.
+    pub ordinal: i64,
+    pub open: bool,
+    pub before_commit: Option<String>,
+    pub before_tree: Option<String>,
+    /// The tree the previous turn ended with.
+    pub last_after_tree: Option<String>,
+    pub user_text: String,
+    /// Files this turn's edit tools named (absolute paths).
+    pub authored: Vec<String>,
+    pub tool_calls: i64,
+    /// Unix milliseconds.
+    pub started_at: i64,
 }
 
 /// A projected `turn` envelope.

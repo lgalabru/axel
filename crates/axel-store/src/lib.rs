@@ -53,7 +53,7 @@ pub use types::{
     ItemStatus, NewAgent, NewItem, NewSession, Participant, ParticipantRole, Project, Relationship,
     RuntimeMode, Session, SessionFilter, SessionRuntime, SessionState, SessionUpdate, Status,
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,
-    ThreadWorkspace, Turn, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
+    ThreadWorkspace, Turn, TurnChanges, TurnMark, FileChange, ChangeStatus, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
 };
 pub use wire::kind;
 

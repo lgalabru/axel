@@ -258,6 +258,18 @@ pub enum ItemBody {
     },
     /// `Answer`: label of the option picked.
     Answered(String),
+    /// `TurnEnd` of a turn that changed files (from its checkpoints): the
+    /// change line under the turn.
+    Changes {
+        files: usize,
+        /// Files this session's own edit tools touched; the rest changed
+        /// during the turn by other means (a command, another agent).
+        authored: usize,
+        added: i64,
+        removed: i64,
+        /// Includes edits made between this turn and the previous one.
+        between_turns: bool,
+    },
     Empty,
 }
 

@@ -743,8 +743,8 @@ fn apply(conn: &Connection, e: &Envelope, thread_id: &str) -> Result<Applied, Er
             };
             conn.execute(
                 "INSERT OR REPLACE INTO turns (id, thread_id, session_id, from_pubkey, created_at, ordinal, user_text,
-                     assistant_text, tool_calls, files_edited, duration_ms, stop_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     assistant_text, tool_calls, files_edited, duration_ms, stop_reason, changes_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     e.id,
                     thread_id,
@@ -757,7 +757,8 @@ fn apply(conn: &Connection, e: &Envelope, thread_id: &str) -> Result<Applied, Er
                     t.tool_calls,
                     t.files_edited,
                     t.duration_ms,
-                    t.stop_reason
+                    t.stop_reason,
+                    t.changes.as_ref().and_then(|c| serde_json::to_string(c).ok()),
                 ],
             )?;
         }

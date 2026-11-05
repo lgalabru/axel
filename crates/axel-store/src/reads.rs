@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, Row, ToSql, params, params_from_iter};
 
 use crate::log::{EVENT_COLS, row_envelope};
 use crate::wire::kind;
-use crate::{
+use crate::{TurnMark, 
     Error, Harness, INBOX_SCOPE, Participant, Session, SessionFilter, Status, Store, Thread,
     ThreadFilter, ThreadProject, ThreadSummary, ThreadWorkspace, Turn, TurnSummary, Usage,
     UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit,
@@ -341,7 +341,7 @@ impl Store {
     pub fn turns(&self, thread_id: &str) -> Result<Vec<Turn>, Error> {
         let mut st = self.conn.prepare(
             "SELECT id, thread_id, session_id, from_pubkey, created_at, ordinal, user_text, assistant_text,
-                    tool_calls, files_edited, duration_ms, stop_reason
+                    tool_calls, files_edited, duration_ms, stop_reason, changes_json
              FROM turns WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = st.query_map([thread_id], |r| {
@@ -359,10 +359,34 @@ impl Store {
                     files_edited: r.get("files_edited")?,
                     duration_ms: r.get("duration_ms")?,
                     stop_reason: r.get("stop_reason")?,
+                    changes: r.get::<_, Option<String>>("changes_json")?.and_then(|j| serde_json::from_str(&j).ok()),
                 },
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Where a pane session's turn stands, if a hook has recorded one.
+    pub fn turn_mark(&self, session_id: &str) -> Result<Option<TurnMark>, Error> {
+        let mut st = self.conn.prepare(
+            "SELECT session_id, ordinal, open, before_commit, before_tree, last_after_tree, user_text, authored_json, tool_calls, started_at
+             FROM turn_marks WHERE session_id = ?1",
+        )?;
+        let mut rows = st.query_map([session_id], |r| {
+            Ok(TurnMark {
+                session_id: r.get("session_id")?,
+                ordinal: r.get("ordinal")?,
+                open: r.get::<_, i64>("open")? != 0,
+                before_commit: r.get("before_commit")?,
+                before_tree: r.get("before_tree")?,
+                last_after_tree: r.get("last_after_tree")?,
+                user_text: r.get("user_text")?,
+                authored: serde_json::from_str(&r.get::<_, String>("authored_json")?).unwrap_or_default(),
+                tool_calls: r.get("tool_calls")?,
+                started_at: r.get("started_at")?,
+            })
+        })?;
+        rows.next().transpose().map_err(Into::into)
     }
 
     /// The agent's most recently started session, ended or not.

@@ -11,7 +11,7 @@
 //!   `thread_projects`, `thread_participants`, `sessions`, `status`, `usage`,
 //!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
-//!   `session_context`, `plan_limits`,
+//!   `session_context`, `plan_limits`, `turn_marks`,
 //!   plus the `sessions.transcript_offset` column.
 
 use rusqlite::Connection;
@@ -377,6 +377,29 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (harness, window)
     );
     "#,
+    // v8: what each turn changed in the workspace (`TurnChanges` as JSON, from
+    // the turn envelope's `changes`; NULL when the turn carried none).  The
+    // column is added by `post_migrate`, which also adds it at v2 so the
+    // re-projection there can write it.
+    // Local-only `turn_marks`: where a pane session's turn stands, for the
+    // Claude hooks, which run once per event and remember nothing themselves:
+    // the ordinal, the `before` checkpoint while a turn is open, the files its
+    // edit tools named, and the tree the previous turn ended with.
+    r#"
+    -- turns.changes_json: see post_migrate.
+    CREATE TABLE IF NOT EXISTS turn_marks (
+        session_id       TEXT PRIMARY KEY,
+        ordinal          INTEGER NOT NULL,
+        open             INTEGER NOT NULL DEFAULT 0,
+        before_commit    TEXT,
+        before_tree      TEXT,
+        last_after_tree  TEXT,
+        user_text        TEXT NOT NULL DEFAULT '',
+        authored_json    TEXT NOT NULL DEFAULT '[]',
+        tool_calls       INTEGER NOT NULL DEFAULT 0,
+        started_at       INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.
@@ -449,9 +472,14 @@ fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
         tx.execute("UPDATE conversation_items SET rev = rowid", [])?;
         tx.execute("UPDATE item_rev SET n = (SELECT COALESCE(MAX(rev), 0) FROM conversation_items)", [])?;
     }
+    if version == 8 {
+        add_column_if_missing(tx, "turns", "changes_json", "TEXT")?;
+    }
     if version == 2 {
         add_column_if_missing(tx, "sessions", "runtime", "TEXT NOT NULL DEFAULT 'pane'")?;
         add_column_if_missing(tx, "sessions", "socket_path", "TEXT")?;
+        // The projection below writes every column the current code knows.
+        add_column_if_missing(tx, "turns", "changes_json", "TEXT")?;
         // Re-project every thread that already holds a turn envelope, so the
         // new `turns` table reflects the log.  (Older `sessions` rows keep
         // the default `runtime = 'pane'`.)

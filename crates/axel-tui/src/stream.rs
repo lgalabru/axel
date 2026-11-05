@@ -291,6 +291,18 @@ impl Stream {
             let link = crate::util::ToolsLink { fold: v.data.items[idx[0]].id.clone(), ..base.clone() };
             *first = crate::util::hyperlink(&link.url(), first);
         }
+        // The change line under a turn opens that turn's diff.
+        if let (Row::Changes(i), Some(base), Some(first)) = (row, &self.links, lines.first_mut()) {
+            let it = &v.data.items[*i];
+            let link = crate::util::DiffLink {
+                thread: base.thread.clone(),
+                session_id: it.session_id.clone(),
+                turn: it.turn,
+                rex_session: base.session.clone(),
+                server: base.server.clone(),
+            };
+            *first = crate::util::hyperlink(&link.url(), first);
+        }
         if let Row::Prose(i) = row {
             link_chips(&mut lines, &v.data.items[*i], width);
         }
@@ -421,6 +433,7 @@ fn is_settled(row: &Row, items: &[ThreadItem], last: bool, working: bool) -> boo
         Row::Prose(i) | Row::Thought(i) | Row::Choice(i) => !moving(*i),
         Row::Tool { idx, .. } => !moving(*idx),
         Row::Fold(v) => !v.iter().any(|i| moving(*i)),
+        Row::Changes(_) => true,
     }
 }
 

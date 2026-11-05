@@ -620,3 +620,54 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   participants see the conversation; raw logs and full items stay on the environment.
 - **Usage** for managed sessions: taken from adapter `_meta`/usage fields when present,
   else from Claude's transcript as for pane sessions. Best effort in P0.
+
+## Turn checkpoints: what a turn changed
+
+Autopilot only works if what comes after is cheap: what changed, is it right, and if
+not, make it go away. So every turn in a git workspace leaves a **checkpoint**: a hidden
+commit of the tree before the turn and another after it, made the way the remote handoff
+snapshots a tree (`axel_acp::checkpoint`: a temporary index, tracked and untracked files,
+not ignored ones, unsigned, on top of HEAD; a clean tree is HEAD itself). They live under
+`refs/axel/checkpoints/<thread>/<session>/<ordinal>/{before,after}`, which nothing lists
+or pushes. A snapshot has a time budget (10 s in the host, 6 s in a hook): past it, or
+outside a repository, the turn simply has no checkpoint.
+
+- **Managed sessions**: the host snapshots before the prompt goes out and after the turn
+  ends, and notes the files the edit tool calls name (their ACP locations).
+- **Pane sessions** (Claude): `UserPromptSubmit` opens the turn and takes `before`,
+  `PostToolUse` notes `Write`/`Edit` paths, `Stop` takes `after` and shares the turn. Each
+  hook is a fresh process, so the open turn sits in the local `turn_marks` table. (Codex
+  has only `notify`, at the end of a turn: not covered yet.)
+- **What is shared**: the `turn` envelope (kind 40) gains `changes`: the two commit ids,
+  the file list (status, lines added and removed, `authored` when this session's edit
+  tools touched the file) and `between_turns` when the tree at the start didn't match the
+  previous turn's end. The diff itself stays in the repository that ran the turn.
+- **Seeing it**: a dim change line under the turn in the thread view, `Δ 3 files  +42 −7`,
+  or `2 files (+1 not this agent)` when other hands changed files during the turn. In Rex
+  it's a link that opens the turn's diff in a floating pane; `axel thread diff THREAD
+  [--session S] [--turn N] [--stat]` prints the same.
+- **The diff pane** (`axel_tui::diff`): the file list on top, the agent's own files
+  first, the selected file's diff below. `v` marks lines, `c` writes a note under them;
+  notes pile up as drafts (kept in `~/.axel/reviews/`, so closing the pane loses
+  nothing) and `⏎` sends them as one message, a fenced `review` block per note with the
+  path, the line range, the side (`old` for removed lines) and the marked lines, then
+  the note: plain text, so every harness reads it. It goes into the live managed
+  session, else it summons the agent back onto the thread. `[` and `]` step between
+  the session's turns.
+- **Undo** (`u` in the pane, `axel thread undo`): the reverse of the turn's
+  `before..after` patch, limited to its authored files (all of them when none is
+  marked), applied to the working tree only, after a snapshot of the tree under
+  `refs/axel/checkpoints/<thread>/undo/<n>` so an undo can be undone. A hunk that later
+  work overlaps stops it before anything is written; `R` (`--restore`) then rewrites the
+  turn's files to their `before` content instead. Not offered while the agent is
+  mid-turn. The agent gets a note saying which files went back, so it doesn't build on
+  code that's gone.
+- **Across environments**: a turn that ran on a host is read here after `git fetch` of
+  `refs/axel/checkpoints/<thread>/*` from the host's copy of the repository, over the
+  same SSH connection the handoff uses. Undo runs where the checkout is.
+- **Pruning** (`axel gc`, also after `axel thread archive`): checkpoints of archived or
+  deleted threads go after 7 days; on live threads, after 30 days only each session's
+  latest 20 turns stay. Git's own gc reclaims the objects.
+- **Not yet**: Codex pane sessions (no turn-start hook), and settings for the retention
+  numbers.
+

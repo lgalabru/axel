@@ -551,8 +551,20 @@ pub(crate) fn decode_body(kind: ItemKind, content: &Value) -> ItemBody {
         ItemKind::Answer => ItemBody::Answered(
             str_of(content, &["label", "name", "optionId", "option_id", "text"]).map(str::to_string).or_else(|| text_of(content)).unwrap_or_default(),
         ),
-        ItemKind::TurnEnd => ItemBody::Empty,
+        ItemKind::TurnEnd => content
+            .get("changes")
+            .and_then(|c| serde_json::from_value::<axel_store::TurnChanges>(c.clone()).ok())
+            .map_or(ItemBody::Empty, |c| changes_body(&c)),
     }
+}
+
+/// The change line of a turn, or nothing when it changed no file.
+fn changes_body(c: &axel_store::TurnChanges) -> ItemBody {
+    if c.files.is_empty() {
+        return ItemBody::Empty;
+    }
+    let (added, removed) = c.totals();
+    ItemBody::Changes { files: c.files.len(), authored: c.authored(), added, removed, between_turns: c.between_turns }
 }
 
 pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) -> Result<ThreadData> {
@@ -663,7 +675,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             session_id: t.session_id.clone(),
             agent: None,
             author,
-            seq: t.summary.ordinal * 2,
+            seq: t.summary.ordinal * 3,
             turn: t.summary.ordinal,
             at_ms,
             kind: ItemKind::UserMessage,
@@ -685,12 +697,13 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
                 t.summary.stop_reason
             ));
         }
+        let changes = t.summary.changes.as_ref().map(changes_body).filter(|b| *b != ItemBody::Empty);
         items.push(ThreadItem {
             id: format!("{}:a", t.id),
-            session_id: t.session_id,
-            agent,
+            session_id: t.session_id.clone(),
+            agent: agent.clone(),
             author: None,
-            seq: t.summary.ordinal * 2 + 1,
+            seq: t.summary.ordinal * 3 + 1,
             turn: t.summary.ordinal,
             at_ms: at_ms + 1,
             kind: ItemKind::AssistantMessage,
@@ -700,6 +713,23 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
             relay_to: None,
             steering: false,
         });
+        if let Some(body) = changes {
+            items.push(ThreadItem {
+                id: format!("{}:c", t.id),
+                session_id: t.session_id,
+                agent,
+                author: None,
+                seq: t.summary.ordinal * 3 + 2,
+                turn: t.summary.ordinal,
+                at_ms: at_ms + 2,
+                kind: ItemKind::TurnEnd,
+                status: Some(ItemStatus::Completed),
+                body,
+                attachments: Vec::new(),
+                relay_to: None,
+                steering: false,
+            });
+        }
     }
     items.sort_by_key(|i| (i.at_ms, i.seq));
     // Who spoke last decides where a message without a mention goes.
@@ -833,6 +863,20 @@ mod tests {
         assert_eq!(decode_body(ItemKind::Error, &json!({"message": "boom"})), ItemBody::Text("boom".into()));
         assert_eq!(decode_body(ItemKind::Answer, &json!({"optionId": "allow"})), ItemBody::Answered("allow".into()));
         assert_eq!(decode_body(ItemKind::TurnEnd, &json!({})), ItemBody::Empty);
+        let changes = json!({ "before": "a", "after": "b", "between_turns": true, "files": [
+            { "path": "src/a.rs", "status": "modified", "added": 4, "removed": 1, "authored": true },
+            { "path": "Cargo.lock", "status": "modified", "added": 2, "removed": 2 },
+            { "path": "img.png", "status": "added", "added": null, "removed": null, "authored": true },
+        ]});
+        assert_eq!(
+            decode_body(ItemKind::TurnEnd, &json!({ "stop_reason": "end_turn", "changes": changes })),
+            ItemBody::Changes { files: 3, authored: 2, added: 6, removed: 3, between_turns: true }
+        );
+        assert_eq!(
+            decode_body(ItemKind::TurnEnd, &json!({ "changes": { "before": "a", "after": "a", "files": [] } })),
+            ItemBody::Empty,
+            "a turn that changed nothing has no change line"
+        );
         assert_eq!(
             attachments_of(&json!({"text": "see", "attachments": ["/tmp/a.png", {"path": "/tmp/b.txt"}]})),
             vec![std::path::PathBuf::from("/tmp/a.png"), std::path::PathBuf::from("/tmp/b.txt")]

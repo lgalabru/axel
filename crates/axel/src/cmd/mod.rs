@@ -2,6 +2,8 @@
 
 mod agent;
 mod convert;
+mod diff;
+mod gc;
 mod doctor;
 mod hook;
 mod host;
@@ -17,6 +19,7 @@ mod links;
 mod status;
 mod thread;
 mod ui;
+mod undo;
 mod usage;
 mod mcp;
 
@@ -103,6 +106,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Inbox { agent, json }) => inbox::show(agent.as_deref(), json),
         Some(Command::Usage) => ui::toggle_usage(),
         Some(Command::Doctor) => doctor::run(),
+        Some(Command::Gc) => gc::run(&Ctx::open()?, false).map(|_| ()),
         Some(Command::Mcp) => mcp::run(),
         Some(Command::Links { command: crate::cli::LinksCommand::Install }) => {
             let app = links::install()?;

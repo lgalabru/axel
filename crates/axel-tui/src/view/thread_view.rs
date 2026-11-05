@@ -400,6 +400,25 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 _ => vec![Line::from(Span::styled("·", dim))],
             }
         }
+        Row::Changes(i) => {
+            let ItemBody::Changes { files, authored, added, removed, between_turns } = &items[*i].body else { return Vec::new() };
+            let marker = if selected { base.fg(theme::ACCENT) } else { dim };
+            // "3 files  +42 −7"; with other hands in the tree, the agent's own
+            // files first: "2 files (+1 not this agent)  +42 −7".
+            let (own, other) = if *authored > 0 && authored < files { (*authored, files - authored) } else { (*files, 0) };
+            let mut what = format!("{own} file{}", if own == 1 { "" } else { "s" });
+            if other > 0 {
+                what.push_str(&format!(" (+{other} not this agent)"));
+            }
+            if *between_turns {
+                what.push_str(" incl. changes between turns");
+            }
+            let mut spans = vec![Span::styled("  Δ ", marker), Span::styled(what, dim), Span::styled("  ", dim)];
+            spans.push(Span::styled(format!("+{added}"), if selected { base.fg(theme::OK) } else { Style::default().fg(theme::OK) }));
+            spans.push(Span::styled(" ", dim));
+            spans.push(Span::styled(format!("−{removed}"), if selected { base.fg(theme::DANGER) } else { Style::default().fg(theme::DANGER) }));
+            vec![Line::from(spans)]
+        }
         Row::Thought(i) => {
             let it = &items[*i];
             let mut lines = vec![Line::from(vec![
