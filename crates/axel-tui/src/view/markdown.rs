@@ -8,8 +8,6 @@ use ratatui::text::{Line, Span};
 
 /// Inline code and fenced blocks.
 pub const CODE: Color = Color::Indexed(110);
-/// Behind code and tables: a shade darker than the terminal's own.
-pub const CODE_BG: Color = Color::Rgb(7, 9, 13);
 
 /// One character and its style.
 type Cell = (char, Style);
@@ -17,8 +15,7 @@ type Cell = (char, Style);
 /// `text` as lines at most `width` columns wide.
 pub fn md_lines(text: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     let width = width.max(8);
-    let code = base.fg(CODE).bg(CODE_BG);
-    let block_bg = base.bg(CODE_BG);
+    let code = base.fg(CODE);
     let mut out = Vec::new();
     let mut fenced = false;
     let lines: Vec<&str> = text.split('\n').collect();
@@ -33,7 +30,7 @@ pub fn md_lines(text: &str, width: usize, base: Style) -> Vec<Line<'static>> {
             while lines.get(end).is_some_and(|l| l.trim_start().starts_with('|')) {
                 end += 1;
             }
-            out.extend(table(raw, lines[i], &lines[i + 1..end], width, block_bg, code));
+            out.extend(table(raw, lines[i], &lines[i + 1..end], width, base, code));
             i = end;
             continue;
         }
@@ -43,17 +40,14 @@ pub fn md_lines(text: &str, width: usize, base: Style) -> Vec<Line<'static>> {
         }
         if fenced {
             // Kept as written, spaces and all, broken only at the width.
-            // On the darker ground, filled to the width so it reads as a block.
             let cells: Vec<Cell> = raw.chars().map(|c| (c, code)).collect();
-            let room = width.saturating_sub(2).max(1);
-            for chunk in cells.chunks(room) {
-                let mut line = vec![(' ', block_bg), (' ', block_bg)];
+            for chunk in cells.chunks(width.saturating_sub(2).max(1)) {
+                let mut line = vec![(' ', base), (' ', base)];
                 line.extend_from_slice(chunk);
-                line.extend(std::iter::repeat_n((' ', block_bg), room - chunk.len()));
                 out.push(to_line(&line));
             }
             if cells.is_empty() {
-                out.push(to_line(&vec![(' ', block_bg); width]));
+                out.push(Line::from(""));
             }
             continue;
         }
@@ -417,12 +411,9 @@ mod tests {
     #[test]
     fn a_fenced_block_keeps_its_spacing_and_drops_its_fences() {
         let l = md_lines("run:\n```sh\n  cargo test  -p axel\n```\nthen", 40, Style::default());
-        let rows = text(&l);
-        assert_eq!(rows[1].trim_end(), "    cargo test  -p axel");
-        assert_eq!((rows[0].as_str(), rows[2].as_str()), ("run:", "then"));
-        assert_eq!(rows[1].chars().count(), 40, "filled to the width: a block");
+        assert_eq!(text(&l), vec!["run:", "    cargo test  -p axel", "then"]);
         let code = span(&l, "  cargo test  -p axel").style;
-        assert_eq!((code.fg, code.bg), (Some(CODE), Some(CODE_BG)), "on the darker ground");
+        assert_eq!((code.fg, code.bg), (Some(CODE), None), "no background of its own");
     }
 
     #[test]
