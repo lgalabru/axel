@@ -655,7 +655,8 @@ outside a repository, the turn simply has no checkpoint.
   it's a link that opens the turn's diff in a floating pane; `axel thread diff THREAD
   [--session S] [--turn N] [--stat]` prints the same.
 - **The diff pane** (`axel_tui::diff`): the file list on top, the agent's own files
-  first, the selected file's diff below. `v` marks lines, `c` writes a note under them;
+  first, the selected file's diff below, old and new text side by side when the pane is
+  wide enough (`s` switches). `v` marks lines, `c` writes a note under them;
   notes pile up as drafts (kept in `~/.axel/reviews/`, so closing the pane loses
   nothing) and `⏎` sends them as one message, a fenced `review` block per note with the
   path, the line range, the side (`old` for removed lines) and the marked lines, then

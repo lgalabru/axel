@@ -116,6 +116,81 @@ pub enum Outcome {
     Turn(i64),
 }
 
+/// How the diff is laid out: one column of +/− lines, or the old and new
+/// text side by side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Unified,
+    SideBySide,
+}
+
+impl Layout {
+    /// Side by side needs room for two readable columns.
+    pub const SIDE_BY_SIDE_MIN_WIDTH: usize = 110;
+
+    /// What a pane `width` columns wide gets when nobody chose.
+    pub fn auto(width: usize) -> Layout {
+        if width >= Self::SIDE_BY_SIDE_MIN_WIDTH { Layout::SideBySide } else { Layout::Unified }
+    }
+
+    pub fn other(self) -> Layout {
+        match self {
+            Layout::Unified => Layout::SideBySide,
+            Layout::SideBySide => Layout::Unified,
+        }
+    }
+}
+
+/// One row of the side-by-side layout: indices into the patch lines.  A
+/// hunk header or a `Binary files` line spans both columns (`full`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SideRow {
+    pub left: Option<usize>,
+    pub right: Option<usize>,
+    pub full: Option<usize>,
+}
+
+impl SideRow {
+    /// The line the cursor sits on when it lands on this row.
+    pub fn first(&self) -> usize {
+        self.full.or(self.left).or(self.right).unwrap_or(0)
+    }
+
+    pub fn holds(&self, line: usize) -> bool {
+        self.full == Some(line) || self.left == Some(line) || self.right == Some(line)
+    }
+}
+
+/// Pair the patch lines into side-by-side rows: context on both sides, a
+/// run of removed lines beside the run of added lines that follows it, the
+/// longer run's tail alone, headers across both columns.
+pub fn side_rows(lines: &[DiffLine]) -> Vec<SideRow> {
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        match lines[i].kind {
+            LineKind::Hunk | LineKind::Meta => {
+                rows.push(SideRow { full: Some(i), ..Default::default() });
+                i += 1;
+            }
+            LineKind::Context => {
+                rows.push(SideRow { left: Some(i), right: Some(i), full: None });
+                i += 1;
+            }
+            LineKind::Del | LineKind::Add => {
+                let dels: Vec<usize> = (i..lines.len()).take_while(|&j| lines[j].kind == LineKind::Del).collect();
+                let after = i + dels.len();
+                let adds: Vec<usize> = (after..lines.len()).take_while(|&j| lines[j].kind == LineKind::Add).collect();
+                for k in 0..dels.len().max(adds.len()) {
+                    rows.push(SideRow { left: dels.get(k).copied(), right: adds.get(k).copied(), full: None });
+                }
+                i = after + adds.len();
+            }
+        }
+    }
+    rows
+}
+
 /// The pane's state.
 #[derive(Clone, Debug)]
 pub struct DiffView {
@@ -133,14 +208,33 @@ pub struct DiffView {
     pub input: Option<String>,
     /// Waiting for `y` to undo.
     pub confirm_undo: bool,
+    /// The layout chosen with `s`; `None` follows the pane's width.
+    pub layout: Option<Layout>,
     /// Rows the diff got at the last draw, to page by.
     page: usize,
+    /// The pane's width at the last draw, for the automatic layout.
+    last_width: usize,
 }
 
 impl DiffView {
     pub fn new(data: DiffData, drafts: Vec<Draft>) -> Self {
         let file = data.files.iter().position(|f| f.authored).unwrap_or(0);
-        DiffView { data, drafts, file, cursor: 0, scroll: 0, mark: None, input: None, confirm_undo: false, page: 20 }
+        DiffView { data, drafts, file, cursor: 0, scroll: 0, mark: None, input: None, confirm_undo: false, layout: None, page: 20, last_width: 80 }
+    }
+
+    /// The layout in force: the one chosen, else the one the width calls for.
+    pub fn layout(&self) -> Layout {
+        self.layout.unwrap_or_else(|| Layout::auto(self.last_width))
+    }
+
+    /// The side-by-side rows of the selected file.
+    pub fn rows(&self) -> Vec<SideRow> {
+        side_rows(self.lines())
+    }
+
+    /// The row the cursor is on (side by side).
+    pub fn cursor_row(&self) -> usize {
+        self.rows().iter().position(|r| r.holds(self.cursor)).unwrap_or(0)
     }
 
     /// The selected file's patch lines (none for a binary file or no diff).
@@ -169,16 +263,20 @@ impl DiffView {
         }
     }
 
+    /// Move by lines (unified) or by rows (side by side); the draw keeps the
+    /// cursor on screen.
     fn move_cursor(&mut self, delta: isize) {
         let n = self.lines().len();
         if n == 0 {
             return;
         }
-        self.cursor = (self.cursor as isize + delta).clamp(0, n as isize - 1) as usize;
-        if self.cursor < self.scroll {
-            self.scroll = self.cursor;
-        } else if self.cursor >= self.scroll + self.page {
-            self.scroll = self.cursor + 1 - self.page;
+        match self.layout() {
+            Layout::Unified => self.cursor = (self.cursor as isize + delta).clamp(0, n as isize - 1) as usize,
+            Layout::SideBySide => {
+                let rows = self.rows();
+                let r = (self.cursor_row() as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+                self.cursor = rows[r].first();
+            }
         }
     }
 
@@ -241,6 +339,7 @@ impl DiffView {
             KeyCode::Char('g') => self.move_cursor(-(self.lines().len() as isize)),
             KeyCode::Char('G') => self.move_cursor(self.lines().len() as isize),
             KeyCode::Char('v') => self.mark = if self.mark.is_some() { None } else { Some(self.cursor) },
+            KeyCode::Char('s') => self.layout = Some(self.layout().other()),
             KeyCode::Char('c') => {
                 if !self.lines().is_empty() {
                     self.input = Some(String::new());
@@ -435,10 +534,17 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
     let footer_h = 1;
     let diff_h = area.height.saturating_sub(y - area.y + footer_h) as usize;
     v.page = diff_h.max(1);
-    if v.cursor < v.scroll {
-        v.scroll = v.cursor;
-    } else if v.cursor >= v.scroll + v.page {
-        v.scroll = v.cursor + 1 - v.page;
+    v.last_width = width;
+    let layout = v.layout();
+    // Keep the cursor on screen: `scroll` counts lines, or rows side by side.
+    let cur_unit = match layout {
+        Layout::Unified => v.cursor,
+        Layout::SideBySide => v.cursor_row(),
+    };
+    if cur_unit < v.scroll {
+        v.scroll = cur_unit;
+    } else if cur_unit >= v.scroll + v.page {
+        v.scroll = cur_unit + 1 - v.page;
     }
     let lines = v.lines().to_vec();
     let marked = v.marked();
@@ -451,11 +557,8 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
         y += 1;
         shown += 1;
     }
-    let mut idx = v.scroll;
-    while shown < diff_h && idx < lines.len() {
-        let l = &lines[idx];
-        let in_mark = marked.is_some_and(|(a, b)| a <= idx && idx <= b);
-        let at_cursor = idx == v.cursor;
+    // One line's look: its sign and colour, reversed when marked, bold under the cursor.
+    let styled = |l: &DiffLine, idx: usize| -> (&'static str, Style) {
         let (sign, style) = match l.kind {
             LineKind::Add => ("+", theme::ok()),
             LineKind::Del => ("−", theme::danger()),
@@ -464,12 +567,62 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
             LineKind::Meta => ("", theme::dim()),
         };
         let mut style = style;
-        if in_mark {
+        if marked.is_some_and(|(a, b)| a <= idx && idx <= b) {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        if at_cursor {
+        if idx == v.cursor {
             style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         }
+        (sign, style)
+    };
+    let note_line = |d: &Draft| -> Line<'static> {
+        let note = crate::util::ellipsize(&d.note, width.saturating_sub(gutter + 4));
+        Line::from(vec![Span::styled(format!("{} ✎ ", " ".repeat(gutter)), theme::accent()), Span::styled(note, theme::accent())])
+    };
+    let ends_on = |d: &Draft, l: &DiffLine| covers(d, l) && Some(d.end) == (if d.side == Side::Old { l.old } else { l.new });
+    if layout == Layout::SideBySide {
+        // Old text left, new text right, a rule between; headers across both.
+        let half = width.saturating_sub(1) / 2;
+        let cell = |side: Option<usize>, old: bool| -> Vec<Span<'static>> {
+            let Some(i) = side else { return vec![Span::raw(" ".repeat(half))] };
+            let l = &lines[i];
+            let (sign, style) = styled(l, i);
+            let no = (if old { l.old } else { l.new }).map(|n| n.to_string()).unwrap_or_default();
+            let text = crate::util::ellipsize(&l.text.replace('\t', "    "), half.saturating_sub(gutter + 2));
+            let body = format!("{sign}{text}");
+            let pad = half.saturating_sub(gutter + 1 + body.chars().count());
+            vec![Span::styled(format!("{no:>gutter$} "), theme::dim()), Span::styled(body, style), Span::raw(" ".repeat(pad))]
+        };
+        let rows = v.rows();
+        let mut r = v.scroll;
+        while shown < diff_h && r < rows.len() {
+            let row = rows[r];
+            if let Some(i) = row.full {
+                let (_, style) = styled(&lines[i], i);
+                line_at(frame, y, Line::from(vec![Span::styled(" ".repeat(gutter + 1), theme::dim()), Span::styled(crate::util::ellipsize(&lines[i].text, width.saturating_sub(gutter + 1)), style)]));
+            } else {
+                let mut spans = cell(row.left, true);
+                spans.push(Span::styled("│", theme::dim()));
+                spans.extend(cell(row.right, false));
+                line_at(frame, y, Line::from(spans));
+            }
+            y += 1;
+            shown += 1;
+            for d in drafts.iter().filter(|d| [row.left, row.right, row.full].into_iter().flatten().any(|i| ends_on(d, &lines[i]))) {
+                if shown >= diff_h {
+                    break;
+                }
+                line_at(frame, y, note_line(d));
+                y += 1;
+                shown += 1;
+            }
+            r += 1;
+        }
+    }
+    let mut idx = v.scroll;
+    while layout == Layout::Unified && shown < diff_h && idx < lines.len() {
+        let l = &lines[idx];
+        let (sign, style) = styled(l, idx);
         let no = match l.kind {
             LineKind::Hunk | LineKind::Meta => " ".repeat(gutter),
             _ => format!("{:>gutter$}", l.new.or(l.old).map(|n| n.to_string()).unwrap_or_default()),
@@ -479,12 +632,11 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
         y += 1;
         shown += 1;
         // A draft's note shows under its last line.
-        for d in drafts.iter().filter(|d| covers(d, l) && Some(d.end) == (if d.side == Side::Old { l.old } else { l.new })) {
+        for d in drafts.iter().filter(|d| ends_on(d, l)) {
             if shown >= diff_h {
                 break;
             }
-            let note = crate::util::ellipsize(&d.note, width.saturating_sub(gutter + 4));
-            line_at(frame, y, Line::from(vec![Span::styled(format!("{} ✎ ", " ".repeat(gutter)), theme::accent()), Span::styled(note, theme::accent())]));
+            line_at(frame, y, note_line(d));
             y += 1;
             shown += 1;
         }
@@ -508,7 +660,11 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
             n => format!("  ⏎ send {n} notes"),
         };
         let undo = if v.data.can_undo { "  u undo turn" } else { "" };
-        Line::from(Span::styled(format!("↑↓ file  j/k line  v mark  c comment{send}{undo}  [ ] turn  q close"), theme::dim()))
+        let split = match layout {
+            Layout::Unified => "s side by side",
+            Layout::SideBySide => "s unified",
+        };
+        Line::from(Span::styled(format!("↑↓ file  j/k line  v mark  c comment{send}{undo}  {split}  [ ] turn  q close"), theme::dim()))
     };
     line_at(frame, footer_y, footer);
 }
@@ -651,11 +807,61 @@ mod tests {
     }
 
     #[test]
+    fn side_by_side_pairs_removed_lines_with_the_added_ones_that_follow() {
+        let rows = side_rows(&parse_patch(PATCH)[0].lines);
+        assert_eq!(rows[0], SideRow { full: Some(0), ..Default::default() }, "the hunk header spans both");
+        assert_eq!(rows[1], SideRow { left: Some(1), right: Some(1), full: None }, "context on both sides");
+        assert_eq!(rows[2], SideRow { left: Some(2), right: Some(3), full: None }, "old() beside new()");
+        assert_eq!(rows[3], SideRow { left: None, right: Some(4), full: None }, "the extra added line alone on the right");
+        assert_eq!(rows[4], SideRow { left: Some(5), right: Some(5), full: None });
+        assert_eq!(rows.len(), 5);
+        assert!(side_rows(&[]).is_empty());
+    }
+
+    #[test]
+    fn s_switches_the_layout_and_the_cursor_walks_rows_side_by_side() {
+        let mut v = DiffView::new(data(), vec![]);
+        assert_eq!(v.layout(), Layout::Unified, "narrow by default");
+        v.last_width = 120;
+        assert_eq!(v.layout(), Layout::SideBySide, "wide panes split by themselves");
+        v.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(v.layout(), Layout::Unified, "s overrides the width");
+        v.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(v.layout(), Layout::SideBySide);
+        // j from the header: context row, then the paired row, landing on its left (removed) line.
+        v.handle_key(key(KeyCode::Char('j')));
+        v.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(v.cursor, 2);
+        assert_eq!(v.cursor_row(), 2);
+        v.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(v.cursor, 4, "the row with only an added line puts the cursor on it");
+        v.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(v.cursor, 2);
+    }
+
+    #[test]
+    fn side_by_side_draws_old_and_new_on_one_row() {
+        let mut v = DiffView::new(data(), vec![]);
+        let mut term = Terminal::new(TestBackend::new(120, 14)).unwrap();
+        term.draw(|f| render(f, &mut v)).unwrap();
+        let text: Vec<String> = (0..14).map(|y| (0..120).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
+        assert_eq!(v.layout(), Layout::SideBySide, "120 columns: split by default");
+        let paired = text.iter().find(|l| l.contains("old();")).expect("the removed line is drawn");
+        assert!(paired.contains("−    old();") && paired.contains("│") && paired.contains("+    new();"), "{paired:?}");
+        let (left, right) = paired.split_once('│').unwrap();
+        assert!(left.trim_start().starts_with("2 −"), "old numbers on the left: {left:?}");
+        assert!(right.trim_start().starts_with("2 +"), "new numbers on the right: {right:?}");
+        let alone = text.iter().find(|l| l.contains("more();")).expect("the extra added line");
+        assert!(alone.split_once('│').unwrap().0.trim().is_empty(), "nothing on the left of it: {alone:?}");
+        assert!(text[13].contains("s unified"), "{}", text[13]);
+    }
+
+    #[test]
     fn the_pane_draws_the_list_the_diff_and_the_keys() {
         let mut v = DiffView::new(data(), vec![Draft { path: "src/a.rs".into(), start: 2, end: 2, side: Side::New, text: "    new();".into(), note: "why?".into() }]);
-        let mut term = Terminal::new(TestBackend::new(90, 14)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(100, 14)).unwrap();
         term.draw(|f| render(f, &mut v)).unwrap();
-        let text: Vec<String> = (0..14).map(|y| (0..90).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
+        let text: Vec<String> = (0..14).map(|y| (0..100).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert_eq!(text[0], "lyra · turn 4 · 3 files +2 −1");
         assert_eq!(text[1], "M src/a.rs    +2 −1  ✎1");
         assert_eq!(text[2], "A img.png     binary");
@@ -667,6 +873,6 @@ mod tests {
         assert_eq!(text[8], "  2 −    old();");
         assert_eq!(text[9], "  2 +    new();");
         assert_eq!(text[10], "    ✎ why?");
-        assert_eq!(text[13], "↑↓ file  j/k line  v mark  c comment  ⏎ send 1 note  u undo turn  [ ] turn  q close");
+        assert_eq!(text[13], "↑↓ file  j/k line  v mark  c comment  ⏎ send 1 note  u undo turn  s side by side  [ ] turn  q close");
     }
 }
