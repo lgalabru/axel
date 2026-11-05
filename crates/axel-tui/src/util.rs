@@ -297,6 +297,24 @@ impl CopyLink {
     }
 }
 
+/// A link that shows an attached file in Finder: `axel-links://reveal?path=…`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevealLink {
+    pub path: String,
+}
+
+impl RevealLink {
+    pub fn url(&self) -> String {
+        format!("{}://reveal?path={}", ToolsLink::SCHEME, pct_encode(&self.path))
+    }
+
+    pub fn parse(url: &str) -> Option<RevealLink> {
+        let rest = url.strip_prefix(&format!("{}://reveal?", ToolsLink::SCHEME))?;
+        let path = rest.split('&').find_map(|pair| pair.strip_prefix("path=")).and_then(pct_decode)?;
+        (!path.is_empty()).then_some(RevealLink { path })
+    }
+}
+
 /// `text` as a terminal hyperlink (OSC 8) to `url`.
 pub fn hyperlink(url: &str, text: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
@@ -441,6 +459,9 @@ mod tests {
         assert_eq!(super::CopyLink::parse(&copy.url()), Some(copy));
         assert_eq!(super::CopyLink::parse("axel-links://copy?item="), None);
         assert_eq!(super::ToolsLink::parse("axel-links://copy?item=x"), None, "a copy link isn't a tools link");
+        let r = super::RevealLink { path: "/tmp/a b/Screenshot 01.03.png".into() };
+        assert_eq!(super::RevealLink::parse(&r.url()), Some(r));
+        assert_eq!(super::RevealLink::parse("axel-links://copy?item=x"), None);
         assert_eq!(super::hyperlink("axel://x", "5 tool calls"), "\x1b]8;;axel://x\x1b\\5 tool calls\x1b]8;;\x1b\\");
     }
 }

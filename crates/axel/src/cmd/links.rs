@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use axel_tui::util::{CopyLink, ToolsLink};
+use axel_tui::util::{CopyLink, RevealLink, ToolsLink};
 
 use crate::paths;
 
@@ -104,12 +104,27 @@ pub fn open_url(url: &str) -> Result<()> {
     if let Some(copy) = CopyLink::parse(url) {
         return copy_command(&copy.item);
     }
+    if let Some(reveal) = RevealLink::parse(url) {
+        return reveal_file(Path::new(&reveal.path));
+    }
     let link = ToolsLink::parse(url).with_context(|| format!("not an Axel link: {url}"))?;
     let rex = axel_rex::Rex::new(axel_rex::RexEnv { server: link.server.clone(), session: link.session.clone(), block: String::new() });
     let exe = std::env::current_exe()?.to_string_lossy().into_owned();
     let cmd = vec![exe, "thread".into(), "tools".into(), link.thread.clone(), link.fold.clone()];
     let label = super::Ctx::open().ok().and_then(|ctx| pane_label(&ctx, &link)).unwrap_or_else(|| TOOLS_LABEL.to_string());
     rex.new_floating_terminal_with_focus(&label, TOOLS_BOUNDS, &cmd, None, &[], true).context("opening the tool calls in Rex")?;
+    Ok(())
+}
+
+/// Show an attached file selected in Finder.
+fn reveal_file(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("{} is gone", path.display());
+    }
+    // By its path: the handler app runs with a minimal PATH.
+    if !Command::new("/usr/bin/open").arg("-R").arg(path).status().context("starting open")?.success() {
+        bail!("open -R {} failed", path.display());
+    }
     Ok(())
 }
 

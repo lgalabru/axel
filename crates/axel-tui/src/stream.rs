@@ -248,6 +248,28 @@ struct Stream {
     links: Option<crate::util::ToolsLink>,
 }
 
+/// Each attachment chip under a message links to its file, shown in Finder
+/// on a click (see `RevealLink`).
+fn link_chips(lines: &mut [String], it: &ThreadItem, width: usize) {
+    if it.attachments.is_empty() {
+        return;
+    }
+    let indent = crate::view::thread_view::chips_indent(it);
+    let (parts, _) = crate::attach::chip_parts(&it.attachments, width.saturating_sub(indent), None);
+    let Some(line) = lines.iter_mut().rev().find(|l| l.contains('📎')) else { return };
+    let mut out = String::new();
+    let mut rest = line.as_str();
+    for p in &parts {
+        let Some(at) = rest.find(&p.text) else { return };
+        let url = crate::util::RevealLink { path: it.attachments[p.index].to_string_lossy().into_owned() }.url();
+        out.push_str(&rest[..at]);
+        out.push_str(&crate::util::hyperlink(&url, &p.text));
+        rest = &rest[at + p.text.len()..];
+    }
+    out.push_str(rest);
+    *line = out;
+}
+
 impl Stream {
     /// The live tail on screen still fits a pane `height` rows tall (with the
     /// row the cursor sits on).
@@ -268,6 +290,9 @@ impl Stream {
         if let (Row::Fold(idx), Some(base), Some(first)) = (row, &self.links, lines.first_mut()) {
             let link = crate::util::ToolsLink { fold: v.data.items[idx[0]].id.clone(), ..base.clone() };
             *first = crate::util::hyperlink(&link.url(), first);
+        }
+        if let Row::Prose(i) = row {
+            link_chips(&mut lines, &v.data.items[*i], width);
         }
         lines
     }
@@ -615,6 +640,18 @@ mod tests {
         // Outside Rex: plain.
         s.links = None;
         assert!(!s.row_ansi(&v, &fold, 80)[0].contains("\x1b]8"));
+    }
+
+    #[test]
+    fn attachment_chips_link_to_their_files() {
+        let mut d = fixtures::data();
+        let i = d.items.iter().position(|it| it.kind == ItemKind::UserMessage).expect("the fixture has your message");
+        d.items[i].attachments = vec!["/tmp/shots/a b.png".into(), "/tmp/notes.txt".into()];
+        let v = ThreadView::new("T1", d);
+        let lines = Stream::default().row_ansi(&v, &Row::Prose(i), 80);
+        let chips = lines.iter().find(|l| l.contains('📎')).expect("a chips line");
+        assert!(chips.contains("\x1b]8;;axel-links://reveal?path=%2Ftmp%2Fshots%2Fa%20b.png\x1b\\📎 a b.png\x1b]8;;\x1b\\"), "{chips:?}");
+        assert!(chips.contains("reveal?path=%2Ftmp%2Fnotes.txt"), "{chips:?}");
     }
 
     #[test]

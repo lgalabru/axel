@@ -115,6 +115,11 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 pub const BADGE_TIP: &str = "\u{e0b0}";
 /// The marker in front of your own messages (orange, bold).
 pub const YOU_MARK: &str = "> ";
+
+/// How far a message's attachment chips sit in: under your text, past the mark.
+pub fn chips_indent(it: &ThreadItem) -> usize {
+    if it.agent.is_none() && it.author.is_none() { YOU_MARK.len() } else { 0 }
+}
 /// Orange, as in the agent palette.
 pub const YOU_COLOR: Color = Color::Indexed(208);
 
@@ -371,7 +376,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                         }
                     }
                     if !it.attachments.is_empty() {
-                        let indent = if it.agent.is_none() && it.author.is_none() { YOU_MARK.len() } else { 0 };
+                        let indent = chips_indent(it);
                         lines.push(Line::from(vec![
                             Span::styled(" ".repeat(indent), dim),
                             Span::styled(crate::attach::chips_line(&it.attachments, width.saturating_sub(indent)), dim),
