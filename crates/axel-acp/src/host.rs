@@ -268,6 +268,14 @@ pub async fn run_host(
     socket_task.abort();
     host.finish(&reason);
     let _ = std::fs::remove_file(&socket_path);
+    // The adapter and everything it started (Claude, `npx` wrappers) share a
+    // process group: end the group, so no harness outlives its session.
+    if let Some(pid) = child.id() {
+        // SAFETY: signalling a process group we created (`process_group(0)`).
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
     drop(child); // kill_on_drop
     Ok(())
 }

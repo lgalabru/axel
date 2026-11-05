@@ -109,6 +109,9 @@ fn work(lines: &mut impl Iterator<Item = std::io::Result<String>>) {
 
 fn main() {
     log(&json!({ "argv": std::env::args().skip(1).collect::<Vec<_>>() }));
+    if let Ok(path) = std::env::var("FAKE_CLAUDE_PIDFILE") {
+        let _ = std::fs::write(path, std::process::id().to_string());
+    }
     let replays = std::env::args().any(|a| a == "--replay-user-messages");
     let session = std::env::args().skip_while(|a| a != "--session-id" && a != "--resume").nth(1).unwrap_or_default();
     let stdin = std::io::stdin();

@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 struct Agent {
     child: Child,
-    stdin: ChildStdin,
+    /// `None` once closed, as a host that went away leaves it.
+    stdin: Option<ChildStdin>,
     rx: Receiver<Value>,
     next: u64,
 }
@@ -22,6 +23,7 @@ impl Agent {
         let mut child = Command::new(env!("CARGO_BIN_EXE_claude_acp"))
             .env("CLAUDE_CODE_EXECUTABLE", env!("CARGO_BIN_EXE_fake_claude"))
             .env("FAKE_CLAUDE_LOG", home.join("claude.log"))
+            .env("FAKE_CLAUDE_PIDFILE", home.join("claude.pid"))
             .env("HOME", home)
             .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
             .env_remove("MAX_THINKING_TOKENS")
@@ -42,12 +44,18 @@ impl Agent {
                 }
             }
         });
-        Agent { child, stdin, rx, next: 1 }
+        Agent { child, stdin: Some(stdin), rx, next: 1 }
     }
 
     fn send(&mut self, v: Value) {
-        writeln!(self.stdin, "{v}").unwrap();
-        self.stdin.flush().unwrap();
+        let stdin = self.stdin.as_mut().expect("stdin open");
+        writeln!(stdin, "{v}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// What the adapter sees when its host dies: end of input.
+    fn close_stdin(&mut self) {
+        self.stdin = None;
     }
 
     /// Send a request; return everything until its response, and the response.
@@ -464,5 +472,29 @@ fn what_claude_says_between_prompts_shows_up_at_once_and_doesnt_end_the_next_tur
     assert!(ups.iter().any(|u| u["sessionUpdate"] == "tool_call"), "the turn ran its tool call: {ups:?}");
     assert_eq!(reply["result"]["stopReason"], "end_turn");
     let _ = started;
+}
+
+#[test]
+fn when_the_host_goes_away_claude_goes_too() {
+    // The adapter used to clear its session table and exit, leaving the
+    // `claude` it started behind (its reader thread held the session, so the
+    // kill in Drop never ran).
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let _ = new_session(&mut agent, cwd.path());
+    let pid: i32 = std::fs::read_to_string(home.path().join("claude.pid")).expect("fake claude wrote its pid").trim().parse().unwrap();
+    // SAFETY: signal 0 only checks that the process exists.
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+    assert!(alive(pid), "claude runs while the session does");
+    agent.close_stdin();
+    let start = std::time::Instant::now();
+    while alive(pid) && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(pid), "claude outlived its host");
+    let status = agent.child.wait().expect("adapter exits");
+    assert!(status.success(), "the adapter exits cleanly: {status}");
 }
 

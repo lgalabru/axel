@@ -113,12 +113,21 @@ impl Session {
     }
 }
 
-impl Drop for Session {
-    fn drop(&mut self) {
+impl Session {
+    /// End Claude.  Called when the host goes away: the reader and idle
+    /// relay threads hold the session until Claude's stdout closes, so a
+    /// `Drop` alone would wait on the very process it is meant to end.
+    fn kill_child(&self) {
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
             let _ = c.wait();
         }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.kill_child();
     }
 }
 
@@ -161,7 +170,12 @@ pub fn serve_stdio() -> anyhow::Result<()> {
             }
         });
     }
-    agent.sessions.lock().expect("sessions lock").clear();
+    // The host is gone: no Claude outlives it.  Threads still holding a
+    // session keep it alive, so end its process here, not in `Drop`.
+    let sessions: Vec<Arc<Session>> = agent.sessions.lock().expect("sessions lock").drain().map(|(_, s)| s).collect();
+    for session in sessions {
+        session.kill_child();
+    }
     Ok(())
 }
 
