@@ -20,10 +20,11 @@ use serde::{Deserialize, Serialize};
 const POLL: Duration = Duration::from_millis(60);
 
 mod paint;
+mod palette;
 mod render;
 
 #[derive(Clone, Copy, Debug)]
-enum Hit { File(usize), Line(usize, Side) }
+enum Hit { File(usize), Line(usize, usize, Side) }
 
 /// Everything the pane shows, prepared by the caller.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -242,6 +243,8 @@ pub struct DiffView {
     side: Side,
     emphasis: BTreeMap<String, Vec<Vec<std::ops::Range<usize>>>>,
     follow_cursor: bool,
+    jump_file: bool,
+    palette: palette::Palette,
     hits: Vec<(Rect, Hit)>,
 }
 
@@ -249,7 +252,7 @@ impl DiffView {
     pub fn new(data: DiffData, drafts: Vec<Draft>) -> Self {
         let file = data.files.iter().position(|f| f.authored).unwrap_or(0);
         let emphasis = data.patches.iter().map(|p| (p.path.clone(), paint::word_changes(&p.lines))).collect();
-        DiffView { data, drafts, file, cursor: 0, scroll: 0, mark: None, input: None, confirm_undo: false, layout: None, page: 20, last_width: 80, horizontal: 0, side: Side::Old, emphasis, follow_cursor: true, hits: Vec::new() }
+        DiffView { data, drafts, file, cursor: 0, scroll: 0, mark: None, input: None, confirm_undo: false, layout: None, page: 20, last_width: 80, horizontal: 0, side: Side::Old, emphasis, follow_cursor: true, jump_file: true, palette: palette::Palette::default(), hits: Vec::new() }
     }
 
     /// The layout in force: the one chosen, else the one the width calls for.
@@ -269,7 +272,11 @@ impl DiffView {
 
     /// The selected file's patch lines (none for a binary file or no diff).
     pub fn lines(&self) -> &[DiffLine] {
-        let Some(f) = self.data.files.get(self.file) else { return &[] };
+        self.lines_for(self.file)
+    }
+
+    fn lines_for(&self, file: usize) -> &[DiffLine] {
+        let Some(f) = self.data.files.get(file) else { return &[] };
         self.data.patches.iter().find(|p| p.path == f.path).map(|p| p.lines.as_slice()).unwrap_or(&[])
     }
 
@@ -288,7 +295,7 @@ impl DiffView {
         if i < self.data.files.len() {
             self.file = i;
             self.cursor = 0;
-            self.scroll = 0;
+            self.jump_file = true;
             self.mark = None;
             self.horizontal = 0;
             self.follow_cursor = true;
@@ -311,18 +318,23 @@ impl DiffView {
     /// cursor on screen.
     fn move_cursor(&mut self, delta: isize) {
         self.follow_cursor = true;
-        let n = self.lines().len();
-        if n == 0 {
-            return;
+        let split = self.layout() == Layout::SideBySide;
+        let mut stops = Vec::new();
+        for file in self.file_order() {
+            if self.mark.is_some() && file != self.file { continue }
+            let lines = self.lines_for(file);
+            if lines.is_empty() { stops.push((file, SideRow::default())); }
+            else if split { stops.extend(side_rows(lines).into_iter().map(|row| (file, row))); }
+            else { stops.extend((0..lines.len()).map(|i| (file, SideRow { full: Some(i), ..Default::default() }))); }
         }
-        match self.layout() {
-            Layout::Unified => self.cursor = (self.cursor as isize + delta).clamp(0, n as isize - 1) as usize,
-            Layout::SideBySide => {
-                let rows = self.rows();
-                let r = (self.cursor_row() as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
-                self.cursor = match self.side { Side::Old => rows[r].left, Side::New => rows[r].right }.or(rows[r].full).unwrap_or_else(|| rows[r].first());
-            }
-        }
+        if stops.is_empty() { return }
+        let current = stops.iter().position(|(file, row)| *file == self.file && (row.holds(self.cursor) || self.lines().is_empty())).unwrap_or(0);
+        let target = (current as isize + delta).clamp(0, stops.len() as isize - 1) as usize;
+        let (file, row) = stops[target];
+        if file != self.file { self.mark = None; }
+        self.file = file;
+        self.jump_file = false;
+        self.cursor = match self.side { Side::Old => row.left, Side::New => row.right }.or(row.full).unwrap_or_else(|| row.first());
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -334,7 +346,11 @@ impl DiffView {
                 if let Some((_, hit)) = self.hits.iter().find(|(r, _)| r.contains((mouse.column, mouse.row).into())) {
                     match *hit {
                         Hit::File(i) => self.select_file(i),
-                        Hit::Line(i, side) => { self.cursor = i; self.side = side; self.follow_cursor = true; }
+                        Hit::Line(file, i, side) => {
+                            if self.file != file { self.mark = None; }
+                            self.file = file; self.cursor = i; self.side = side;
+                            self.follow_cursor = true; self.jump_file = false;
+                        }
                     }
                 }
             }
@@ -412,15 +428,22 @@ impl DiffView {
             KeyCode::Char('j') => self.move_cursor(1),
             KeyCode::PageUp => self.move_cursor(-(self.page as isize)),
             KeyCode::PageDown | KeyCode::Char(' ') => self.move_cursor(self.page as isize),
-            KeyCode::Char('g') => self.move_cursor(-(self.lines().len() as isize)),
-            KeyCode::Char('G') => self.move_cursor(self.lines().len() as isize),
+            KeyCode::Char('g') => self.move_cursor(-(self.data.patches.iter().map(|p| p.lines.len() + 1).sum::<usize>() as isize)),
+            KeyCode::Char('G') => self.move_cursor(self.data.patches.iter().map(|p| p.lines.len() + 1).sum::<usize>() as isize),
             KeyCode::Char('v') => self.mark = if self.mark.is_some() { None } else { Some(self.cursor) },
-            KeyCode::Char('s') => self.layout = Some(self.layout().other()),
+            KeyCode::Char('s') => { self.layout = Some(self.layout().other()); self.follow_cursor = true; self.jump_file = false; },
             KeyCode::Char('n') | KeyCode::Char('p') => {
                 let next = key.code == KeyCode::Char('n');
-                let hunks: Vec<_> = self.lines().iter().enumerate().filter(|(_, l)| l.kind == LineKind::Hunk).map(|(i, _)| i).collect();
-                let target = if next { hunks.into_iter().find(|&i| i > self.cursor) } else { hunks.into_iter().rev().find(|&i| i < self.cursor) };
-                if let Some(i) = target { self.cursor = i; self.follow_cursor = true; }
+                let hunks: Vec<_> = self.file_order().into_iter().flat_map(|file| {
+                    self.lines_for(file).iter().enumerate().filter(|(_, l)| l.kind == LineKind::Hunk).map(move |(i, _)| (file, i))
+                }).collect();
+                let order = self.file_order();
+                let position = |file| order.iter().position(|&f| f == file).unwrap_or(0);
+                let current = (position(self.file), self.cursor);
+                let eligible = |&(file, i): &(usize, usize)| self.mark.is_none() || (file == self.file && i != self.cursor);
+                let target = if next { hunks.iter().copied().filter(eligible).find(|&(file, i)| (position(file), i) > current) }
+                    else { hunks.iter().rev().copied().filter(eligible).find(|&(file, i)| (position(file), i) < current) };
+                if let Some((file, i)) = target { self.file = file; self.cursor = i; self.follow_cursor = true; self.jump_file = false; }
             }
             KeyCode::Char('c') => {
                 if !self.lines().is_empty() {
@@ -556,6 +579,7 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
 /// Returns the outcome and the drafts as they stand.
 pub fn run_diff(data: DiffData, drafts: Vec<Draft>) -> Result<(Outcome, Vec<Draft>)> {
     let mut v = DiffView::new(data, drafts);
+    v.palette = palette::Palette::detect();
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture, event::EnableBracketedPaste);
     let result = (|| -> Result<Outcome> {
@@ -742,7 +766,7 @@ mod tests {
         term.draw(|f| render(f, &mut v)).unwrap();
         let text: Vec<String> = (0..14).map(|y| (0..100).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert_eq!(text[0], "lyra · turn 4 · 3 files +2 −1");
-        assert!(text[1].contains("src/a.rs") && text[1].contains("+2 −1"));
+        assert!(text[1].contains("src/a.rs") && text[1].contains("+2  −1"));
         assert!(text.iter().any(|l| l.contains("old();")));
         assert!(text.iter().any(|l| l.contains("new();")));
         assert!(text.iter().any(|l| l.contains("note · new L2")));

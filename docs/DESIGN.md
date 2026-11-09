@@ -681,13 +681,17 @@ outside a repository, the turn simply has no checkpoint.
   it's a link that opens the turn's diff in a floating pane; `axel thread diff THREAD
   [--session S] [--turn N] [--stat]` prints the same.
 - **The diff pane** (`axel_tui::diff`): wide panes put a compact file navigator beside
-  the code; smaller panes keep a single file header so the code gets the height.
+  the code. All files form one continuous stream with in-stream file headers
+  and a pinned header for the file at the viewport top. The sidebar groups file
+  names under directories and jumps within the stream. Smaller panes hide it.
   The agent's own files come first in both display and keyboard order. Old and new
   text sit side by side when the code area has 110 columns (`s` switches).
-  Native syntax colours come from the immutable before/after checkpoint blobs,
+  Syntax colours come from the immutable before/after checkpoint blobs,
   parsed as complete files to preserve multiline syntax state. Highlighting is
-  bounded and optional. Coloured gutters identify additions and removals; stronger
-  highlights identify changed words while leaving the rest of the syntax visible.
+  bounded and optional. Terminal foreground and background queries derive soft
+  addition and removal surfaces. Changed words use a slightly stronger tint while
+  retaining syntax colours. Unsupported terminals use native surfaces and word
+  underlines. Coloured gutters identify additions and removals.
   Only on-screen code is painted. Tabs and wide characters use terminal columns,
   and Left/Right pan long lines without changing source anchors. Mouse wheel scrolls
   code; clicking a file or code line selects it. `n`/`p` jump between hunks. `v` marks

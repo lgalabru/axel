@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 
@@ -72,17 +72,12 @@ pub(super) fn word_changes(lines: &[DiffLine]) -> Vec<Vec<Range<usize>>> {
     changes
 }
 
-fn tone(tone: SyntaxTone) -> Style {
+fn tone(tone: SyntaxTone, palette: &super::palette::Palette) -> Style {
+    let style = Style::default().fg(palette.syntax(tone));
     match tone {
-        SyntaxTone::Plain => Style::default(),
-        SyntaxTone::Muted => crate::theme::dim(),
-        SyntaxTone::Keyword => Style::default().fg(Color::Magenta),
-        SyntaxTone::String => Style::default().fg(Color::Green),
-        SyntaxTone::Number => Style::default().fg(Color::Yellow),
-        SyntaxTone::Function => Style::default().fg(Color::Blue),
-        SyntaxTone::Type => Style::default().fg(Color::Cyan),
-        SyntaxTone::Bold => Style::default().add_modifier(Modifier::BOLD),
-        SyntaxTone::Italic => Style::default().add_modifier(Modifier::ITALIC),
+        SyntaxTone::Bold => style.add_modifier(Modifier::BOLD),
+        SyntaxTone::Italic => style.add_modifier(Modifier::ITALIC),
+        _ => style,
     }
 }
 
@@ -95,11 +90,14 @@ fn append(out: &mut Vec<Span<'static>>, text: &str, style: Style) {
 }
 
 /// A code cell in terminal columns. The source and review anchors stay intact.
-pub(super) fn code(text: &str, syntax: &[SyntaxSpan], changes: &[Range<usize>], offset: usize, width: usize, base: Style, kind: LineKind) -> Vec<Span<'static>> {
+pub(super) fn code(text: &str, syntax: &[SyntaxSpan], changes: &[Range<usize>], offset: usize, width: usize, base: Style, palette: Option<(&super::palette::Palette, LineKind)>) -> Vec<Span<'static>> {
     if width == 0 { return Vec::new() }
+    let fallback = super::palette::Palette::default();
+    let word_bg = palette.and_then(|(p, kind)| p.word(kind));
+    let palette = palette.map(|(p, _)| p).unwrap_or(&fallback);
     let syntax_matches = syntax.iter().map(|s| s.text.as_str()).collect::<String>() == text;
     let cells: Vec<(char, Style)> = if syntax_matches {
-        syntax.iter().flat_map(|s| s.text.chars().map(move |c| (c, base.patch(tone(s.tone))))).collect()
+        syntax.iter().flat_map(|s| s.text.chars().map(move |c| (c, base.patch(tone(s.tone, palette))))).collect()
     } else {
         text.chars().map(|c| (c, base)).collect()
     };
@@ -115,7 +113,7 @@ pub(super) fn code(text: &str, syntax: &[SyntaxSpan], changes: &[Range<usize>], 
         if col <= offset && w > 0 { continue }
         if start >= offset + room && w > 0 { break }
         if changes.iter().any(|r| r.contains(&i)) {
-            style = style.fg(if kind == LineKind::Del { Color::Red } else { Color::Green }).add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            style = if let Some(bg) = word_bg { style.bg(bg) } else { style.add_modifier(Modifier::UNDERLINED) };
         }
         if start < offset || col > offset + room || c == '\t' {
             let spaces = col.min(offset + room).saturating_sub(start.max(offset));
@@ -147,7 +145,7 @@ mod tests {
     #[test]
     fn code_cells_keep_terminal_width_and_sanitize_controls() {
         for (text, offset, width) in [("a\t界e\u{301}xyz", 2, 7), ("界界界", 1, 4), ("x\x1b[31m", 0, 12)] {
-            let spans = code(text, &[], &[], offset, width, Style::default(), LineKind::Context);
+            let spans = code(text, &[], &[], offset, width, Style::default(), None);
             let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
             assert_eq!(unicode_width::UnicodeWidthStr::width(text.as_str()), width);
             assert!(!text.contains('\x1b'));
