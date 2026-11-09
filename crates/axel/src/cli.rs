@@ -195,7 +195,8 @@ pub enum AgentCommand {
         #[command(flatten)]
         policy: PolicyArgs,
     },
-    /// Change an agent's harness, model, permissions, budget, runtime mode or default host.
+    /// Change anything about an agent: its name, harness, model, skills,
+    /// prompt, colour, permissions, budget, runtime mode or default host.
     Edit {
         name: String,
         /// Switch it to this harness, and optionally model: `codex`, `claude/fable`.
@@ -204,6 +205,18 @@ pub enum AgentCommand {
         /// Switch its model only (`default` for the harness's own).
         #[arg(long)]
         model: Option<String>,
+        /// Rename it. Its key, policy and history stay; sessions already
+        /// running keep the old name until they restart.
+        #[arg(long = "name", value_name = "NEW_NAME")]
+        name_to: Option<String>,
+        /// Replace its skills: comma-separated names, or `*`.
+        #[arg(long)]
+        skills: Option<String>,
+        /// Replace its standing prompt (`""` clears it).
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, value_enum)]
+        color: Option<AgentColorArg>,
         #[arg(long, value_enum)]
         runtime_mode: Option<RuntimeModeArg>,
         /// Run it on this host unless told otherwise; `local` runs it here again.

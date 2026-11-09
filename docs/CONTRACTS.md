@@ -169,6 +169,8 @@ impl Store {
     pub fn insert_agent(&self, a: &NewAgent) -> Result<Agent, Error>; pub fn list_agents(&self) -> Result<Vec<Agent>, Error>;
     pub fn agent_by_name(&self, n: &str) -> Result<Option<Agent>, Error>; pub fn agent_by_pubkey(&self, pk: &str) -> Result<Option<Agent>, Error>;
     pub fn touch_agent(&self, pk: &str) -> Result<(), Error>; pub fn archive_agent(&self, pk: &str) -> Result<(), Error>;
+    pub fn touch_agent(&self, pk: &str) -> Result<(), Error>; pub fn rename_agent(&self, pk: &str, name: &str) -> Result<(), Error>;   // key, policy, history stay; running sessions keep the old name
+    pub fn touch_agent(&self, pk: &str) -> Result<(), Error>; pub fn set_agent_profile(&self, pk: &str, skills: Option<&[String]>, prompt: Option<&str>, color: Option<AgentColor>) -> Result<(), Error>;   // each Some replaces; "" clears the prompt
     pub fn known_identity_name(&self, pubkey: &str) -> Result<Option<String>, Error>;   // agent name, or participant display if known
 }
 

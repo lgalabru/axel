@@ -54,8 +54,11 @@ and the agent runs Claude Code. The harnesses: `claude`, `codex`, `opencode`, `g
 | `--host` | Where it runs unless told otherwise; see [Remote hosts](/docs/remote-hosts). |
 
 Change any of it later with `axel agent edit terra …`: `axel agent edit terra goose` moves
-terra to Goose, `axel agent edit opus --model fable` changes only the model. `axel agent archive terra` retires
-an agent and keeps its key and history.
+terra to Goose, `axel agent edit opus --model fable` changes only the model,
+`axel agent edit terra --name sol` renames it (its key, policy and history stay; sessions
+already running keep the old name until they restart), and `--skills`, `--prompt` and
+`--color` replace those. `axel agent archive terra` retires an agent and keeps its key and
+history.
 
 ## Why keys
 

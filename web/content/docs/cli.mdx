@@ -17,7 +17,7 @@ done`, and `msg` for `send`.
 | | |
 |---|---|
 | `axel agent new NAME [HARNESS[/MODEL]] [--skills a,b\|*] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. `terra codex`, `opus claude/opus`, `gus goose`. |
-| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change its harness, model, permissions, budget, mode or default host. |
+| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--name NEW] [--skills a,b\|*] [--prompt P] [--color C] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change anything about it: harness, model, name, skills, prompt, colour, permissions, budget, mode or default host. A rename keeps its key and history; running sessions keep the old name until they restart. |
 | `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. |
 
 ## Skills
