@@ -52,3 +52,4 @@ or a plan with open questions (an RFD).
 | [0007](0007-capabilities-not-harness-names.md) | Harness behaviour is driven by capabilities, not by matching on names | accepted |
 | [0008](0008-autopilot-with-a-guard.md) | Autopilot by default, with a guard hook for the irreversible | accepted |
 | [0009](0009-rebuild-by-importing-not-trimming.md) | Rebuild from scratch, importing modules one by one with provenance | accepted |
+| [0010](0010-native-scrollback-for-diff-reading.md) | Native terminal scrollback for reading diffs, explicit line review | accepted |
