@@ -85,6 +85,20 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             super::thread::set_state(ctx, thread_id, ThreadOp::Archive)?;
             "archived".into()
         }
+        Outcome::PauseAgent { agent } => {
+            let n = pause_agent(ctx, thread_id, agent, true)?;
+            format!("paused {agent}: {n} session(s)")
+        }
+        Outcome::ResumeAgent { agent } => {
+            let n = pause_agent(ctx, thread_id, agent, false)?;
+            format!("resumed {agent}: {n} session(s)")
+        }
+        Outcome::RemoveAgent { agent } => {
+            let a = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+            super::thread::stop_agent(ctx, thread_id, agent)?;
+            ctx.store.remove_participant(&ctx.owner()?, thread_id, &a.pubkey)?;
+            format!("removed {agent} from this thread; history kept")
+        }
         Outcome::StopAgent { agent } => {
             let n = super::thread::stop_agent(ctx, thread_id, agent)?;
             format!("stopped {agent}: {n} session{}", if n == 1 { "" } else { "s" })
@@ -107,6 +121,21 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             format!("hard reset: {stopped} session{} ended; the next message starts from scratch", if stopped == 1 { "" } else { "s" })
         }
     }))
+}
+
+fn pause_agent(ctx: &Ctx, thread_id: &str, name: &str, paused: bool) -> Result<usize> {
+    let agent = ctx.store.agent_by_name(name)?.with_context(|| format!("no agent named {name:?}"))?;
+    let sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.into()), agent_pubkey: Some(agent.pubkey), ..Default::default() })?;
+    let mut changed = 0;
+    for session in sessions.iter().filter(|s| s.ended_at.is_none() && (s.state == SessionState::Paused) != paused) {
+        if let Some(host) = super::host::host_of(ctx, session)? {
+            super::host::pause_remote(ctx, session, paused)?;
+            super::host::sync_host(ctx, &host, true)?;
+        } else if paused { super::process_control::pause(ctx, session)?; }
+        else { super::process_control::resume(ctx, session)?; }
+        changed += 1;
+    }
+    Ok(changed)
 }
 
 /// The first prompt of a fresh session: the intent, then the last turns in
@@ -151,6 +180,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
     let summary = ctx.store.thread_summary(thread_id)?.context("no such thread")?;
     let t = &summary.thread;
     let agents: HashMap<String, axel_store::Agent> = ctx.store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
+    let roster = ctx.store.thread_agents(thread_id)?;
     let statuses: HashMap<String, axel_store::Status> = ctx.store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect();
     let contexts: HashMap<String, (i64, i64)> = ctx.store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect();
     let turns = ctx.store.turns(thread_id)?;
@@ -164,7 +194,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
     for s in &sessions {
         let agent = agents.get(&s.agent_pubkey);
         let name = agent.map(|a| a.name.clone()).unwrap_or_else(|| s.agent_pubkey.chars().take(8).collect());
-        if !agent_names.contains(&name) && !agent.is_some_and(|a| a.archived_at.is_some()) {
+        if roster.contains(&s.agent_pubkey) && !agent_names.contains(&name) && !agent.is_some_and(|a| a.archived_at.is_some()) {
             agent_names.push(name.clone());
         }
         let usage = ctx.store.usage(&s.id)?;
@@ -179,6 +209,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         let live = s.ended_at.is_none();
         let state = match (live, statuses.get(&s.id)) {
             (false, _) => "ended".to_string(),
+            (true, _) if s.state == SessionState::Paused => "paused".into(),
             (true, Some(st)) => match st.state {
                 StatusState::Working => "working",
                 StatusState::Blocked => "blocked",
@@ -202,7 +233,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         tokens += toks;
         cost += usd;
         tool_calls += calls;
-        rows.push(SessionRow {
+        if roster.contains(&s.agent_pubkey) { rows.push(SessionRow {
             agent: name,
             color: agent.and_then(|a| a.color),
             runs,
@@ -215,7 +246,12 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
             cost_usd: usd,
             context: contexts.get(&s.id).copied(),
             duration_secs: s.ended_at.unwrap_or(now) - s.started_at,
-        });
+        }); }
+    }
+    for pk in &roster {
+        if let Some(agent) = agents.get(pk) {
+            if agent.archived_at.is_none() && !agent_names.contains(&agent.name) { agent_names.push(agent.name.clone()); }
+        }
     }
     let state = match t.state {
         ThreadState::Open => "open",
@@ -289,5 +325,11 @@ mod tests {
         }
         assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
         assert_eq!(act(&ctx, &thread.id, &outcome).unwrap(), Some("stopped chosen: 0 sessions".into()));
+        act(&ctx, &thread.id, &Outcome::RemoveAgent { agent: "chosen".into() }).unwrap();
+        assert!(!load(&ctx, &thread.id, None).unwrap().agents.contains(&"chosen".into()));
+        assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
+        assert!(ctx.store.get_session(&a.id).unwrap().is_some());
+        assert!(ctx.store.thread_agents(&other.id).unwrap().contains(&chosen.public().to_base58()));
+        assert!(ctx.store.get_session(&untouched_peer.id).unwrap().unwrap().ended_at.is_none());
     }
 }

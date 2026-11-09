@@ -81,7 +81,7 @@ str_enum! {
 
 str_enum! {
     /// Lifecycle of one agent instance on a thread.
-    SessionState { Starting => "starting", Running => "running", Blocked => "blocked", Idle => "idle", Ended => "ended" }
+    SessionState { Starting => "starting", Running => "running", Blocked => "blocked", Idle => "idle", Paused => "paused", Ended => "ended" }
 }
 
 str_enum! {

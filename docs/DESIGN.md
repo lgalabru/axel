@@ -621,9 +621,16 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   title, and the stream pane watches `rex events` for `window_label_changed`: a name typed
   over the window in Rex becomes the thread's title (Rex's placeholder and the title as
   Axel shortens it for the tab don't count, so Axel's own labelling renames nothing).
-- **Composer panels**: Ctrl+D opens the thread controls. `t` selects a live agent
-  to stop on this thread; `x` stops all live sessions. Stopping one agent leaves
-  its configuration, history, other threads, and other agents intact.
+- **Composer panels**: Ctrl+D opens the thread controls. `t` selects an agent,
+  then offers Pause/Resume, Kill, and Remove from thread. Pause freezes its host
+  and descendants while keeping their memory; Resume continues them in place.
+  A local process record stores their PID and start time to avoid signalling
+  reused PIDs. Killing a paused agent wakes it before using the normal stop path.
+  Remove stops that agent and applies a signed participant removal. The roster
+  follows session starts and participant add/remove events; old session rows and
+  turn history remain. An explicit new summon rejoins the agent. The default
+  composer target excludes removed agents. `x` at the top level stops all live
+  sessions. These actions leave other agents and other threads intact.
   `axel thread refresh THREAD` reloads the thread's Rex views on the installed
   binary while its agents keep running. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.

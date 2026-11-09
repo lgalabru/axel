@@ -10,7 +10,7 @@ use super::Ctx;
 pub fn run(ctx: &Ctx) -> Result<usize> {
     let Some(rex) = &ctx.rex else { return Ok(0) };
     let live = ctx.store.list_sessions(SessionFilter {
-        states: Some(vec![SessionState::Starting, SessionState::Running, SessionState::Blocked, SessionState::Idle]),
+        states: Some(vec![SessionState::Starting, SessionState::Running, SessionState::Blocked, SessionState::Idle, SessionState::Paused]),
         ..Default::default()
     })?;
     // Only this machine's sessions: a remote host's Rex ids mean nothing here.

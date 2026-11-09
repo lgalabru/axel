@@ -1206,6 +1206,9 @@ fn passthrough_env() -> Vec<(String, String)> {
 /// Deliver a composer command to a managed session over its socket.
 pub(super) fn send_to_session(ctx: &Ctx, session_id: &str, cmd: SendCommand) -> Result<SendReply> {
     let session = ctx.store.get_session(session_id)?.with_context(|| format!("no session {session_id}"))?;
+    if session.state == axel_store::SessionState::Paused {
+        return Ok(SendReply::Error { message: "this agent is paused; resume it in Ctrl+D → Agents".into() });
+    }
     if session.runtime != SessionRuntime::Managed {
         return Ok(SendReply::Error { message: "this agent runs in its own pane; press o to open it".into() });
     }

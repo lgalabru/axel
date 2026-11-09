@@ -2544,3 +2544,23 @@ fn a_plans_windows_are_kept_per_harness_and_replaced() {
     assert_eq!(LimitWindow::from_minutes(10_080), LimitWindow::Week);
     assert_eq!(LimitWindow::from_minutes(43_200), LimitWindow::Month);
 }
+
+#[test]
+fn removed_agents_leave_the_roster_without_losing_their_history() {
+    let s = store();
+    let owner = Keypair::generate();
+    let agent = Keypair::generate();
+    s.insert_agent(&agent_spec("member", &agent, Some(&owner))).unwrap();
+    let t = s.create_thread(&owner, "Roster", "Roster", None).unwrap();
+    let first = s.start_session(&agent, &new_session(&t.id, &agent, "mac")).unwrap();
+    assert!(s.thread_agents(&t.id).unwrap().contains(&pk(&agent)));
+    s.end_session(&owner, &first.id, Some("removed by owner")).unwrap();
+    s.remove_participant(&owner, &t.id, &pk(&agent)).unwrap();
+    assert!(!s.thread_summary(&t.id).unwrap().unwrap().agents.contains(&pk(&agent)));
+    assert!(s.get_session(&first.id).unwrap().is_some());
+    assert!(s.agent_by_pubkey(&pk(&agent)).unwrap().is_some());
+    s.rebuild_projections().unwrap();
+    assert!(!s.thread_agents(&t.id).unwrap().contains(&pk(&agent)));
+    s.start_session(&agent, &new_session(&t.id, &agent, "mac")).unwrap();
+    assert!(s.thread_agents(&t.id).unwrap().contains(&pk(&agent)), "an explicit new session rejoins the thread");
+}

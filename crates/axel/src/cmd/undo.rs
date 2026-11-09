@@ -53,7 +53,7 @@ pub fn blocked_reason(ctx: &Ctx, session_id: &str) -> Result<Option<String>> {
     if s.ended_at.is_some() {
         return Ok(None);
     }
-    let mid_turn = matches!(s.state, SessionState::Running | SessionState::Blocked)
+    let mid_turn = matches!(s.state, SessionState::Running | SessionState::Blocked | SessionState::Paused)
         || ctx.store.status(session_id)?.is_some_and(|st| matches!(st.state, StatusState::Working | StatusState::Blocked));
     Ok(mid_turn.then(|| "the agent is mid-turn; wait for it to finish".to_string()))
 }

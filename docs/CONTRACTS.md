@@ -357,9 +357,19 @@ pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String,
 // Deps gains: pub open_terminal: Option<&'a OpenThreadFn<'a>>;
 // ThreadAction gains: OpenTerminal; Ctrl+T opens a floating shell in the thread's
 // workspace. Ctrl+D returns Manage and opens the thread controls.
-// manage::Action::StopAgent (`t`) selects among the thread's live agents.
+// manage::Action::StopAgent (`t`, "Agents") opens per-agent controls.
 // manage::Outcome::StopAgent { agent: String } stops only that agent's live
 // sessions on this thread. Existing Stop (`x`, "Stop all") remains thread-wide.
+// Additional outcomes: PauseAgent { agent }, ResumeAgent { agent }, RemoveAgent { agent }.
+// Host Request gains PauseSession { session_id: String, paused: bool }; the host
+// signals the session locally and sync carries its lifecycle update.
+// Step::AgentActions { agent: String, idx: usize } offers Pause/Resume, Kill,
+// and Remove. Removal preserves history and registration; an explicit summon
+// starts a new session and rejoins the roster.
+// SessionState gains Paused ("paused"). Pause freezes a local session host and
+// its descendant processes; Resume restores the previous state in place.
+// Store::thread_agents(thread_id: &str) -> Result<Vec<String>, Error> derives
+// the roster from session starts and applied participant add/remove events.
 pub enum ItemBody { …, Changes { files: usize, authored: usize, added: i64, removed: i64, between_turns: bool } }   // a TurnEnd that changed files
 pub enum Row { …, Changes(usize) }   // the change line under a turn: "↗ 3 files  +42 −7"
 pub struct util::DiffLink { pub thread: String, pub session_id: String, pub turn: i64, pub rex_session: String, pub server: Option<String> }   // axel-links://diff?…

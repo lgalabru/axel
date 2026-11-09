@@ -12,6 +12,7 @@ mod launch;
 mod log;
 mod manage;
 mod policy;
+mod process_control;
 mod reconcile;
 mod session;
 mod setup;

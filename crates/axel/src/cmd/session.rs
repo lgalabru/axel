@@ -16,6 +16,7 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
         SessionCommand::Stop { session } => {
             let ctx = Ctx::open()?;
             let s = ctx.store.get_session(&session)?.with_context(|| format!("no session {session}"))?;
+            if s.state == SessionState::Paused { super::process_control::resume(&ctx, &s)?; }
             if let Some(sock) = &s.socket_path {
                 let _ = axel_acp::socket::send(sock, &axel_acp::socket::Command::Stop);
             }
@@ -35,7 +36,7 @@ pub fn run(cmd: SessionCommand) -> Result<()> {
         }
         SessionCommand::Ls { all } => {
             let ctx = Ctx::open()?;
-            let states = if all { None } else { Some(vec![SessionState::Starting, SessionState::Running, SessionState::Blocked, SessionState::Idle]) };
+            let states = if all { None } else { Some(vec![SessionState::Starting, SessionState::Running, SessionState::Blocked, SessionState::Idle, SessionState::Paused]) };
             let agents = ctx.store.list_agents()?;
             for s in ctx.store.list_sessions(SessionFilter { states, limit: Some(200), ..Default::default() })? {
                 let agent = agents.iter().find(|a| a.pubkey == s.agent_pubkey).map(|a| a.name.as_str()).unwrap_or("?");

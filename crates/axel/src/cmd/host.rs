@@ -150,6 +150,7 @@ pub enum Request {
         files: Vec<FileBlob>,
     },
     StopSession { session_id: String },
+    PauseSession { session_id: String, paused: bool },
     Snapshot { thread_id: String },
     /// A session's harness conversation, to resume it elsewhere.
     Transcript { session_id: String },
@@ -357,6 +358,7 @@ fn handle(req: Request) -> Result<Response> {
         Request::StartJob { job } => Response::Started { session_id: start_job(&ctx, &job)? },
         Request::SessionCommand { session_id, mut cmd, files } => {
             let s = ctx.store.get_session(&session_id)?.with_context(|| format!("no session {session_id}"))?;
+            if s.state == axel_store::SessionState::Paused { return Ok(Response::Reply { reply: socket::Reply::Error { message: "this agent is paused; resume it in thread controls".into() } }); }
             if let socket::Command::Prompt { attachments, .. } = &mut cmd
                 && !files.is_empty()
             {
@@ -365,7 +367,16 @@ fn handle(req: Request) -> Result<Response> {
             let sock = s.socket_path.context("its session host isn't running")?;
             Response::Reply { reply: socket::send(&sock, &cmd).context("its session host is unreachable")? }
         }
+        Request::PauseSession { session_id, paused } => {
+            let session = ctx.store.get_session(&session_id)?.context("no such session")?;
+            if paused { super::process_control::pause(&ctx, &session)?; }
+            else { super::process_control::resume(&ctx, &session)?; }
+            Response::Reply { reply: socket::Reply::Ok }
+        }
         Request::StopSession { session_id } => {
+            if let Some(session) = ctx.store.get_session(&session_id)? {
+                if session.state == axel_store::SessionState::Paused { super::process_control::resume(&ctx, &session)?; }
+            }
             if let Some(sock) = ctx.store.get_session(&session_id)?.and_then(|s| s.socket_path) {
                 let _ = socket::send(&sock, &socket::Command::Stop);
             }
@@ -741,6 +752,12 @@ pub fn relay(ctx: &Ctx, session: &axel_store::Session, cmd: &socket::Command) ->
     }
 }
 
+pub fn pause_remote(ctx: &Ctx, session: &axel_store::Session, paused: bool) -> Result<()> {
+    let host = host_of(ctx, session)?.context("not a remote session")?;
+    call(&host, &Request::PauseSession { session_id: session.id.clone(), paused })?;
+    Ok(())
+}
+
 /// Stop a session on its host.
 pub fn stop_remote(ctx: &Ctx, session: &axel_store::Session) -> Result<()> {
     let host = host_of(ctx, session)?.context("not a remote session")?;
@@ -979,6 +996,7 @@ pub fn move_session(ctx: &Ctx, session_id: &str, to: &str) -> Result<(String, St
 
 /// Stop a session running on this machine, and close its Rex pane.
 fn stop_local(ctx: &Ctx, s: &axel_store::Session) {
+    if s.state == axel_store::SessionState::Paused { let _ = super::process_control::resume(ctx, s); }
     if let Some(sock) = &s.socket_path {
         let _ = socket::send(sock, &socket::Command::Stop);
     }

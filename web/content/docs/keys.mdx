@@ -84,10 +84,13 @@ what you can do to it.
 
 | Key | |
 |---|---|
-| **↑ ↓**, **Enter** | Choose. Each row has a key too: **r** reset, **m** move, **s** settle, **o** reopen, **a** archive, **t** stop agent, **x** stop all, **n** rename, **h** hard reset. |
+| **↑ ↓**, **Enter** | Choose. Each row has a key too: **r** reset, **m** move, **s** settle, **o** reopen, **a** archive, **t** agents, **x** stop all, **n** rename, **h** hard reset. |
 | **Reset** | End the thread's sessions, start the agent again with a fresh context and a recap of the thread (the intent, the last turns in a few lines each, the files they changed), and relaunch the thread's own panes. Everything comes back on the installed binary. For when a long thread has grown slow, or after an update. |
 | **Move** | Run the agent on one of your hosts. A live Claude Code session travels with its conversation; anything else starts there with the recap. |
-| **Stop agent** | Pick a live agent on this thread and stop its sessions. Other agents keep running. |
+| **Agents** | Choose an agent, then **p** Pause, **r** Resume, **x** Kill, or **d** Remove from thread. Available actions follow its state. |
+| **Pause** / **Resume** | Freeze the agent and its running tools, then continue them in place. |
+| **Kill** | End that agent's live sessions on this thread. |
+| **Remove from thread** | Stop that agent and remove it from the thread roster. Its history and global configuration are kept. An explicit `@name` can bring it back. |
 | **Stop all** | Stop every live session on this thread. |
 | **Settle** / **Reopen**, **Archive** | As in the launcher. |
 | **Rename** | Edit the title in place; the window follows. |

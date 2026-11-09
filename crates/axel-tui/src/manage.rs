@@ -109,7 +109,7 @@ impl Action {
             Action::Reopen => "Reopen",
             Action::Archive => "Archive",
             Action::Stop => "Stop all",
-            Action::StopAgent => "Stop agent",
+            Action::StopAgent => "Agents",
             Action::Rename => "Rename",
             Action::HardReset => "Hard reset",
         }
@@ -135,6 +135,9 @@ pub enum Outcome {
     Stop,
     /// End only this agent's live sessions on the current thread.
     StopAgent { agent: String },
+    PauseAgent { agent: String },
+    ResumeAgent { agent: String },
+    RemoveAgent { agent: String },
     Rename(String),
     /// End every session and relaunch the panes; no agent, no recap.
     HardReset,
@@ -148,6 +151,7 @@ pub enum Step {
     PickAgent { action: Action, idx: usize },
     /// Which host, for move.
     PickHost { agent: String, idx: usize },
+    AgentActions { agent: String, idx: usize },
     /// `y` to go ahead.
     Confirm(Outcome),
     Rename(String),
@@ -178,10 +182,8 @@ impl ManageView {
         if self.data.state != "archived" {
             out.push(Action::Archive);
         }
-        if self.data.sessions.iter().any(|s| s.live) {
-            out.push(Action::StopAgent);
-            out.push(Action::Stop);
-        }
+        if !self.data.agents.is_empty() { out.push(Action::StopAgent); }
+        if self.data.sessions.iter().any(|s| s.live) { out.push(Action::Stop); }
         out.push(Action::Rename);
         out.push(Action::HardReset);
         out
@@ -196,7 +198,7 @@ impl ManageView {
             Action::Settle => "mark it done; it stays listed, dimmed".into(),
             Action::Reopen => "back to open".into(),
             Action::Archive => "stop its sessions and hide it (axel thread reopen brings it back)".into(),
-            Action::StopAgent => "choose a running agent on this thread and end its sessions".into(),
+            Action::StopAgent => "pause, resume, kill, or remove an agent from this thread".into(),
             Action::Stop => format!("end {} live session{}", self.live_count(), if self.live_count() == 1 { "" } else { "s" }),
             Action::Rename => "change the title (the window follows)".into(),
             Action::HardReset => "end every session and relaunch the panes; no agent, no recap: the next message starts from scratch".into(),
@@ -207,13 +209,17 @@ impl ManageView {
         self.data.sessions.iter().filter(|s| s.live).count()
     }
 
-    fn agents_for(&self, action: Action) -> Vec<String> {
-        if action != Action::StopAgent { return self.data.agents.clone() }
-        let mut live = Vec::new();
-        for session in self.data.sessions.iter().filter(|s| s.live) {
-            if !live.contains(&session.agent) { live.push(session.agent.clone()); }
-        }
-        live
+    fn agents_for(&self, _action: Action) -> Vec<String> { self.data.agents.clone() }
+
+    fn agent_actions(&self, agent: &str) -> Vec<(&'static str, char, Outcome)> {
+        let mut actions = Vec::new();
+        let live: Vec<_> = self.data.sessions.iter().filter(|s| s.agent == agent && s.live).collect();
+        let name = || agent.to_string();
+        if live.iter().any(|s| s.state != "paused") { actions.push(("Pause", 'p', Outcome::PauseAgent { agent: name() })); }
+        if live.iter().any(|s| s.state == "paused") { actions.push(("Resume", 'r', Outcome::ResumeAgent { agent: name() })); }
+        if !live.is_empty() { actions.push(("Kill", 'x', Outcome::StopAgent { agent: name() })); }
+        actions.push(("Remove from thread", 'd', Outcome::RemoveAgent { agent: name() }));
+        actions
     }
 
     /// Handle a key; `Some` when the caller has something to do.
@@ -263,6 +269,17 @@ impl ManageView {
                 KeyCode::Enter => self.step = Step::Confirm(Outcome::Move { agent, host: self.data.hosts[idx].clone() }),
                 _ => {}
             },
+            Step::AgentActions { agent, idx } => {
+                let actions = self.agent_actions(&agent);
+                match key.code {
+                    KeyCode::Esc => self.step = Step::Menu,
+                    KeyCode::Up | KeyCode::Char('k') => self.step = Step::AgentActions { agent, idx: idx.saturating_sub(1) },
+                    KeyCode::Down | KeyCode::Char('j') => self.step = Step::AgentActions { agent, idx: (idx + 1).min(actions.len().saturating_sub(1)) },
+                    KeyCode::Enter => if let Some((_, _, outcome)) = actions.get(idx) { self.step = Step::Confirm(outcome.clone()); },
+                    KeyCode::Char(c) => if let Some((_, _, outcome)) = actions.iter().find(|(_, key, _)| *key == c) { self.step = Step::Confirm(outcome.clone()); },
+                    _ => {}
+                }
+            }
             Step::Confirm(outcome) => match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     self.step = Step::Menu;
@@ -314,7 +331,7 @@ impl ManageView {
 
     fn after_agent(&mut self, action: Action, agent: String) {
         match action {
-            Action::StopAgent => self.step = Step::Confirm(Outcome::StopAgent { agent }),
+            Action::StopAgent => self.step = Step::AgentActions { agent, idx: 0 },
             Action::Move if self.data.hosts.len() > 1 => self.step = Step::PickHost { agent, idx: 0 },
             Action::Move => {
                 let host = self.data.hosts[0].clone();
@@ -439,6 +456,16 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
                 y += 1;
             }
         }
+        Step::AgentActions { agent, idx } => {
+            line_at(frame, y, Line::from(Span::styled(format!("{agent} · agent controls"), theme::accent_bold())));
+            y += 1;
+            for (i, (label, key, outcome)) in v.agent_actions(agent).iter().enumerate() {
+                let destructive = matches!(outcome, Outcome::StopAgent { .. } | Outcome::RemoveAgent { .. });
+                let style = if destructive { theme::danger() } else if i == *idx { theme::accent_bold() } else { Style::default() };
+                line_at(frame, y, Line::from(Span::styled(format!("{} {key} {label}", if i == *idx { "›" } else { " " }), style)));
+                y += 1;
+            }
+        }
         Step::PickHost { agent, idx } => {
             line_at(frame, y, Line::from(Span::styled(format!("move {agent} where?"), theme::accent_bold())));
             y += 1;
@@ -486,7 +513,10 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
                 Outcome::Reopen => "reopen this thread?".into(),
                 Outcome::Archive => "archive this thread: stop its sessions and hide it?".into(),
                 Outcome::Stop => "stop every live session?".into(),
-                Outcome::StopAgent { agent } => format!("stop {agent}'s live sessions on this thread?"),
+                Outcome::StopAgent { agent } => format!("kill {agent}'s live sessions on this thread?"),
+                Outcome::PauseAgent { agent } => format!("pause {agent} in place, including its running tools?"),
+                Outcome::ResumeAgent { agent } => format!("resume {agent}'s paused work?"),
+                Outcome::RemoveAgent { agent } => format!("stop {agent} and remove it from this thread? Its history is kept."),
                 Outcome::Rename(t) => format!("rename to {t}?"),
                 Outcome::HardReset => "hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?".into(),
                 Outcome::Close => String::new(),
@@ -495,7 +525,7 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
             Line::from(Span::styled(format!("{what}  y/n"), style))
         }
         Step::Rename(text) => Line::from(vec![Span::styled("title: ", theme::accent()), Span::raw(text.clone()), Span::styled("▏", theme::accent())]),
-        Step::PickAgent { .. } | Step::PickHost { .. } => Line::from(Span::styled("↑↓ choose  ⏎ pick  Esc back", theme::dim())),
+        Step::PickAgent { .. } | Step::PickHost { .. } | Step::AgentActions { .. } => Line::from(Span::styled("↑↓ choose  ⏎ pick  Esc back", theme::dim())),
         Step::Menu => match &d.note {
             Some(n) => Line::from(Span::styled(n.clone(), theme::accent())),
             None => Line::from(Span::styled("↑↓ choose  ⏎ go  Esc close", theme::dim())),
@@ -570,28 +600,28 @@ mod tests {
         done.state = "done".into();
         done.hosts.clear();
         done.sessions.iter_mut().for_each(|s| s.live = false);
-        assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::Rename, Action::HardReset], "no hosts: no move; nothing live: no stop");
+        assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::StopAgent, Action::Rename, Action::HardReset], "no hosts: no move; nothing live: no stop");
     }
 
     #[test]
-    fn stop_agent_selects_only_live_agents_and_keeps_stop_all_separate() {
+    fn agent_controls_offer_pause_resume_kill_and_remove_as_appropriate() {
         let mut v = ManageView::new(data());
         v.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(v.step, Step::Confirm(Outcome::StopAgent { agent: "opus".into() }));
-        v.handle_key(key(KeyCode::Char('n')));
-        v.data.sessions.push(SessionRow { agent: "sol".into(), live: true, ..Default::default() });
-        v.data.sessions.push(SessionRow { agent: "opus".into(), live: true, ..Default::default() });
-        v.handle_key(key(KeyCode::Char('t')));
         assert_eq!(v.step, Step::PickAgent { action: Action::StopAgent, idx: 0 });
-        assert_eq!(v.agents_for(Action::StopAgent), vec!["opus", "sol"]);
-        v.handle_key(key(KeyCode::Down));
         v.handle_key(key(KeyCode::Enter));
-        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::StopAgent { agent: "sol".into() }));
+        assert_eq!(v.step, Step::AgentActions { agent: "opus".into(), idx: 0 });
+        v.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::PauseAgent { agent: "opus".into() }));
+        v.data.sessions[0].state = "paused".into();
+        let actions = v.agent_actions("opus");
+        assert_eq!(actions.iter().map(|a| a.0).collect::<Vec<_>>(), vec!["Resume", "Kill", "Remove from thread"]);
+        v.step = Step::AgentActions { agent: "opus".into(), idx: 0 };
         v.handle_key(key(KeyCode::Char('x')));
-        assert_eq!(v.step, Step::Confirm(Outcome::Stop));
-        assert_eq!(Action::Stop.label(), "Stop all");
-        v.data.sessions.iter_mut().for_each(|s| s.live = false);
-        assert!(!v.actions().contains(&Action::StopAgent));
+        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::StopAgent { agent: "opus".into() }));
+        assert_eq!(v.agent_actions("fable").iter().map(|a| a.0).collect::<Vec<_>>(), vec!["Remove from thread"]);
+        v.step = Step::AgentActions { agent: "fable".into(), idx: 0 };
+        v.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::RemoveAgent { agent: "fable".into() }));
     }
 
     #[test]

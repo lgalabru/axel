@@ -253,7 +253,7 @@ fn samples_to_pairs(samples: Vec<axel_store::UsageSample>) -> Vec<(i64, i64)> {
 fn session_status_state(s: &Session) -> StatusState {
     match s.state {
         SessionState::Running => StatusState::Working,
-        SessionState::Blocked => StatusState::Blocked,
+        SessionState::Blocked | SessionState::Paused => StatusState::Blocked,
         SessionState::Starting | SessionState::Idle => StatusState::Idle,
         SessionState::Ended => StatusState::Done,
     }
@@ -587,7 +587,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
     // Agents on the thread with their live state.
     let mut agents: Vec<(String, Option<axel_store::AgentColor>, axel_store::StatusState)> = Vec::new();
     let agent_pks: Vec<String> = match &summary {
-        Some(s) if !s.agents.is_empty() => s.agents.clone(),
+        Some(s) => s.agents.clone(),
         _ => {
             let mut v: Vec<String> = Vec::new();
             for s in &sessions {
@@ -603,7 +603,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         let live: Vec<&Session> = sessions.iter().filter(|s| &s.agent_pubkey == pk && s.ended_at.is_none()).collect();
         let state = live
             .iter()
-            .filter_map(|s| statuses.get(&s.id).map(|st| st.state))
+            .filter_map(|s| if s.state == SessionState::Paused { Some(axel_store::StatusState::Blocked) } else { statuses.get(&s.id).map(|st| st.state) })
             .min_by_key(|st| status_urgency(*st))
             .unwrap_or_else(|| live.first().map(|s| session_live_state(s)).unwrap_or(axel_store::StatusState::Idle));
         agents.push((name, color, state));
@@ -612,7 +612,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
     let local_env = store.local_environment().map(|e| e.id).unwrap_or_default();
     let live_sessions: Vec<LiveSession> = sessions
         .iter()
-        .filter(|s| s.ended_at.is_none())
+        .filter(|s| s.ended_at.is_none() && agent_pks.contains(&s.agent_pubkey))
         .map(|s| LiveSession {
             id: s.id.clone(),
             agent_name: names.name(&s.agent_pubkey),
@@ -626,7 +626,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         })
         .collect();
     let mut live_sessions = live_sessions;
-    let last_agent_name = sessions.first().map(|s| names.name(&s.agent_pubkey));
+    let last_agent_name = sessions.iter().find(|s| agent_pks.contains(&s.agent_pubkey)).map(|s| names.name(&s.agent_pubkey));
 
     // Local items.
     let mut items: Vec<ThreadItem> = Vec::new();
@@ -768,7 +768,7 @@ fn session_live_state(s: &Session) -> axel_store::StatusState {
     use axel_store::StatusState as S;
     match s.state {
         SessionState::Running => S::Working,
-        SessionState::Blocked => S::Blocked,
+        SessionState::Blocked | SessionState::Paused => S::Blocked,
         SessionState::Ended => S::Done,
         SessionState::Starting | SessionState::Idle => S::Idle,
     }

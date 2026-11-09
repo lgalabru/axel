@@ -111,6 +111,29 @@ impl Store {
         self.summarize(thread).map(Some)
     }
 
+    /// Agents currently attached to a thread. Old sessions remain historical
+    /// after removal; a later session start explicitly rejoins the agent.
+    pub fn thread_agents(&self, thread_id: &str) -> Result<Vec<String>, Error> {
+        let mut roster: std::collections::BTreeSet<String> = self.distinct(
+            "SELECT DISTINCT agent_pubkey FROM sessions WHERE thread_id = ?1", thread_id
+        )?.into_iter().collect();
+        let mut st = self.conn.prepare("SELECT kind, tags_json, content FROM events WHERE thread_id = ?1 AND kind IN (?2, ?3) AND applied_at IS NOT NULL AND rejected_reason IS NULL ORDER BY created_at, id")?;
+        let events = st.query_map(rusqlite::params![thread_id, crate::wire::kind::THREAD_PARTICIPANT, crate::wire::kind::SESSION_START], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        for event in events {
+            let (kind, tags, content) = event?;
+            let tags: Vec<Vec<String>> = serde_json::from_str(&tags)?;
+            let Some(target) = tags.iter().find(|t| t.first().is_some_and(|s| s == "p")).and_then(|t| t.get(1)) else { continue };
+            if kind == crate::wire::kind::SESSION_START as i64 {
+                roster.insert(target.clone());
+            } else {
+                let op: serde_json::Value = serde_json::from_str(&content)?;
+                if op["op"] == "remove" { roster.remove(target); }
+                else if op["role"] == "agent" { roster.insert(target.clone()); }
+            }
+        }
+        Ok(roster.into_iter().collect())
+    }
+
     /// [`Store::thread_summary`] for every thread matching `f`.
     pub fn thread_summaries(&self, f: ThreadFilter) -> Result<Vec<ThreadSummary>, Error> {
         self.list_threads(f)?
@@ -139,10 +162,7 @@ impl Store {
             ),
             ..Default::default()
         })?;
-        let agents = self.distinct(
-            "SELECT DISTINCT agent_pubkey FROM sessions WHERE thread_id = ?1 ORDER BY 1",
-            &id,
-        )?;
+        let agents = self.thread_agents(&id)?;
         let environments = self.distinct(
             "SELECT DISTINCT environment_label FROM sessions WHERE thread_id = ?1 ORDER BY 1",
             &id,
