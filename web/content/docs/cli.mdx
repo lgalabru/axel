@@ -17,7 +17,7 @@ done`, and `msg` for `send`.
 | | |
 |---|---|
 | `axel agent new NAME [HARNESS[/MODEL]] [--skills a,b\|*] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. `terra codex`, `opus claude/opus`, `gus goose`. |
-| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change its harness, model, permissions, budget, mode or default host. |
+| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--name NEW] [--skills a,b\|*] [--prompt P] [--color C] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change anything about it: harness, model, name, skills, prompt, colour, permissions, budget, mode or default host. A rename keeps its key and history; running sessions keep the old name until they restart. |
 | `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. |
 
 ## Skills
@@ -40,6 +40,7 @@ See [The AXEL.md file](/docs/axel-md).
 | `axel thread open THREAD` | The thread view, in this terminal. |
 | `axel thread split THREAD` | A Rex window: the conversation above, the composer below. |
 | `axel thread ls [--all]` · `show THREAD` | List, inspect. |
+| `axel thread manage THREAD` | The thread controls: its sessions and spend, and reset, move, settle, archive, stop, rename. **Ctrl+D** in the composer opens the same. |
 | `axel thread diff THREAD [--session S] [--turn N] [--stat]` | What a turn changed: the file list, then the patch. Without `--turn`, the latest turn that changed a file. `--pane` is the floating pane a change line opens. |
 | `axel thread undo THREAD [--session S] [--turn N] [--restore] [-y]` | Take a turn's edits back out of the working tree, keeping later work unless it overlaps; `--restore` rewrites the turn's files to how they were before it. A snapshot is kept first; the agent is told. |
 | `axel thread stop THREAD` | End every live session on it. |

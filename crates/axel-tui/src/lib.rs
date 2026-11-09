@@ -19,6 +19,7 @@ mod glue;
 pub mod inbox;
 pub mod input;
 pub mod launcher;
+pub mod manage;
 pub mod model;
 pub mod picker;
 pub mod theme;
@@ -128,6 +129,10 @@ pub struct Deps<'a> {
     pub fit_prompt: Option<&'a dyn Fn(PromptSize)>,
     /// Settle, reopen, archive or delete a thread.  `None` hides those keys.
     pub manage_thread: Option<&'a ManageThreadFn<'a>>,
+    /// Open the thread controls pane for a thread (Ctrl+D in the composer).
+    pub open_controls: Option<&'a dyn Fn(&str)>,
+    /// Open a floating terminal in the thread's workspace (Ctrl+T).
+    pub open_terminal: Option<&'a OpenThreadFn<'a>>,
 }
 
 /// Run the TUI until the user launches a thread, focuses one, or quits.

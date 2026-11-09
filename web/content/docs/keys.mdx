@@ -28,18 +28,25 @@ description: Keys in the launcher, the recent threads and the thread view.
 
 ## Thread view
 
+Inside Rex, a thread has two panes: the message pane scrolls and selects text
+natively, and the composer below edits your message. The message pane has no
+keyboard cursor. Use the terminal's scrollback controls to read older messages
+and Cmd-click a tool-call link to open its details.
+
 | Key | |
 |---|---|
-| **Enter** | Send. While the agent is mid-turn, the message goes into its turn: it reads it at its next step, without stopping what it's doing. |
+| **Enter** | Send. Agents advertising live steering read it at their next step; other ACP harnesses queue it until the current turn finishes. |
 | **Shift+Enter** | A new line (Option+Enter works too). |
 | **Ctrl+S** | Interrupt the agent and send this instead. |
 | **Option+↑** | With an empty composer: edit your latest message the agent hasn't read yet. **Enter** saves it, **Esc** leaves it as it was. |
-| **↑ ↓** | Move between the lines of your message; past the first or last line, prompt history. While a question is open: choose an answer. |
+| **↑ ↓** | Move between the wrapped lines of your message, including recalled prompts. Past the first or last screen row, browse prompt history. While a question is open: choose an answer. |
 | **Ctrl+L** | Show the session log of the agent you're talking to, or hide it again. |
+| **Ctrl+T** | Open a floating terminal in the thread’s project directory or worktree. |
+| **Ctrl+D** | The thread controls: its sessions and spend, and reset, move, settle, archive, stop, rename. |
 | **1–9** | Pick an answer. |
-| **Tab** | Move between the composer, attachments, the messages not read yet and the timeline. There, **Enter** sends one now, **e** edits it and **x** removes it. |
-| **Space** | With an empty composer: expand or fold the tool calls under the cursor. |
-| **PgUp / PgDn** | Scroll the conversation. |
+| **Tab** | Move between the composer, attachments and queued messages, skipping empty lists. With no attachments or queue, focus stays in the composer. On a queued message, **Enter** sends it now, **e** edits it and **x** removes it. |
+| **Space** | Type a space in your message. Open tool-call details with Cmd-click in the message pane. |
+| Terminal scrollback | Scroll the message pane using your terminal's mouse wheel, trackpad or scrollback keys. |
 | `@name` | Message or summon another agent on this thread. |
 | Click `▸ 5 tool calls` | Open the run of calls in a pane. |
 | Click `Δ 3 files  +42 −7` | Open the turn's diff pane. |
@@ -60,6 +67,30 @@ description: Keys in the launcher, the recent threads and the thread view.
 | **Cmd+Z**, **Ctrl+Z** | Undo, a word at a time. **Shift+Cmd+Z** redoes. |
 
 Pasted text keeps its line breaks.
+
+### Inline view outside Rex
+
+In the single-pane thread view, **Tab** also visits the timeline. There,
+**↑ ↓** moves its cursor, **Space** expands or folds tool calls, and
+**PgUp / PgDn** scrolls the conversation. These timeline keys apply to the
+inline view, not Rex's read-only message pane.
+
+## Thread controls
+
+Opened with **Ctrl+D** from the composer, or `axel thread manage <id>`. On top, the
+thread's sessions: agent, harness and model, state, turns, tool calls, tokens, cost,
+context fill and how long each ran, then the thread's totals and the last hour. Below,
+what you can do to it.
+
+| Key | |
+|---|---|
+| **↑ ↓**, **Enter** | Choose. Each row has a key too: **r** reset, **m** move, **s** settle, **o** reopen, **a** archive, **x** stop, **n** rename, **h** hard reset. |
+| **Reset** | End the thread's sessions, start the agent again with a fresh context and a recap of the thread (the intent, the last turns in a few lines each, the files they changed), and relaunch the thread's own panes. Everything comes back on the installed binary. For when a long thread has grown slow, or after an update. |
+| **Move** | Run the agent on one of your hosts. A live Claude Code session travels with its conversation; anything else starts there with the recap. |
+| **Settle** / **Reopen**, **Archive**, **Stop** | As in the launcher. |
+| **Rename** | Edit the title in place; the window follows. |
+| **Hard reset** (in red, last) | End every session and relaunch the panes, starting nobody and carrying nothing over: the next message on the thread starts a brand-new conversation. |
+| **y / n** | Confirm or back out. **Esc** closes. |
 
 ## Diff pane
 

@@ -3,8 +3,8 @@
 use axel_store::{AgentColor, StatusState};
 use ratatui::style::{Color, Modifier, Style};
 
-/// The single accent colour (titles, selection, active input).
-pub const ACCENT: Color = Color::Indexed(179);
+/// The single accent colour (titles, selection, active input): coral red #FF7565.
+pub const ACCENT: Color = Color::Rgb(255, 117, 101);
 /// Muted text for hints, breadcrumbs and timestamps.
 pub const DIM: Color = Color::DarkGray;
 /// Errors and denied/blocked signals.

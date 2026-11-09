@@ -503,6 +503,8 @@ impl<'a> App<'a> {
 
     fn on_thread(&mut self, action: ThreadAction) -> Option<Outcome> {
         match action {
+            // The thread controls are a floating pane of the composer; inline, nothing opens.
+            ThreadAction::Manage | ThreadAction::OpenTerminal => None,
             ThreadAction::None => None,
             ThreadAction::Quit => Some(Outcome::Quit),
             ThreadAction::Back => {
@@ -565,6 +567,9 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &s
     let mut app = App::new(deps, owner_pk, initial);
     loop {
         let size = terminal.size()?;
+        if let Some(thread) = app.thread.as_mut() {
+            thread.set_composer_width(size.width);
+        }
         app.dashboard.compact =
             view::dashboard_view::mode_for(ratatui::layout::Rect::new(0, 0, size.width, size.height))
                 == view::dashboard_view::Mode::Compact;

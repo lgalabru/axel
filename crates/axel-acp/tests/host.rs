@@ -1129,6 +1129,63 @@ fn a_turns_spend_and_context_fill_land_in_the_store() {
 }
 
 #[test]
+fn custom_agents_select_models_with_config_options_and_keep_legacy_support() {
+    for api in ["config", "legacy"] {
+        let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("hello"));
+        f.cfg.env.push(("FAKE_AGENT_MODELS".into(), api.into()));
+        f.cfg.model = Some("Flash".into());
+        let host = spawn_host(&f);
+        wait_until("configured turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+        assert!(f.pane.text().contains("model provider/flash"), "{api}: {}", f.pane.text());
+        assert!(!f.store.items(&f.session_id, 0, 1000).unwrap().iter().any(|i| i.kind == ItemKind::Error), "{api}: {}", f.pane.text());
+        send_ok(&f.cfg.socket_path, Command::Stop);
+        host.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn standard_usage_records_cumulative_usd_cost_once_without_billing_context_tokens() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("spend-standard:0.125"));
+    let host = spawn_host(&f);
+    wait_until("first cost", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    send_ok(&f.cfg.socket_path, Command::Prompt { text: "spend-standard:0.2".into(), attachments: vec![], steer: false, from: None });
+    wait_until("second cost", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    let usage = f.store.usage(&f.session_id).unwrap().unwrap();
+    assert!((usage.cost_usd_est - 0.2).abs() < 1e-9);
+    assert_eq!((usage.input_tokens, usage.output_tokens, usage.turns), (0, 0, 2));
+    let context = f.store.session_contexts().unwrap();
+    assert_eq!((context[0].used, context[0].size), (4763, 1000000));
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn standard_cost_is_not_added_again_from_extensions_or_prompt_replies() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("spend-mixed"));
+    let host = spawn_host(&f);
+    wait_until("mixed usage", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    let usage = f.store.usage(&f.session_id).unwrap().unwrap();
+    assert!((usage.cost_usd_est - 0.5).abs() < 1e-9);
+    assert_eq!((usage.input_tokens, usage.output_tokens, usage.turns), (10, 50, 1));
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
+fn restarting_a_host_does_not_charge_its_existing_cumulative_cost_again() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("spend-standard:0.2"));
+    f.store.add_usage(&f.owner, &f.session_id, &axel_store::UsageDelta {
+        cost_usd_est: 0.125,
+        ..Default::default()
+    }, None).unwrap();
+    let host = spawn_host(&f);
+    wait_until("continued usage", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    assert!((f.store.usage(&f.session_id).unwrap().unwrap().cost_usd_est - 0.2).abs() < 1e-9);
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+#[test]
 fn a_turn_in_a_git_workspace_leaves_checkpoints_and_what_it_changed() {
     let f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
     let git = |args: &[&str]| {

@@ -515,6 +515,18 @@ in three ways:
 `AXEL_ACP_CODEX=codex-acp` goes back to Zed's. `crates/axel-acp/tests/codex_acp.rs` checks it
 against a fake app-server.
 
+**Custom ACP agents** use the same host as the built-in adapters. When a model
+selector is advertised in `configOptions`, the host selects it with
+`session/set_config_option`; otherwise it uses legacy `session/set_model`.
+Grouped provider choices are supported. Standard `usage_update.used` and `size`
+are context gauges. A cumulative USD `cost` is added only as it grows, without
+counting it again from the adapter's usage extension or prompt reply. Other
+currencies stay out of the USD total.
+
+An agent without the live-steering capability queues prompts until its turn
+finishes. Ctrl+S cancels that turn and sends the new prompt. The live-steering
+extension is available to any ACP agent, not only Claude and Codex.
+
 **A message sent while the agent works goes into its turn.** The agent reads it at its next
 step instead of after the whole turn, and nothing is interrupted. ACP has no word for it, so
 both adapters take two requests of Axel's own, and advertise them as
@@ -609,6 +621,20 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   title, and the stream pane watches `rex events` for `window_label_changed`: a name typed
   over the window in Rex becomes the thread's title (Rex's placeholder and the title as
   Axel shortens it for the tab don't count, so Axel's own labelling renames nothing).
+- **Composer panels**: Ctrl+D opens the thread controls. Ctrl+T opens a focused
+  floating shell in the thread’s project directory, using its worktree when present.
+  A thread without a local project uses the composer’s directory.
+- **Terminal colours**: normal text and surfaces use the terminal's own foreground
+  and background. Selections reverse those colours, and code explicitly resets
+  its background and uses the terminal's blue. Approval cards do not force a dark
+  surface. The same rendering works with light and dark Rex themes.
+- **Composer arrows**: Up and Down move through the wrapped rows on screen,
+  keeping the intended column across shorter lines. This also applies to recalled
+  prompts. History changes only beyond the first or last screen row.
+- **Typing in the message pane**: plain typing or pasted text goes into the composer
+  directly below that stream, which takes focus. Existing draft text is preserved.
+  The transfer is a paste, so digits cannot answer a waiting approval and newlines
+  cannot send a message. Scrolling and selection stay native to the terminal.
 - **Agent panes**: a managed session's host pane (`<agent> · <thread> · log`) starts
   minimized: a detached Rex block, running but in no window. ^L in the composer shows the
   log of the agent you're talking to beside the conversation (`session.move_block`), and

@@ -1,6 +1,6 @@
 //! The thread as a plain terminal stream (the top pane of a split thread).
 //!
-//! No alternate screen, no raw mode, no mouse capture: finished rows are
+//! No alternate screen or mouse capture: finished rows are
 //! printed once and become ordinary scrollback, so the terminal scrolls,
 //! searches and selects them itself.  Only the **live tail** — rows still
 //! streaming or running, a pending approval, the "working" line — is redrawn
@@ -11,6 +11,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -25,7 +26,8 @@ const TICK: Duration = Duration::from_millis(250);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// Follow `thread_id` until the process is killed (the pane closes with its window).
-pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str) -> Result<()> {
+pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&dyn Fn(&str) -> Result<()>>) -> Result<()> {
+    let _input = redirect_input.map(|_| StreamInput::new()).transpose()?;
     let mut out = std::io::stdout();
     let data = glue::load_thread(store, owner_pk, thread_id, now_secs())?;
     let mut view = ThreadView::new(thread_id, data);
@@ -95,11 +97,95 @@ pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str) ->
             }
         }
         out.flush()?;
-        std::thread::sleep(TICK);
+        if let Some(redirect) = redirect_input {
+            let deadline = std::time::Instant::now() + TICK;
+            while let Some(wait) = deadline.checked_duration_since(std::time::Instant::now()) {
+                if !event::poll(wait)? {
+                    break;
+                }
+                let ev = event::read()?;
+                if matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release && k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)) {
+                    return Ok(());
+                }
+                let mut text = typed_text(ev).unwrap_or_default();
+                // Include input already queued behind the first character.
+                while event::poll(Duration::ZERO)? {
+                    let ev = event::read()?;
+                    if matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release && k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)) {
+                        return Ok(());
+                    }
+                    if let Some(more) = typed_text(ev) {
+                        text.push_str(&more);
+                    }
+                }
+                if !text.is_empty() {
+                    redirect(&text)?;
+                }
+            }
+        } else {
+            std::thread::sleep(TICK);
+        }
         s.tick += 1;
         if let Ok(d) = glue::load_thread(store, owner_pk, thread_id, now_secs()) {
             view.set_data(d);
         }
+    }
+}
+
+/// Read text immediately without echo, leaving scrollback and selection alone.
+struct StreamInput;
+
+impl StreamInput {
+    fn new() -> Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        let guard = Self;
+        crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
+        Ok(guard)
+    }
+}
+
+impl Drop for StreamInput {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste, crossterm::cursor::Show);
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+fn typed_text(ev: Event) -> Option<String> {
+    match ev {
+        Event::Paste(text) => Some(text),
+        Event::Key(key) if key.kind != KeyEventKind::Release && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) => {
+            match key.code {
+                KeyCode::Char(c) => Some(c.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    #[test]
+    fn typing_and_paste_are_preserved_but_navigation_and_shortcuts_are_not_text() {
+        for c in ['a', '1', ' ', 'é', '🦀'] {
+            assert_eq!(typed_text(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))), Some(c.to_string()));
+        }
+        assert_eq!(typed_text(Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT))), Some("A".into()));
+        let pasted = "first\nsecond\r\nthird 🦀";
+        assert_eq!(typed_text(Event::Paste(pasted.into())), Some(pasted.into()));
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::PageUp, KeyCode::Enter, KeyCode::Tab, KeyCode::Esc] {
+            assert_eq!(typed_text(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))), None);
+        }
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT, KeyModifiers::SUPER] {
+            assert_eq!(typed_text(Event::Key(KeyEvent::new(KeyCode::Char('c'), modifiers))), None);
+        }
+        let mut released = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        released.kind = KeyEventKind::Release;
+        assert_eq!(typed_text(Event::Key(released)), None);
     }
 }
 
@@ -550,7 +636,7 @@ fn sgr(st: Style) -> String {
 fn color(c: Color, bg: bool) -> Option<String> {
     let base = |n: u8| Some((if bg { n + 10 } else { n }).to_string());
     match c {
-        Color::Reset => None,
+        Color::Reset => Some(if bg { "49" } else { "39" }.into()),
         Color::Black => base(30),
         Color::Red => base(31),
         Color::Green => base(32),
@@ -714,6 +800,22 @@ mod tests {
     fn ansi_styles_spans() {
         let l = Line::from(vec![Span::raw("a "), Span::styled("b", Style::default().fg(Color::Indexed(179)).bold())]);
         assert_eq!(to_ansi(&l), "a \x1b[1;38;5;179mb\x1b[0m");
+    }
+
+    #[test]
+    fn code_resets_inherited_backgrounds_in_light_and_dark_terminals() {
+        use crate::view::markdown::md_lines;
+        for background in [Color::Black, Color::White] {
+            let lines = md_lines("Read `/docs` then `llms.txt`", 80, Style::default().bg(background));
+            let code: Vec<_> = lines[0].spans.iter().filter(|s| s.style.fg == Some(Color::Blue)).collect();
+            assert_eq!(code.len(), 2);
+            for span in code {
+                assert_eq!(span.style.bg, Some(Color::Reset));
+                let encoded = to_ansi(&Line::from(span.clone()));
+                assert!(encoded.contains("34;49m"), "{encoded:?}");
+            }
+        }
+        assert_eq!(to_ansi(&Line::styled("plain", Style::default().fg(Color::Reset).bg(Color::Reset))), "\x1b[39;49mplain\x1b[0m");
     }
 
     #[test]

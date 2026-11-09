@@ -47,6 +47,8 @@ pub struct TextInput {
     last: Option<Edit>,
     /// What ^U ^K ^W ⌥⌫ last removed, for ^Y.
     killed: Vec<char>,
+    /// Keep the desired column while walking through short screen rows.
+    vertical_goal: Option<(usize, usize)>,
 }
 
 impl TextInput {
@@ -90,6 +92,7 @@ impl TextInput {
     /// Remember the state before an edit. Typing right after typing joins
     /// the same step, until a space ends the word.
     fn save(&mut self, edit: Edit) {
+        self.vertical_goal = None;
         if edit == Edit::Typing && self.last == Some(Edit::Typing) {
             return;
         }
@@ -103,9 +106,11 @@ impl TextInput {
 
     fn moved(&mut self) {
         self.last = None;
+        self.vertical_goal = None;
     }
 
     pub fn undo(&mut self) {
+        self.vertical_goal = None;
         if let Some((chars, cursor)) = self.undo.pop() {
             self.redo.push((std::mem::replace(&mut self.chars, chars), self.cursor));
             self.cursor = cursor;
@@ -114,6 +119,7 @@ impl TextInput {
     }
 
     pub fn redo(&mut self) {
+        self.vertical_goal = None;
         if let Some((chars, cursor)) = self.redo.pop() {
             self.undo.push((std::mem::replace(&mut self.chars, chars), self.cursor));
             self.cursor = cursor;
@@ -272,6 +278,24 @@ impl TextInput {
         let next_end = self.chars[next_start..].iter().position(|c| *c == '\n').map_or(self.chars.len(), |i| next_start + i);
         self.moved();
         self.cursor = (next_start + col).min(next_end);
+        true
+    }
+
+    /// Walk the same wrapped rows the composer draws. Only the outermost
+    /// rows return false, allowing the caller to browse prompt history.
+    pub(crate) fn screen_line(&mut self, width: usize, up: bool) -> bool {
+        let width = width.max(1);
+        let (rows, (row, col)) = input_rows(&self.chars, width, self.cursor);
+        let next = if up { row.checked_sub(1) } else { (row + 1 < rows.len()).then_some(row + 1) };
+        let Some(next) = next else { return false };
+        let goal = self.vertical_goal.filter(|&(w, _)| w == width).map_or(col, |(_, col)| col);
+        let (start, end) = rows[next];
+        // The end of a wrapped row belongs to the following row. Explicit
+        // newlines and the end of the text can hold a cursor of their own.
+        let end = if rows.get(next + 1).is_some_and(|&(s, _)| s == end) && end > start { end - 1 } else { end };
+        self.moved();
+        self.cursor = start + goal.min(end - start);
+        self.vertical_goal = Some((width, goal));
         true
     }
 
@@ -438,6 +462,42 @@ impl TextInput {
     }
 }
 
+/// Shared screen rows for composer rendering and vertical navigation.
+pub(crate) fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(usize, usize)>, (usize, usize)) {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    loop {
+        let line_end = chars[start..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| start + i);
+        let mut s = start;
+        loop {
+            let e = s.saturating_add(width).min(line_end);
+            rows.push((s, e));
+            if e == line_end && e - s == width {
+                rows.push((e, e));
+            }
+            if e >= line_end {
+                break;
+            }
+            s = e;
+        }
+        if line_end >= chars.len() {
+            break;
+        }
+        start = line_end + 1;
+    }
+    let mut at = None;
+    for (r, &(s, e)) in rows.iter().enumerate() {
+        let last_of_line = rows.get(r + 1).is_none_or(|&(ns, _)| ns != e);
+        if cursor >= s && (cursor < e || (cursor == e && (last_of_line || e == s))) {
+            at = Some((r, cursor - s));
+            break;
+        }
+    }
+    let at = at.unwrap_or((rows.len().saturating_sub(1), 0));
+    (rows, at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,6 +659,55 @@ mod tests {
         assert!(!t.line_up(), "first line: ↑ is history");
         assert!(t.line_down() && t.line_down());
         assert_eq!(t.cursor(), 12);
+    }
+
+    #[test]
+    fn screen_arrows_walk_wrapped_rows_and_restore_the_column_after_short_lines() {
+        let mut t = TextInput::with_text("abcdefghij");
+        assert!(t.screen_line(4, true));
+        assert_eq!(t.cursor(), 6);
+        assert!(t.screen_line(4, false));
+        assert_eq!(t.cursor(), 10);
+
+        let mut t = TextInput::with_text("abcdef\nxy\nlonger line");
+        let end = t.cursor();
+        assert!(t.screen_line(80, true));
+        assert_eq!(t.cursor(), 9);
+        assert!(t.screen_line(80, true));
+        assert_eq!(t.cursor(), 6);
+        assert!(t.screen_line(80, false) && t.screen_line(80, false));
+        assert_eq!(t.cursor(), end, "short lines must not lose the desired column");
+    }
+
+    #[test]
+    fn screen_arrows_can_return_to_the_cursor_row_after_an_exact_wrap() {
+        let mut t = TextInput::with_text("abcdefgh");
+        assert!(t.screen_line(4, true));
+        assert_eq!(t.cursor(), 4);
+        assert!(t.screen_line(4, true));
+        assert_eq!(t.cursor(), 0);
+        assert!(!t.screen_line(4, true));
+        assert!(t.screen_line(4, false) && t.screen_line(4, false));
+        assert_eq!(t.cursor(), 8);
+        assert!(!t.screen_line(4, false));
+        // The reserved final row exists even when the cursor is elsewhere.
+        let chars: Vec<_> = "abcdefgh".chars().collect();
+        assert_eq!(input_rows(&chars, 4, 0).0, input_rows(&chars, 4, 8).0);
+    }
+
+    #[test]
+    fn vertical_motion_recalculates_the_column_after_a_resize_or_horizontal_move() {
+        let mut t = TextInput::with_text("abcdefghijklmnopqrstuvwxyz");
+        assert!(t.screen_line(4, true));
+        assert_eq!(t.cursor(), 22);
+        assert!(t.screen_line(8, false));
+        assert_eq!(t.cursor(), 26);
+
+        let mut t = TextInput::with_text("abcdef\nxy\nlonger line");
+        assert!(t.screen_line(80, true));
+        t.left();
+        assert!(t.screen_line(80, false));
+        assert_eq!(t.cursor(), 11, "left resets the desired column to 1");
     }
 
     #[test]

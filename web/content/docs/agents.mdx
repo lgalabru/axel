@@ -42,7 +42,8 @@ The second word is what it runs: a harness and, after a `/`, its model. `claude`
 Code's default model, `claude/opus` picks Opus, `codex/gpt-5.5` a Codex model. Leave it out
 and the agent runs Claude Code. The harnesses: `claude`, `codex`, `opencode`, `goose`,
 `cursor`, `pi`, `omp`, `devin`, `grok`, `kimi`, `amp`, `hermes` and `openclaw` (see
-[Installation](/docs/installation#harnesses)), or any other command, which runs in a pane.
+[Installation](/docs/installation#harnesses)), or any other command. A custom command
+speaking ACP runs as a managed session too.
 
 | Profile | |
 |---|---|
@@ -54,8 +55,35 @@ and the agent runs Claude Code. The harnesses: `claude`, `codex`, `opencode`, `g
 | `--host` | Where it runs unless told otherwise; see [Remote hosts](/docs/remote-hosts). |
 
 Change any of it later with `axel agent edit terra …`: `axel agent edit terra goose` moves
-terra to Goose, `axel agent edit opus --model fable` changes only the model. `axel agent archive terra` retires
-an agent and keeps its key and history.
+terra to Goose, `axel agent edit opus --model fable` changes only the model,
+`axel agent edit terra --name sol` renames it (its key, policy and history stay; sessions
+already running keep the old name until they restart), and `--skills`, `--prompt` and
+`--color` replace those. `axel agent archive terra` retires an agent and keeps its key and
+history.
+
+### Custom ACP harnesses
+
+Pass the entire ACP command as the harness and set the model separately:
+
+```bash
+axel agent new maki --harness 'maki acp'
+axel agent new maki-fast --harness 'maki acp' --model 'opencode-go/deepseek-v4.1-flash'
+```
+
+Wrappers work too: `--harness 'fnox exec -- maki acp'`. Axel splits quoted command
+arguments and starts the command directly, without a shell. The executable must
+be installed and authenticated on the machine where the agent runs.
+
+Axel selects models through ACP `configOptions` when the harness advertises a
+model selector, including selectors grouped by provider. Older adapters keep
+using `session/set_model`. Standard ACP usage updates populate the context gauge
+and cumulative USD cost; the context gauge is not counted as billable tokens.
+
+Prompts sent during a turn queue until it finishes. **Ctrl+S** cancels the current
+turn and sends your new prompt. Harnesses can also opt into live steering with
+`agentCapabilities._meta.axel.steer: true` and the `_axel/steer` extension described
+in the [design document](https://github.com/lgalabru/axel/blob/main/docs/DESIGN.md#managed-runtime-acp-and-the-thread-view).
+This is capability-based and works for custom harnesses as well as the built-ins.
 
 ## Why keys
 

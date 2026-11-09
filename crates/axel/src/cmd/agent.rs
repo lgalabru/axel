@@ -28,7 +28,7 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             print_host(&ctx, &agent.pubkey)?;
             Ok(())
         }
-        AgentCommand::Edit { name, runs, model, runtime_mode, host, policy } => {
+        AgentCommand::Edit { name, runs, model, name_to, skills, prompt, color, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't edit agents; ask the owner to run this");
             }
@@ -36,6 +36,20 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             let mut p = ctx.store.agent_policy(&a.pubkey)?;
             apply_policy(&ctx, &a.name, &mut p, &policy)?;
             ctx.store.set_agent_policy(&a.pubkey, &p)?;
+            if let Some(new_name) = &name_to {
+                let new_name = valid_name(new_name)?;
+                if new_name != a.name {
+                    if ctx.store.agent_by_name(new_name)?.is_some() {
+                        bail!("an agent named {new_name} already exists");
+                    }
+                    ctx.store.rename_agent(&a.pubkey, new_name)?;
+                    println!("{} is now {new_name}; sessions already running keep calling it {} until they restart", a.name, a.name);
+                }
+            }
+            if skills.is_some() || prompt.is_some() || color.is_some() {
+                let skills = skills.as_deref().map(parse_skills);
+                ctx.store.set_agent_profile(&a.pubkey, skills.as_deref(), prompt.as_deref(), color.map(AgentColor::from))?;
+            }
             if let Some(m) = runtime_mode {
                 ctx.store.set_agent_runtime_mode(&a.pubkey, m.into())?;
             }
@@ -106,6 +120,16 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
     }
 }
 
+/// An agent name as people type it: letters, digits, `-` and `_`, so it
+/// works as an `@mention`.
+fn valid_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        bail!("agent names are [A-Za-z0-9_-]+ so they work as @mentions");
+    }
+    Ok(name)
+}
+
 /// Create an agent: key → keystore → owner attestation → store row.
 #[allow(clippy::too_many_arguments)]
 pub fn create(
@@ -118,10 +142,7 @@ pub fn create(
     color: Option<AgentColor>,
     runtime_mode: RuntimeMode,
 ) -> Result<Agent> {
-    let name = name.trim();
-    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        bail!("agent names are [A-Za-z0-9_-]+ so they work as @mentions");
-    }
+    let name = valid_name(name)?;
     if ctx.store.agent_by_name(name)?.is_some() {
         bail!("an agent named {name} already exists");
     }

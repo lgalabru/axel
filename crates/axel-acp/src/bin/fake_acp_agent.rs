@@ -37,7 +37,34 @@ fn main() {
                     "agentInfo": { "name": "fake-acp-agent", "version": "0.0.1" }
                 }),
             ),
-            "session/new" => respond(id, json!({ "sessionId": "fake-session-1" })),
+            "session/new" => {
+                let mut result = json!({ "sessionId": "fake-session-1" });
+                let available = json!([{ "modelId": "provider/flash", "name": "Flash" }, { "modelId": "provider/slow", "name": "Slow" }]);
+                match std::env::var("FAKE_AGENT_MODELS").as_deref() {
+                    Ok("config") => {
+                        result["configOptions"] = json!([{
+                            "id": "model-picker", "name": "Model", "category": "model", "type": "select",
+                            "currentValue": "provider/slow", "options": [{ "group": "provider", "name": "Provider", "options": [
+                                { "value": "provider/flash", "name": "Flash" }, { "value": "provider/slow", "name": "Slow" }
+                            ] }]
+                        }]);
+                        // The standard selector must win over this legacy state.
+                        result["models"] = json!({ "currentModelId": "legacy", "availableModels": available });
+                    }
+                    Ok("legacy") => result["models"] = json!({ "currentModelId": "provider/slow", "availableModels": available }),
+                    _ => {}
+                }
+                respond(id, result);
+            }
+            "session/set_config_option" if std::env::var("FAKE_AGENT_MODELS").as_deref() == Ok("config") => {
+                assert_eq!(params["configId"], "model-picker");
+                assert_eq!(params["value"], "provider/flash");
+                respond(id, json!({ "configOptions": [] }));
+            }
+            "session/set_model" if std::env::var("FAKE_AGENT_MODELS").as_deref() == Ok("legacy") => {
+                assert_eq!(params["modelId"], "provider/flash");
+                respond(id, json!({}));
+            }
             "session/prompt" => {
                 prompts += 1;
                 prompt(&mut lines, id, &params, &format!("call-{prompts}"));
@@ -74,6 +101,28 @@ fn prompt(
             json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": sid, "update": u } }),
         )
     };
+
+    if let Some(amount) = text.strip_prefix("spend-standard:").and_then(|n| n.parse::<f64>().ok()) {
+        for cost in [amount, amount, (amount - 0.01).max(0.0)] {
+            update(json!({ "sessionUpdate": "usage_update", "used": 4763, "size": 1000000, "cost": { "amount": cost, "currency": "USD" } }));
+        }
+        update(json!({ "sessionUpdate": "usage_update", "used": 4763, "size": 1000000, "cost": { "amount": 99.0, "currency": "EUR" } }));
+        respond(id, json!({ "stopReason": "end_turn" }));
+        return;
+    }
+    if text == "spend-mixed" {
+        let usage = json!({ "usage": { "inputTokens": 10, "outputTokens": 50 }, "_meta": { "axel": { "costUsd": 0.5 } } });
+        send(json!({ "jsonrpc": "2.0", "method": "_axel/usage", "params": usage }));
+        update(json!({ "sessionUpdate": "usage_update", "used": 4763, "size": 1000000, "cost": { "amount": 0.5, "currency": "USD" } }));
+        // Even an adapter reporting the same cost through all three channels
+        // must only charge it once.
+        send(json!({ "jsonrpc": "2.0", "method": "_axel/usage", "params": { "usage": {}, "_meta": { "axel": { "costUsd": 0.5 } } } }));
+        let mut reply = usage;
+        reply["stopReason"] = json!("end_turn");
+        reply["usage"] = json!({});
+        respond(id, reply);
+        return;
+    }
 
     if let Some(path) = text.strip_prefix("readfile:") {
         let resp = request(

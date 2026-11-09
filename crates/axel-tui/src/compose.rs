@@ -57,6 +57,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
         let mut pane = PaneFit::default();
         loop {
             let size = terminal.size()?;
+            v.set_composer_width(size.width);
             let want = desired_height(&v, size.width);
             if let Some(ask) = pane.next(want, size.height, Instant::now()) {
                 fit(ask, size.height);
@@ -80,6 +81,18 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                                 let reply = (deps.summon)(&thread_id, &agent, &text, &attachments).map_err(|e| format!("{e:#}"));
                                 v.on_reply(reply.map(|_| crate::thread::SendReply::Ok));
                                 last = Instant::now() - REFRESH;
+                            }
+                            ThreadAction::Manage => {
+                                if let Some(open) = deps.open_controls {
+                                    open(thread_id);
+                                }
+                            }
+                            ThreadAction::OpenTerminal => {
+                                if let Some(open) = deps.open_terminal
+                                    && let Err(e) = open(thread_id)
+                                {
+                                    v.on_reply(Err(format!("could not open terminal: {e:#}")));
+                                }
                             }
                         }
                     }
@@ -344,6 +357,83 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn panel_shortcuts_keep_the_draft_and_do_not_answer_pending_questions() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        for draft in ["", "unfinished message"] {
+            v.composer = crate::input::TextInput::with_text(draft);
+            let pending = v.pending_choice();
+            assert_eq!(v.handle_compose_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)), ThreadAction::Manage);
+            assert_eq!(v.handle_compose_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)), ThreadAction::OpenTerminal);
+            assert_eq!(v.composer.text(), draft);
+            assert_eq!(v.pending_choice(), pending);
+        }
+    }
+
+    #[test]
+    fn tab_explains_when_a_split_composer_has_nothing_to_browse() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.handle_compose_key(key(KeyCode::Tab));
+        assert_eq!(v.focus, crate::thread::Focus::Composer);
+        assert!(v.status.as_deref().is_some_and(|s| s.contains("nothing to browse")));
+        v.handle_compose_key(key(KeyCode::Char(' ')));
+        assert_eq!(v.composer.text(), " ", "space edits the draft; no timeline cursor lives here");
+        v.attachments.push(std::path::PathBuf::from("test.txt"));
+        v.handle_compose_key(key(KeyCode::Tab));
+        assert_eq!(v.focus, crate::thread::Focus::Attachments);
+    }
+
+    #[test]
+    fn pending_approval_cards_use_the_terminals_background() {
+        let v = ThreadView::new("T1", fixtures::data());
+        let lines = row_lines(&v, &Row::Choice(v.pending_choice().unwrap()), 80, true);
+        assert!(!lines.is_empty());
+        for span in lines.iter().flat_map(|line| &line.spans) {
+            assert!(span.style.bg.is_none_or(|c| c == ratatui::style::Color::Reset));
+        }
+    }
+
+    #[test]
+    fn arrows_move_through_a_draft_taller_than_the_composer_and_return_to_the_end() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.set_composer_width(12);
+        let draft = format!("{}end", "0123456789".repeat(12));
+        v.handle_paste(&draft);
+        let mut term = Terminal::new(TestBackend::new(12, 10)).unwrap();
+        term.draw(|f| render(f, &v)).unwrap();
+        let end = term.get_cursor_position().unwrap();
+        assert!(text(&term).contains("end"));
+        for _ in 0..10 {
+            v.handle_compose_key(key(KeyCode::Up));
+            term.draw(|f| render(f, &v)).unwrap();
+        }
+        assert_eq!(v.composer.cursor(), 23);
+        for _ in 0..10 {
+            v.handle_compose_key(key(KeyCode::Down));
+            term.draw(|f| render(f, &v)).unwrap();
+        }
+        assert_eq!(v.composer.text(), draft);
+        assert_eq!(v.composer.cursor(), 123);
+        assert_eq!(term.get_cursor_position().unwrap(), end);
+        assert!(text(&term).contains("end"));
+    }
+
+    #[test]
+    fn redirected_text_preserves_the_draft_without_answering_an_approval() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.composer.paste("draft: ");
+        let pending = v.pending_choice();
+        assert!(pending.is_some());
+        v.handle_paste("1 hello 🦀\nsecond line");
+        assert_eq!(v.composer.text(), "draft: 1 hello 🦀\nsecond line");
+        assert_eq!(v.pending_choice(), pending);
+        assert_eq!(v.focus, crate::thread::Focus::Composer);
     }
 
     fn text(term: &Terminal<TestBackend>) -> String {

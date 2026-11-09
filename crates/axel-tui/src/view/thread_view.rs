@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -12,7 +12,6 @@ use crate::theme;
 use crate::thread::{Focus, Row, ThreadView};
 use crate::util::{ellipsize, format_tokens};
 
-const SELECTED_BG: Color = Color::Indexed(236);
 const OUTPUT_HEAD: usize = 12;
 /// Queued prompts shown above the composer before collapsing into "+N more".
 const QUEUE_ROWS: usize = 3;
@@ -113,15 +112,15 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 /// arrow.  Terminals built on Ghostty draw it themselves; swap for `▶` if a
 /// font shows a box.
 pub const BADGE_TIP: &str = "\u{e0b0}";
-/// The marker in front of your own messages (orange, bold).
+/// The marker in front of your own messages (accent, bold).
 pub const YOU_MARK: &str = "> ";
 
 /// How far a message's attachment chips sit in: under your text, past the mark.
 pub fn chips_indent(it: &ThreadItem) -> usize {
     if it.agent.is_none() && it.author.is_none() { YOU_MARK.len() } else { 0 }
 }
-/// Orange, as in the agent palette.
-pub const YOU_COLOR: Color = Color::Indexed(208);
+/// The same accent used by the composer and selections.
+pub const YOU_COLOR: Color = theme::ACCENT;
 
 /// `> ` before your message; dimmed when it never went out.
 pub fn you_prefix(base: Style, sent: bool) -> Vec<Span<'static>> {
@@ -328,8 +327,8 @@ pub(crate) fn row_lines(v: &ThreadView, row: &Row, width: usize, selected: bool)
 
 fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line<'static>> {
     let items = &v.data.items;
-    let base = if selected { Style::default().bg(SELECTED_BG) } else { Style::default() };
-    let dim = if selected { theme::dim().bg(SELECTED_BG) } else { theme::dim() };
+    let base = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+    let dim = if selected { theme::dim().add_modifier(Modifier::REVERSED) } else { theme::dim() };
     match row {
         Row::Prose(i) => {
             let it = &items[*i];
@@ -513,7 +512,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 _ => ("?", Color::Yellow, "asks"),
             };
             if it.status == Some(ItemStatus::Pending) {
-                let card = Style::default().bg(SELECTED_BG);
+                let card = Style::default();
                 let mut lines = vec![Line::from(vec![
                     Span::styled(format!("{glyph} "), card.fg(color).bold()),
                     Span::styled(format!("{who} {verb}: "), card.bold()),
@@ -657,7 +656,7 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
             _ => String::new(),
         };
         let selected = focused && idx == v.queue_sel;
-        let style = if selected { Style::default().bg(SELECTED_BG) } else { Style::default() };
+        let style = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
         // Sent into the turn: read at the agent's next step. Queued: after the turn.
         let editing = v.editing.as_deref() == Some(it.id.as_str());
         let label = if editing {
@@ -704,43 +703,7 @@ pub fn composer_text_rows(v: &ThreadView, width: u16, max: usize) -> usize {
 /// (row, column).  Each row is a `(start, end)` range of `chars`.  A cursor
 /// right after a full row gets a row of its own.
 pub fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(usize, usize)>, (usize, usize)) {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    let mut start = 0;
-    loop {
-        let line_end = chars[start..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| start + i);
-        let mut s = start;
-        loop {
-            let e = (s + width).min(line_end);
-            rows.push((s, e));
-            if e >= line_end {
-                break;
-            }
-            s = e;
-        }
-        if line_end >= chars.len() {
-            break;
-        }
-        start = line_end + 1;
-    }
-    let mut at = None;
-    for (r, &(s, e)) in rows.iter().enumerate() {
-        let last_of_line = rows.get(r + 1).is_none_or(|&(ns, _)| ns != e);
-        if cursor >= s && (cursor < e || (cursor == e && (last_of_line || e == s))) {
-            at = Some((r, cursor - s));
-            break;
-        }
-    }
-    let at = match at {
-        Some((r, c)) if c >= width => {
-            // After a full row: the next row, which may not exist yet.
-            rows.insert(r + 1, (cursor, cursor));
-            (r + 1, 0)
-        }
-        Some(p) => p,
-        None => (rows.len().saturating_sub(1), 0),
-    };
-    (rows, at)
+    crate::input::input_rows(chars, width, cursor)
 }
 
 /// Composer height: text rows · chips row · rule · footer.

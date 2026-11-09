@@ -137,6 +137,10 @@ pub enum ThreadAction {
     OpenLog(String),
     Send { session_id: String, cmd: SendCommand },
     Summon { thread_id: String, agent: String, text: String, attachments: Vec<PathBuf> },
+    /// Ctrl+D: the thread controls (reset, move, settle, archive, stop, rename).
+    Manage,
+    /// Ctrl+T: a floating shell in the thread's workspace.
+    OpenTerminal,
 }
 
 /// Where composer text goes.
@@ -231,6 +235,8 @@ pub struct ThreadView {
     /// ↑/↓ history browsing: index into `history()` and the draft it replaced.
     hist_pos: Option<usize>,
     hist_draft: String,
+    /// Text columns last reported by the terminal layout.
+    composer_width: usize,
     in_flight: Option<InFlight>,
     /// The not-yet-read prompt the composer is editing (its item id): Enter
     /// saves it in place, Esc leaves it as it was.
@@ -260,12 +266,18 @@ impl ThreadView {
             sent: Vec::new(),
             hist_pos: None,
             hist_draft: String::new(),
+            composer_width: usize::MAX,
             in_flight: None,
             editing: None,
             compose_only: false,
         };
         v.cursor = v.rows().len().saturating_sub(1);
         v
+    }
+
+    pub(crate) fn set_composer_width(&mut self, width: u16) {
+        // The prompt glyph and its space take the first two columns.
+        self.composer_width = usize::from(width.saturating_sub(2)).max(1);
     }
 
     /// Replace the snapshot. Keeps the cursor on the same row key unless following.
@@ -391,6 +403,8 @@ impl ThreadView {
             }
         }
         match key.code {
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => ThreadAction::Manage,
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => ThreadAction::OpenTerminal,
             // ^L: show or minimize the session log of the agent you talk to.
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => match self.mode_session() {
                 Some(s) => ThreadAction::OpenLog(s.id.clone()),
@@ -605,7 +619,7 @@ impl ThreadView {
             KeyCode::Up if self.focus == Focus::Composer => {
                 if key.modifiers.contains(KeyModifiers::SUPER) {
                     self.composer.text_start();
-                } else if self.hist_pos.is_some() || !self.composer.line_up() {
+                } else if !self.composer.screen_line(self.composer_width, true) {
                     self.history_step(true);
                 }
                 return ThreadAction::None;
@@ -613,7 +627,7 @@ impl ThreadView {
             KeyCode::Down if self.focus == Focus::Composer => {
                 if key.modifiers.contains(KeyModifiers::SUPER) {
                     self.composer.text_end();
-                } else if self.hist_pos.is_some() || !self.composer.line_down() {
+                } else if !self.composer.screen_line(self.composer_width, false) {
                     self.history_step(false);
                 }
                 return ThreadAction::None;
@@ -644,6 +658,9 @@ impl ThreadView {
                     }
                 }
                 self.focus = order[i];
+                if compose_only && self.focus == Focus::Composer && !has_queue && self.attachments.is_empty() {
+                    self.set_status("nothing to browse · scroll the message pane or click a tool-call link");
+                }
                 self.attach_sel = self.attach_sel.min(self.attachments.len().saturating_sub(1));
                 self.clamp_queue_sel();
                 return ThreadAction::None;
@@ -1526,6 +1543,24 @@ mod tests {
         assert_eq!(v.composer.cursor(), 17, "↓ back to the end of `second`");
         v.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SUPER));
         assert_eq!(v.composer.cursor(), 0, "⌘↑: the start of the draft");
+    }
+
+    #[test]
+    fn recalled_wrapped_prompts_allow_down_after_up_before_changing_history() {
+        let mut v = ThreadView::new("T1", data());
+        v.compose_only = true;
+        v.set_composer_width(6); // Four text columns beside the prompt.
+        v.sent.push("abcdefghijklmnop".into());
+        v.handle_paste("new");
+        v.handle_compose_key(key(KeyCode::Up));
+        assert_eq!(v.composer.text(), "abcdefghijklmnop");
+        v.handle_compose_key(key(KeyCode::Up));
+        assert_eq!(v.composer.cursor(), 12);
+        v.handle_compose_key(key(KeyCode::Down));
+        assert_eq!(v.composer.text(), "abcdefghijklmnop", "still editing the recalled prompt");
+        assert_eq!(v.composer.cursor(), 16);
+        v.handle_compose_key(key(KeyCode::Down));
+        assert_eq!(v.composer.text(), "new", "only beyond the bottom row returns to the draft");
     }
 
     #[test]

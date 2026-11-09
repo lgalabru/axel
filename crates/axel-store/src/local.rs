@@ -350,6 +350,36 @@ impl Store {
         Ok(())
     }
 
+    /// Give an agent a new name.  Its key, attestation, policy and history
+    /// stay: everything is keyed by pubkey, the name is what people type.
+    /// Sessions already running keep the old name in their environment.
+    pub fn rename_agent(&self, pk: &str, name: &str) -> Result<(), Error> {
+        let n = self.conn.execute("UPDATE agents SET name = ?2 WHERE pubkey = ?1", params![pk, name])?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("agent {pk}")));
+        }
+        Ok(())
+    }
+
+    /// Change the parts of a profile that `edit` may: each `Some` replaces
+    /// the field; an empty prompt clears it.  Sessions started afterwards see it.
+    pub fn set_agent_profile(&self, pk: &str, skills: Option<&[String]>, prompt: Option<&str>, color: Option<crate::AgentColor>) -> Result<(), Error> {
+        if let Some(skills) = skills {
+            self.conn.execute("UPDATE agents SET skills_json = ?2 WHERE pubkey = ?1", params![pk, serde_json::to_string(skills)?])?;
+        }
+        if let Some(prompt) = prompt {
+            let prompt = (!prompt.trim().is_empty()).then_some(prompt);
+            self.conn.execute("UPDATE agents SET prompt = ?2 WHERE pubkey = ?1", params![pk, prompt])?;
+        }
+        if let Some(color) = color {
+            self.conn.execute("UPDATE agents SET color = ?2 WHERE pubkey = ?1", params![pk, color.as_str()])?;
+        }
+        if self.agent_by_pubkey(pk)?.is_none() {
+            return Err(Error::NotFound(format!("agent {pk}")));
+        }
+        Ok(())
+    }
+
     /// Soft-delete: sets `archived_at`; the row (and its name) stay reserved.
     pub fn archive_agent(&self, pk: &str) -> Result<(), Error> {
         let n = self.conn.execute(

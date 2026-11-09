@@ -65,7 +65,8 @@ pub struct HostConfig {
     /// still runs when the adapter bypasses permission prompts.
     pub session_meta: Option<serde_json::Map<String, Value>>,
     /// The agent's model (`fable`, `opus`, a full model id), switched to with
-    /// `session/set_model` once the session exists.  `None` keeps the default.
+    /// ACP config options, or legacy `session/set_model`, once the session
+    /// exists. `None` keeps the default.
     pub model: Option<String>,
     /// MCP servers the agent gets in this session (ACP `mcpServers`): Axel's
     /// own tools, running as this session's agent.
@@ -105,6 +106,19 @@ pub fn resolve_model(want: &str, available: &[Value]) -> Option<String> {
         .or_else(|| ids.iter().find(|(_, name)| *name == want_l))
         .or_else(|| ids.iter().find(|(id, name)| id.to_lowercase().contains(&want_l) || name.contains(&want_l)))
         .map(|(id, _)| id.clone())
+}
+
+/// Config selectors may group their values by provider.
+fn model_values(options: &[Value]) -> Vec<Value> {
+    options.iter().flat_map(|option| {
+        if let Some(group) = option.get("options").and_then(Value::as_array) {
+            model_values(group)
+        } else {
+            option.get("value").and_then(Value::as_str)
+                .map(|id| vec![json!({ "modelId": id, "name": option.get("name").and_then(Value::as_str).unwrap_or(id) })])
+                .unwrap_or_default()
+        }
+    }).collect()
 }
 
 /// The adapter's native permission mode for a runtime mode, by the mode ids
@@ -386,6 +400,10 @@ struct Host<W: Write> {
     turn_progress_cost: f64,
     /// An `_axel/usage` report came in this turn.
     turn_progress: bool,
+    /// Cost already recorded for this native session, from any usage channel.
+    session_cost: f64,
+    /// Standard cumulative cost takes precedence over adapter extensions.
+    standard_cost_seen: bool,
     cur_text: Option<TextItem>,
     /// Pending `Permission` items by item id.  Permission items carry
     /// `ref_id = "permission:<toolCallId>"` so tool-call updates never touch them.
@@ -409,6 +427,20 @@ struct Host<W: Write> {
 impl<W: Write> Host<W> {
     fn new(cfg: HostConfig, store: Store, signer: Keypair, out: W, adapter: Vec<String>) -> Self {
         let mode_cell = Arc::new(std::sync::Mutex::new(cfg.runtime_mode));
+        let mut session_cost = store.usage(&cfg.session_id).ok().flatten().map_or(0.0, |u| u.cost_usd_est);
+        if let Some(native) = &cfg.resume_native_id {
+            // A cumulative native cost includes the earlier Axel sessions
+            // of a resumed conversation. Their spend is already in the store.
+            for session in store.list_sessions(axel_store::SessionFilter {
+                thread_id: Some(cfg.thread_id.clone()),
+                agent_pubkey: Some(cfg.agent_pubkey.clone()),
+                ..Default::default()
+            }).unwrap_or_default() {
+                if session.id != cfg.session_id && session.harness_session_id.as_ref() == Some(native) {
+                    session_cost += store.usage(&session.id).ok().flatten().map_or(0.0, |u| u.cost_usd_est);
+                }
+            }
+        }
         Host {
             cfg,
             store,
@@ -430,6 +462,8 @@ impl<W: Write> Host<W> {
             checkpoint_slow_told: false,
             turn_progress_cost: 0.0,
             turn_progress: false,
+            session_cost,
+            standard_cost_seen: false,
             cur_text: None,
             pending: HashMap::new(),
             queue: VecDeque::new(),
@@ -699,16 +733,31 @@ impl<W: Write> Host<W> {
     /// own default right after `session/new`, so this has to come after.
     async fn apply_model(&mut self, cx: &ConnectionTo<Agent>, sid: &acp::SessionId, session_reply: &Value) {
         let Some(want) = self.cfg.model.clone().filter(|m| !m.trim().is_empty()) else { return };
+        let selector = session_reply.get("configOptions").and_then(Value::as_array).and_then(|options| {
+            options.iter().find(|o| o.get("type").and_then(Value::as_str) == Some("select")
+                && (o.get("category").and_then(Value::as_str) == Some("model")
+                    || (o.get("category").is_none() && o.get("id").and_then(Value::as_str) == Some("model"))))
+        });
         let models = session_reply.get("models");
-        let available: Vec<Value> = models.and_then(|m| m.get("availableModels")).and_then(Value::as_array).cloned().unwrap_or_default();
-        let current = models.and_then(|m| m.get("currentModelId")).and_then(Value::as_str).unwrap_or("");
+        let available: Vec<Value> = match selector {
+            Some(option) => model_values(option.get("options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])),
+            None => models.and_then(|m| m.get("availableModels")).and_then(Value::as_array).cloned().unwrap_or_default(),
+        };
+        let current = match selector {
+            Some(option) => option.get("currentValue"),
+            None => models.and_then(|m| m.get("currentModelId")),
+        }.and_then(Value::as_str).unwrap_or("");
         // An unknown name goes through as given: the harness may accept full ids it doesn't list.
         let id = resolve_model(&want, &available).unwrap_or_else(|| want.clone());
         if id == current {
             self.line(CYAN, "●", &format!("model {id}"));
             return;
         }
-        match self.raw_request(cx, "session/set_model", json!({ "sessionId": sid.to_string(), "modelId": id })).await {
+        let (method, params) = match selector {
+            Some(option) => ("session/set_config_option", json!({ "sessionId": sid.to_string(), "configId": option["id"], "value": id })),
+            None => ("session/set_model", json!({ "sessionId": sid.to_string(), "modelId": id })),
+        };
+        match self.raw_request(cx, method, params).await {
             Ok(_) => self.line(CYAN, "●", &format!("model {id}")),
             Err(e) => {
                 let listed: Vec<&str> = available.iter().filter_map(|m| m.get("modelId")?.as_str()).collect();
@@ -1120,11 +1169,16 @@ impl<W: Write> Host<W> {
             // with its reply.
             "_axel/usage" => {
                 let Some(usage) = TurnUsage::from_reply(params) else { return };
-                let delta = axel_store::UsageDelta { turns: 0, ..usage_delta(&usage) };
+                let mut delta = axel_store::UsageDelta { turns: 0, ..usage_delta(&usage) };
+                if self.standard_cost_seen {
+                    delta.cost_usd_est = 0.0;
+                }
                 self.turn_progress_cost += delta.cost_usd_est;
                 self.turn_progress = true;
                 if let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &delta, None) {
                     self.line(RED, "✖", &format!("usage: {e}"));
+                } else {
+                    self.session_cost += delta.cost_usd_est;
                 }
             }
             "_axel/limits" => {
@@ -1352,11 +1406,15 @@ impl<W: Write> Host<W> {
             return;
         };
         let mut delta = usage_delta(&usage);
-        if usage.cost_usd.is_some() {
+        if self.standard_cost_seen {
+            delta.cost_usd_est = 0.0;
+        } else if usage.cost_usd.is_some() {
             delta.cost_usd_est = (delta.cost_usd_est - progress_cost).max(0.0);
         }
         if let Err(e) = self.store.add_usage(&self.signer, &self.cfg.session_id, &delta, None) {
             self.line(RED, "✖", &format!("usage: {e}"));
+        } else {
+            self.session_cost += delta.cost_usd_est;
         }
     }
 
@@ -1656,6 +1714,20 @@ impl<W: Write> Host<W> {
             acp::SessionUpdate::UsageUpdate(u) => {
                 if u.size > 0 {
                     self.store.set_session_context(&self.cfg.session_id, u.used, u.size)?;
+                }
+                if let Some(cost) = u.cost.filter(|c| c.currency.eq_ignore_ascii_case("USD") && c.amount.is_finite() && c.amount >= 0.0) {
+                    let amount = (cost.amount - self.session_cost).max(0.0);
+                    if amount > 0.0 {
+                        self.store.add_usage(&self.signer, &self.cfg.session_id, &axel_store::UsageDelta {
+                            cost_usd_est: amount,
+                            model: self.cfg.model.clone(),
+                            ..Default::default()
+                        }, None)?;
+                        self.session_cost += amount;
+                        self.turn_progress_cost += amount;
+                    }
+                    self.standard_cost_seen = true;
+                    self.turn_progress = true;
                 }
                 Ok(())
             }
