@@ -113,15 +113,15 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 /// arrow.  Terminals built on Ghostty draw it themselves; swap for `▶` if a
 /// font shows a box.
 pub const BADGE_TIP: &str = "\u{e0b0}";
-/// The marker in front of your own messages (orange, bold).
+/// The marker in front of your own messages (accent, bold).
 pub const YOU_MARK: &str = "> ";
 
 /// How far a message's attachment chips sit in: under your text, past the mark.
 pub fn chips_indent(it: &ThreadItem) -> usize {
     if it.agent.is_none() && it.author.is_none() { YOU_MARK.len() } else { 0 }
 }
-/// Orange, as in the agent palette.
-pub const YOU_COLOR: Color = Color::Indexed(208);
+/// The same accent used by the composer and selections.
+pub const YOU_COLOR: Color = theme::ACCENT;
 
 /// `> ` before your message; dimmed when it never went out.
 pub fn you_prefix(base: Style, sent: bool) -> Vec<Span<'static>> {

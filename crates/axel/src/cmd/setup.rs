@@ -1,7 +1,7 @@
 //! `axel setup`: the first-run walkthrough.  `axel` runs it by itself the first
 //! time, when there is no agent yet.  It checks this machine (Rex, the harness
 //! CLIs, their ACP adapters), offers to install what's missing, and creates the
-//! first agent.  Dialoguer, themed like the TUI: warm accent, orange values,
+//! first agent.  Dialoguer, themed like the TUI: coral red accent and values,
 //! dim hints.
 
 use std::io::IsTerminal;
@@ -16,9 +16,9 @@ use dialoguer::{Confirm, Input, MultiSelect, Select};
 use super::Ctx;
 use super::launch::which;
 
-// The TUI's palette (`axel-tui/src/theme.rs`), as 256-colour indices.
-const ACCENT: u8 = 179;
-const YOU: u8 = 208;
+// The TUI's palette (`axel-tui/src/theme.rs`).
+const ACCENT: console::Color = console::Color::TrueColor(255, 117, 101);
+const YOU: console::Color = ACCENT;
 const OK: u8 = 108;
 const DANGER: u8 = 167;
 const DIM: u8 = 244;
@@ -33,7 +33,7 @@ fn theme() -> ColorfulTheme {
         prompt_style: Style::new().for_stderr().bold(),
         prompt_prefix: style("  ›".to_string())
             .for_stderr()
-            .color256(ACCENT)
+            .fg(ACCENT)
             .bold(),
         prompt_suffix: style("".to_string()).for_stderr(),
         success_prefix: style("  ✓".to_string()).for_stderr().color256(OK),
@@ -41,14 +41,14 @@ fn theme() -> ColorfulTheme {
         error_prefix: style("  ✗".to_string()).for_stderr().color256(DANGER),
         error_style: c(DANGER),
         hint_style: c(DIM),
-        values_style: c(YOU),
-        active_item_style: c(YOU).bold(),
+        values_style: Style::new().for_stderr().fg(YOU),
+        active_item_style: Style::new().for_stderr().fg(YOU).bold(),
         inactive_item_style: Style::new().for_stderr(),
-        active_item_prefix: style("    ▸".to_string()).for_stderr().color256(ACCENT),
+        active_item_prefix: style("    ▸".to_string()).for_stderr().fg(ACCENT),
         inactive_item_prefix: style("     ".to_string()).for_stderr(),
-        checked_item_prefix: style("    ◼".to_string()).for_stderr().color256(ACCENT),
+        checked_item_prefix: style("    ◼".to_string()).for_stderr().fg(ACCENT),
         unchecked_item_prefix: style("    ◻".to_string()).for_stderr().color256(DIM),
-        picked_item_prefix: style("    ▸".to_string()).for_stderr().color256(ACCENT),
+        picked_item_prefix: style("    ▸".to_string()).for_stderr().fg(ACCENT),
         unpicked_item_prefix: style("     ".to_string()).for_stderr(),
     }
 }
@@ -217,7 +217,7 @@ pub fn run() -> Result<Next> {
                 style("✓").color256(OK),
                 style("Harness").bold(),
                 dim("·"),
-                style(h.label()).color256(YOU)
+                style(h.label()).fg(YOU)
             );
             h.clone()
         } else {
@@ -348,8 +348,8 @@ pub fn run() -> Result<Next> {
         );
         eprintln!(
             "    {} {}",
-            style("›").color256(ACCENT).bold(),
-            style(format!("@{} add a health check endpoint", agent.name)).color256(YOU)
+            style("›").fg(ACCENT).bold(),
+            style(format!("@{} add a health check endpoint", agent.name)).fg(YOU)
         );
         if !rex {
             eprintln!(
