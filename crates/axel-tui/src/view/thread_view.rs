@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -12,7 +12,6 @@ use crate::theme;
 use crate::thread::{Focus, Row, ThreadView};
 use crate::util::{ellipsize, format_tokens};
 
-const SELECTED_BG: Color = Color::Indexed(236);
 const OUTPUT_HEAD: usize = 12;
 /// Queued prompts shown above the composer before collapsing into "+N more".
 const QUEUE_ROWS: usize = 3;
@@ -328,8 +327,8 @@ pub(crate) fn row_lines(v: &ThreadView, row: &Row, width: usize, selected: bool)
 
 fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line<'static>> {
     let items = &v.data.items;
-    let base = if selected { Style::default().bg(SELECTED_BG) } else { Style::default() };
-    let dim = if selected { theme::dim().bg(SELECTED_BG) } else { theme::dim() };
+    let base = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
+    let dim = if selected { theme::dim().add_modifier(Modifier::REVERSED) } else { theme::dim() };
     match row {
         Row::Prose(i) => {
             let it = &items[*i];
@@ -513,7 +512,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 _ => ("?", Color::Yellow, "asks"),
             };
             if it.status == Some(ItemStatus::Pending) {
-                let card = Style::default().bg(SELECTED_BG);
+                let card = Style::default();
                 let mut lines = vec![Line::from(vec![
                     Span::styled(format!("{glyph} "), card.fg(color).bold()),
                     Span::styled(format!("{who} {verb}: "), card.bold()),
@@ -657,7 +656,7 @@ pub(crate) fn render_queue(frame: &mut Frame, v: &ThreadView, area: Rect) {
             _ => String::new(),
         };
         let selected = focused && idx == v.queue_sel;
-        let style = if selected { Style::default().bg(SELECTED_BG) } else { Style::default() };
+        let style = if selected { Style::default().add_modifier(Modifier::REVERSED) } else { Style::default() };
         // Sent into the turn: read at the agent's next step. Queued: after the turn.
         let editing = v.editing.as_deref() == Some(it.id.as_str());
         let label = if editing {

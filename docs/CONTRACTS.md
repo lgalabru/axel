@@ -263,6 +263,12 @@ Inbox screen: list pending requests + recent messages for the owner and all agen
 
 ## axel-acp (managed runtime: ACP client, session host, policy)
 
+The host prefers a model selector from ACP `configOptions` and sends
+`session/set_config_option`; adapters without one retain `session/set_model`.
+Standard `usage_update.used` is a context gauge, not billable token usage.
+Its cumulative USD cost is recorded once, without adding it again from Axel's
+usage extension or the prompt reply. Other currencies are not treated as USD.
+
 ```rust
 // Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
 pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)

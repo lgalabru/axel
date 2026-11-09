@@ -515,6 +515,18 @@ in three ways:
 `AXEL_ACP_CODEX=codex-acp` goes back to Zed's. `crates/axel-acp/tests/codex_acp.rs` checks it
 against a fake app-server.
 
+**Custom ACP agents** use the same host as the built-in adapters. When a model
+selector is advertised in `configOptions`, the host selects it with
+`session/set_config_option`; otherwise it uses legacy `session/set_model`.
+Grouped provider choices are supported. Standard `usage_update.used` and `size`
+are context gauges. A cumulative USD `cost` is added only as it grows, without
+counting it again from the adapter's usage extension or prompt reply. Other
+currencies stay out of the USD total.
+
+An agent without the live-steering capability queues prompts until its turn
+finishes. Ctrl+S cancels that turn and sends the new prompt. The live-steering
+extension is available to any ACP agent, not only Claude and Codex.
+
 **A message sent while the agent works goes into its turn.** The agent reads it at its next
 step instead of after the whole turn, and nothing is interrupted. ACP has no word for it, so
 both adapters take two requests of Axel's own, and advertise them as
@@ -612,6 +624,10 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
 - **Composer panels**: Ctrl+D opens the thread controls. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
+- **Terminal colours**: normal text and surfaces use the terminal's own foreground
+  and background. Selections reverse those colours, and code explicitly resets
+  its background and uses the terminal's blue. Approval cards do not force a dark
+  surface. The same rendering works with light and dark Rex themes.
 - **Composer arrows**: Up and Down move through the wrapped rows on screen,
   keeping the intended column across shorter lines. This also applies to recalled
   prompts. History changes only beyond the first or last screen row.

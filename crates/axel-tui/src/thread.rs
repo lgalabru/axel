@@ -658,6 +658,9 @@ impl ThreadView {
                     }
                 }
                 self.focus = order[i];
+                if compose_only && self.focus == Focus::Composer && !has_queue && self.attachments.is_empty() {
+                    self.set_status("nothing to browse · scroll the message pane or click a tool-call link");
+                }
                 self.attach_sel = self.attach_sel.min(self.attachments.len().saturating_sub(1));
                 self.clamp_queue_sel();
                 return ThreadAction::None;

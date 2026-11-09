@@ -9,7 +9,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Sparkline};
 
@@ -18,7 +18,6 @@ use crate::model::{DashAgentRow, RequestKind, ThreadRow, state_glyph};
 use crate::theme;
 use crate::util::{ellipsize, format_tokens, relative_time};
 
-const SELECTED_BG: Color = Color::Indexed(236);
 const SPARK_W: u16 = 10;
 
 /// Below this width the dashboard is compact.
@@ -217,9 +216,22 @@ fn panel<'a>(title: &'a str, right: Option<String>, focused: bool) -> Block<'a> 
 
 fn row_styles(selected: bool) -> (Style, Style) {
     if selected {
-        (Style::default().bg(SELECTED_BG), theme::dim().bg(SELECTED_BG))
+        (Style::default().add_modifier(Modifier::REVERSED), theme::dim().add_modifier(Modifier::REVERSED))
     } else {
         (Style::default(), theme::dim())
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn selections_reverse_native_colours_instead_of_assuming_a_dark_surface() {
+        for style in [row_styles(true).0, row_styles(true).1] {
+            assert!(style.add_modifier.contains(Modifier::REVERSED));
+            assert_eq!(style.bg, None);
+        }
     }
 }
 

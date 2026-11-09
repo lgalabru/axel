@@ -636,7 +636,7 @@ fn sgr(st: Style) -> String {
 fn color(c: Color, bg: bool) -> Option<String> {
     let base = |n: u8| Some((if bg { n + 10 } else { n }).to_string());
     match c {
-        Color::Reset => None,
+        Color::Reset => Some(if bg { "49" } else { "39" }.into()),
         Color::Black => base(30),
         Color::Red => base(31),
         Color::Green => base(32),
@@ -800,6 +800,22 @@ mod tests {
     fn ansi_styles_spans() {
         let l = Line::from(vec![Span::raw("a "), Span::styled("b", Style::default().fg(Color::Indexed(179)).bold())]);
         assert_eq!(to_ansi(&l), "a \x1b[1;38;5;179mb\x1b[0m");
+    }
+
+    #[test]
+    fn code_resets_inherited_backgrounds_in_light_and_dark_terminals() {
+        use crate::view::markdown::md_lines;
+        for background in [Color::Black, Color::White] {
+            let lines = md_lines("Read `/docs` then `llms.txt`", 80, Style::default().bg(background));
+            let code: Vec<_> = lines[0].spans.iter().filter(|s| s.style.fg == Some(Color::Blue)).collect();
+            assert_eq!(code.len(), 2);
+            for span in code {
+                assert_eq!(span.style.bg, Some(Color::Reset));
+                let encoded = to_ansi(&Line::from(span.clone()));
+                assert!(encoded.contains("34;49m"), "{encoded:?}");
+            }
+        }
+        assert_eq!(to_ansi(&Line::styled("plain", Style::default().fg(Color::Reset).bg(Color::Reset))), "\x1b[39;49mplain\x1b[0m");
     }
 
     #[test]

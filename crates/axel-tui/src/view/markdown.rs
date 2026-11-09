@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Inline code and fenced blocks.
-pub const CODE: Color = Color::Indexed(110);
+pub const CODE: Color = Color::Blue;
 
 /// One character and its style.
 type Cell = (char, Style);
@@ -15,7 +15,7 @@ type Cell = (char, Style);
 /// `text` as lines at most `width` columns wide.
 pub fn md_lines(text: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     let width = width.max(8);
-    let code = base.fg(CODE);
+    let code = base.fg(CODE).bg(Color::Reset);
     let mut out = Vec::new();
     let mut fenced = false;
     let lines: Vec<&str> = text.split('\n').collect();
@@ -413,7 +413,7 @@ mod tests {
         let l = md_lines("run:\n```sh\n  cargo test  -p axel\n```\nthen", 40, Style::default());
         assert_eq!(text(&l), vec!["run:", "    cargo test  -p axel", "then"]);
         let code = span(&l, "  cargo test  -p axel").style;
-        assert_eq!((code.fg, code.bg), (Some(CODE), None), "no background of its own");
+        assert_eq!((code.fg, code.bg), (Some(CODE), Some(Color::Reset)), "use the terminal's background");
     }
 
     #[test]
