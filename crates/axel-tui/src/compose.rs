@@ -38,6 +38,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
     let data = glue::load_thread(deps.store, &owner_pk, thread_id, now_secs())?;
     let mut v = ThreadView::new(thread_id, data);
     v.compose_only = true;
+    let updates = crate::updates::start();
     let mut asked: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut ask_new = |v: &ThreadView| {
         for id in new_questions(v, &asked) {
@@ -56,6 +57,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
         // Keep the pane as tall as the composer wants (see `PaneFit`).
         let mut pane = PaneFit::default();
         loop {
+            while let Ok(hint) = updates.try_recv() { v.update_hint = hint; }
             let size = terminal.size()?;
             v.set_composer_width(size.width);
             let want = desired_height(&v, size.width);
@@ -265,12 +267,14 @@ pub fn desired_height(v: &ThreadView, width: u16) -> u16 {
     // `composer_height` picks its text rows from the area height; ask as a tall pane.
     let composer = composer_height(v, Rect::new(0, 0, width, 40));
     let card = v.pending_choice().map_or(0, |i| row_lines(v, &Row::Choice(i), width.saturating_sub(1) as usize, true).len() as u16);
-    composer + queue_height(v) + card
+    composer + queue_height(v) + card + u16::from(v.update_hint.is_some())
 }
 
 /// Bottom-anchored: [approval card] · [queue] · composer.
 pub fn render(frame: &mut Frame, v: &ThreadView) {
-    let area = frame.area();
+    let full = frame.area();
+    let hint = u16::from(v.update_hint.is_some()).min(full.height);
+    let area = Rect { height: full.height - hint, ..full };
     let composer_h = composer_height(v, area).min(area.height);
     let queue_h = queue_height(v).min(area.height.saturating_sub(composer_h));
     let card: Vec<Line> = match v.pending_choice() {
@@ -295,6 +299,11 @@ pub fn render(frame: &mut Frame, v: &ThreadView) {
         render_queue(frame, v, queue_area);
     }
     render_composer(frame, v, composer_area);
+    if let Some(text) = &v.update_hint
+        && hint > 0
+    {
+        frame.render_widget(Paragraph::new(Line::styled(text.clone(), crate::theme::accent())), Rect::new(full.x + 1, full.bottom() - 1, full.width.saturating_sub(1), 1));
+    }
 }
 
 #[cfg(test)]
@@ -357,6 +366,27 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn update_hint_adds_a_row_without_changing_the_draft_or_status() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.composer.paste("unfinished message");
+        v.status = Some("keep this status".into());
+        let cursor = v.composer.cursor();
+        let height = desired_height(&v, 80);
+        let pending = v.pending_choice();
+        v.update_hint = Some("Axel 1.2.3 available · axel update".into());
+        assert_eq!(desired_height(&v, 80), height + 1);
+        let mut term = Terminal::new(TestBackend::new(80, height + 1)).unwrap();
+        term.draw(|f| render(f, &v)).unwrap();
+        let rendered = text(&term);
+        assert!(rendered.contains("unfinished message"), "{rendered}");
+        assert!(rendered.contains("axel update"), "{rendered}");
+        assert_eq!(v.status.as_deref(), Some("keep this status"));
+        assert_eq!(v.composer.cursor(), cursor);
+        assert_eq!(v.pending_choice(), pending);
     }
 
     #[test]

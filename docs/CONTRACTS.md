@@ -398,6 +398,13 @@ CLI: `axel thread diff THREAD [--session S] [--turn N] [--stat] [--pane]` (the p
 `axel thread undo THREAD [--session S] [--turn N] [--restore] [-y]`; `axel gc`.
 `axel thread refresh THREAD` relaunches that thread's open Rex views on the
 installed binary without ending or restarting any agent session.
+`axel update` runs `curl -fsSL https://axel.md/install | sh`, preserving its
+output and failing when either side of the pipeline fails.
+The composer checks the latest published version entirely on a background
+worker. It suggests `axel update` for a newer major/minor, or a patch gap >10.
+Checks share a six-hour cache; network failures never interrupt composing.
+ThreadView::update_hint: Option<String> is display-only background update state.
+The composer reserves one extra row for it, leaving drafts and status intact.
 
 ## axel (bin) additions: checkpoints
 

@@ -14,6 +14,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Install the latest release using https://axel.md/install.
+    Update,
     /// Run the TUI in the current terminal (what the floating pane runs).
     Ui {
         /// Screen to open on. Defaults to inbox when something needs you, else launcher.

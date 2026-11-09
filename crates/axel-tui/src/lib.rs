@@ -13,6 +13,7 @@ mod app;
 pub mod attach;
 mod compose;
 mod stream;
+mod updates;
 pub mod dashboard;
 pub mod diff;
 mod glue;

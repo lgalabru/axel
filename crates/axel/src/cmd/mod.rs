@@ -23,6 +23,7 @@ mod thread;
 mod ui;
 mod undo;
 mod usage;
+mod update;
 mod mcp;
 
 use anyhow::{Context, Result};
@@ -73,6 +74,7 @@ impl Ctx {
 
 pub fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
+        Some(Command::Update) => update::run(),
         None => {
             // The first time, with no agent yet: walk through setup, then open.
             if setup::interactive() && Ctx::open().map(|c| setup::needed(&c)).unwrap_or(false) {

@@ -244,6 +244,8 @@ pub struct ThreadView {
     /// Composer-only pane (the timeline streams in the pane above): Tab skips
     /// the timeline and pending approvals are answered from the composer.
     pub compose_only: bool,
+    /// Background update advice, independent of draft and send status.
+    pub update_hint: Option<String>,
 }
 
 impl ThreadView {
@@ -270,6 +272,7 @@ impl ThreadView {
             in_flight: None,
             editing: None,
             compose_only: false,
+            update_hint: None,
         };
         v.cursor = v.rows().len().saturating_sub(1);
         v

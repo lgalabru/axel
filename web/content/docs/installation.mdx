@@ -21,8 +21,12 @@ axel
 
 The script downloads the latest release for your Mac, checks its sha256 and puts `axel` in
 `~/.local/bin` (set `AXEL_INSTALL_DIR` to choose another place). Every commit on `main`
-that passes CI is released; run it again to update, or pass a version:
+that passes CI is released. Run `axel update` to update using the same script, or pass a version:
 `curl -fsSL https://axel.md/install | sh -s -- 0.3.80`.
+
+The composer checks for releases in the background, sharing a six-hour cache across
+threads. It suggests `axel update` when a release is more than ten patches ahead,
+or at least one minor or major version ahead. Checking never blocks typing.
 
 ### With Homebrew
 

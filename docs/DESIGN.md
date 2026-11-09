@@ -635,6 +635,12 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   binary while its agents keep running. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
+- **Release hints**: the split composer checks GitHub's latest release on a worker
+  thread and only reads results through a channel. A shared six-hour cache avoids
+  repeated requests across panes. A newer major or minor, or a patch gap greater
+  than ten, adds a footer suggesting `axel update`. Drafts and status stay intact.
+  `axel update` runs `curl -fsSL https://axel.md/install | sh` with inherited
+  terminal output and propagates download or installer failures.
 - **Terminal colours**: normal text and surfaces use the terminal's own foreground
   and background. Selections reverse those colours, and code explicitly resets
   its background and uses the terminal's blue. Approval cards do not force a dark
