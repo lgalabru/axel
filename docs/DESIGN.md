@@ -672,7 +672,10 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
 ## Turn checkpoints: what a turn changed
 
 Autopilot only works if what comes after is cheap: what changed, is it right, and if
-not, make it go away. So every turn in a git workspace leaves a **checkpoint**: a hidden
+not, make it go away. The host saves the owner's message before context preparation
+or checkpoint I/O so the conversation can display it promptly. It still takes the
+before snapshot before sending the prompt to the agent.
+Every turn in a git workspace leaves a **checkpoint**: a hidden
 commit of the tree before the turn and another after it, made the way the remote handoff
 snapshots a tree (`axel_acp::checkpoint`: a temporary index, tracked and untracked files,
 not ignored ones, unsigned, on top of HEAD; a clean tree is HEAD itself). They live under

@@ -1323,6 +1323,16 @@ impl<W: Write> Host<W> {
         self.turn_started = Instant::now();
         self.turn_user_text = text.clone();
         self.turn_from = from.clone();
+        // Publish before Git snapshots or context preparation: the message
+        // view must not wait for repository I/O to acknowledge what was typed.
+        let paths = attach::attachment_paths(&files);
+        let mut content = json!({ "text": text, "attachments": paths });
+        if let Some(f) = &from {
+            content["from"] = json!(f.pubkey);
+        }
+        if let Err(e) = self.push(ItemKind::UserMessage, Some(ItemStatus::Completed), None, content) {
+            self.line(RED, "✖", &format!("store: {e}"));
+        }
         // The thread shows the message as written; the agent also reads who
         // wrote it, and first what it missed on the thread.
         let framed = from.as_ref().map_or_else(|| text.clone(), |f| f.frame(&text));
@@ -1333,19 +1343,9 @@ impl<W: Write> Host<W> {
         self.turn_tool_calls = 0;
         self.turn_files_edited = 0;
         self.turn_authored.clear();
-        // Before the prompt goes out, so the agent's first edit is never in `before`.
-        self.turn_before = self.checkpoint(checkpoint::Which::Before);
         self.turn_progress_cost = 0.0;
         self.turn_progress = false;
         self.cur_text = None;
-        let paths = attach::attachment_paths(&files);
-        let mut content = json!({ "text": text, "attachments": paths });
-        if let Some(f) = &from {
-            content["from"] = json!(f.pubkey);
-        }
-        if let Err(e) = self.push(ItemKind::UserMessage, Some(ItemStatus::Completed), None, content) {
-            self.line(RED, "✖", &format!("store: {e}"));
-        }
         if let Err(e) = self.set_state(SessionState::Running) {
             self.line(RED, "✖", &format!("store: {e}"));
         }
@@ -1360,6 +1360,9 @@ impl<W: Write> Host<W> {
             },
         );
         self.program_status(axel_rex::osc::State::Working, None, &head(&text, 200));
+        // Still before session/prompt, so the agent's first edit cannot enter
+        // the before snapshot. Only message visibility moves ahead of this I/O.
+        self.turn_before = self.checkpoint(checkpoint::Which::Before);
         let turn = self.turn;
         let files_note = if files.is_empty() {
             String::new()

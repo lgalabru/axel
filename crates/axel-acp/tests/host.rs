@@ -1252,3 +1252,34 @@ fn a_turn_in_a_git_workspace_leaves_checkpoints_and_what_it_changed() {
     assert_eq!(ends[0].content["changes"]["files"][0]["path"], "notes.md");
     assert_eq!(ends[1].content["changes"]["between_turns"], true);
 }
+
+#[test]
+fn the_owner_message_is_visible_while_the_before_checkpoint_is_still_running() {
+    let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("publish before repository work"));
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").arg("-C").arg(&f.cfg.cwd).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(f.cfg.cwd.join(".gitattributes"), "*.slow filter=axel-test\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    std::fs::write(f.cfg.cwd.join(".git/slow-filter"), "touch .git/filter-started\nwhile [ ! -e .git/filter-release ]; do sleep 0.02; done\ncat\n").unwrap();
+    git(&["config", "filter.axel-test.clean", "sh .git/slow-filter"]);
+    std::fs::write(f.cfg.cwd.join("new.slow"), "content\n").unwrap();
+    struct Release(PathBuf);
+    impl Drop for Release { fn drop(&mut self) { let _ = std::fs::write(&self.0, "release"); } }
+    let release = Release(f.cfg.cwd.join(".git/filter-release"));
+    let host = spawn_host(&f);
+    wait_until("checkpoint filter started", Duration::from_secs(5), || f.cfg.cwd.join(".git/filter-started").exists());
+    let messages = f.store.items(&f.session_id, 0, 100).unwrap();
+    assert!(messages.iter().any(|i| i.kind == ItemKind::UserMessage && i.content["text"] == "publish before repository work"));
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    assert!(!log.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).any(|v| v["dir"] == "out" && v["frame"]["method"] == "session/prompt"), "the agent must still wait for the before snapshot");
+    drop(release);
+    wait_until("turn completed", Duration::from_secs(5), || !f.store.turns(&f.thread_id).unwrap().is_empty());
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
