@@ -1533,6 +1533,35 @@ fn colour_lines(code: &str, lang: Lang) -> Vec<Vec<(char, Option<&'static str>)>
     out
 }
 
+/// Syntax spans for a checkpoint-backed review, using the same native
+/// terminal palette as file previews. Parse the full source to retain state
+/// across multiline strings and comments, then the caller selects patch lines.
+pub(super) fn diff_syntax(code: &str, path: &str) -> Vec<Vec<axel_tui::diff::SyntaxSpan>> {
+    use axel_tui::diff::{SyntaxSpan, SyntaxTone};
+    colour_lines(code, Lang::File(path)).into_iter().map(|line| {
+        let mut spans: Vec<SyntaxSpan> = Vec::new();
+        for (c, color) in line {
+            let tone = match color {
+                Some("2") => SyntaxTone::Muted,
+                Some("35") => SyntaxTone::Keyword,
+                Some("32") => SyntaxTone::String,
+                Some("33") => SyntaxTone::Number,
+                Some("34") => SyntaxTone::Function,
+                Some("36") => SyntaxTone::Type,
+                Some("1") => SyntaxTone::Bold,
+                Some("3") => SyntaxTone::Italic,
+                _ => SyntaxTone::Plain,
+            };
+            if let Some(last) = spans.last_mut().filter(|s| s.tone == tone) {
+                last.text.push(c);
+            } else {
+                spans.push(SyntaxSpan { text: c.to_string(), tone });
+            }
+        }
+        spans
+    }).collect()
+}
+
 /// `text` wrapped to `width` (by characters, so paths and commands break
 /// anywhere), each line led by `indent` (a title's continuation lines by
 /// `indent` alone, its first by nothing), all in `style`.

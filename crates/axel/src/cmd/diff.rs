@@ -170,6 +170,37 @@ pub fn run(thread: &str, session: Option<&str>, turn: Option<i64>, stat_only: bo
     Ok(())
 }
 
+/// Read bounded immutable blobs. Highlighting is optional: missing, binary,
+/// oversized or unusually long-lined sources keep the plain patch display.
+fn snapshot_syntax(dir: &Path, revision: &str, path: &str, budget: &mut usize) -> Option<Vec<Vec<axel_tui::diff::SyntaxSpan>>> {
+    let object = format!("{revision}:{path}");
+    let size = Command::new("git").arg("-C").arg(dir).args(["cat-file", "-s", &object]).stderr(Stdio::null()).output().ok()?;
+    if !size.status.success() { return None }
+    let size: usize = std::str::from_utf8(&size.stdout).ok()?.trim().parse().ok()?;
+    if size > 512 * 1024 || size > *budget { return None }
+    let output = Command::new("git").arg("-C").arg(dir).args(["cat-file", "blob", &object]).stderr(Stdio::null()).output().ok()?;
+    if !output.status.success() { return None }
+    *budget = budget.saturating_sub(output.stdout.len());
+    let source = std::str::from_utf8(&output.stdout).ok()?;
+    if source.contains('\0') || source.lines().any(|line| line.len() > 8192) { return None }
+    Some(super::links::diff_syntax(source, path))
+}
+
+fn checkpoint_syntax(dir: &Path, changes: &TurnChanges, patches: &[axel_tui::diff::FilePatch]) -> std::collections::BTreeMap<String, Vec<Vec<axel_tui::diff::SyntaxSpan>>> {
+    use axel_tui::diff::LineKind;
+    let mut budget = 4 * 1024 * 1024;
+    patches.iter().map(|patch| {
+        let original = changes.files.iter().find(|f| f.path == patch.path).and_then(|f| f.old_path.as_deref()).unwrap_or(&patch.path);
+        let old = snapshot_syntax(dir, &changes.before, original, &mut budget).unwrap_or_default();
+        let new = snapshot_syntax(dir, &changes.after, &patch.path, &mut budget).unwrap_or_default();
+        let lines = patch.lines.iter().map(|line| {
+            let (source, number) = if line.kind == LineKind::Del { (&old, line.old) } else { (&new, line.new) };
+            number.and_then(|n| n.checked_sub(1)).and_then(|n| source.get(n)).cloned().unwrap_or_default()
+        }).collect();
+        (patch.path.clone(), lines)
+    }).collect()
+}
+
 /// The pane: show the turn, act on what the pane asks, show again.
 fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Option<i64>) -> Result<()> {
     let mut p = pick(ctx, &t.id, session, turn)?;
@@ -186,6 +217,7 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
             headline: headline(&p.changes),
             files: p.changes.files.iter().map(entry).collect(),
             patches: Vec::new(),
+            syntax: Default::default(),
             between_turns: p.changes.between_turns,
             truncated: p.changes.truncated,
             note: note.take(),
@@ -196,6 +228,7 @@ fn run_pane(ctx: &Ctx, t: &axel_store::Thread, session: Option<&str>, turn: Opti
             Ok(dir) => {
                 if !p.changes.files.is_empty() {
                     data.patches = parse_patch(&patch(dir, &p.changes, false)?);
+                    data.syntax = checkpoint_syntax(dir, &p.changes, &data.patches);
                     let blocked = undo::blocked_reason(ctx, &session_id)?;
                     data.can_undo = blocked.is_none();
                     if let Some(why) = blocked
@@ -323,6 +356,40 @@ mod tests {
 
     fn file(path: &str, status: ChangeStatus, added: Option<i64>, removed: Option<i64>, authored: bool) -> FileChange {
         FileChange { path: path.into(), old_path: None, status, added, removed, authored }
+    }
+
+    #[test]
+    fn syntax_uses_both_checkpoint_blobs_and_keeps_multiline_parser_state() {
+        use axel_tui::diff::{LineKind, SyntaxTone};
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").arg("-C").arg(dir.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("old.rs"), "/*\nlet still_a_comment = 1;\n*/\nfn retry() { old(); }\n").unwrap();
+        git(&["add", "."]);
+        let before = git(&["write-tree"]);
+        std::fs::remove_file(dir.path().join("old.rs")).unwrap();
+        std::fs::write(dir.path().join("new.rs"), "/*\nlet still_a_comment = 1;\n*/\nfn retry() { new(); }\n").unwrap();
+        git(&["add", "-A"]);
+        let after = git(&["write-tree"]);
+        let patches = parse_patch(&git(&["diff", "--no-ext-diff", "-M30%", &before, &after]));
+        let changes = TurnChanges { before, after, files: vec![FileChange {
+            path: "new.rs".into(), old_path: Some("old.rs".into()), status: ChangeStatus::Renamed, ..Default::default()
+        }], ..Default::default() };
+        // The working tree has already moved on from the turn being reviewed.
+        std::fs::write(dir.path().join("new.rs"), "not the reviewed source").unwrap();
+        let syntax = checkpoint_syntax(dir.path(), &changes, &patches);
+        let patch = patches.iter().find(|p| p.path == "new.rs").unwrap();
+        for (i, line) in patch.lines.iter().enumerate().filter(|(_, l)| !matches!(l.kind, LineKind::Hunk | LineKind::Meta)) {
+            let spans = &syntax["new.rs"][i];
+            assert_eq!(spans.iter().map(|s| s.text.as_str()).collect::<String>(), line.text);
+            if line.text.contains("still_a_comment") { assert!(spans.iter().all(|s| s.tone == SyntaxTone::Muted)); }
+            if line.kind == LineKind::Add { assert!(spans.iter().any(|s| s.tone == SyntaxTone::Keyword)); }
+        }
+        assert!(snapshot_syntax(dir.path(), &changes.after, "new.rs", &mut 0).is_none(), "plain fallback when the display budget is exhausted");
     }
 
     #[test]

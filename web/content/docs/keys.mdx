@@ -98,9 +98,13 @@ Opened from a turn's change line, or with `axel thread diff <id> --pane`.
 
 | Key | |
 |---|---|
-| **↑ ↓** | Pick a file. The agent's own files come first, the rest under *also changed during this turn*. |
+| **↑ ↓**, click a file | Pick a file. The agent's own files come first, the rest under *also changed*. Wide panes show the navigator beside the code. |
 | **j / k** | Move through the diff, by line, or by row when side by side. **PgUp / PgDn** page; **g / G** jump to the ends. |
-| **s** | Switch between side by side (old left, new right) and one column. Panes 110 columns or wider start side by side. |
+| **s** | Switch between side by side (old left, new right) and one column. The code area needs 110 columns for automatic side by side; the sidebar's width is excluded. |
+| **← →**, **Home** | Pan long code lines horizontally; Home returns to the start. |
+| **n / p** | Next or previous hunk. |
+| Mouse wheel | Scroll the code without switching files. Click a code line to select it. |
+| **Tab** | Choose the old or new comment side in side-by-side view. |
 | **v** | Start or clear a mark; move with **j** to extend it. |
 | **c** | Write a note under the marked lines (or the cursor line). **Enter** saves it, **Esc** drops it. |
 | **d** | Remove the note under the cursor. |
@@ -109,6 +113,11 @@ Opened from a turn's change line, or with `axel thread diff <id> --pane`.
 | **R** | After an undo that hit overlapping work: restore the turn's files to how they were before it. |
 | **[ ]** | The previous or next turn of the same agent. |
 | **q**, **Esc** | Close. Notes you haven't sent are kept. |
+
+Syntax colors come from the turn's saved source snapshots. The gutters identify
+added and removed lines; stronger highlights mark the words that changed. Notes
+wrap beside the code they refer to, and keep their source line numbers while
+you scroll, pan or switch layouts.
 
 ## Dashboard
 

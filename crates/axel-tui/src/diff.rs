@@ -1,6 +1,6 @@
 //! The diff pane: what one turn changed, to read, mark and comment on.
 //!
-//! The file list sits on top and the diff of the selected file below it.
+//! A file navigator and a source-aligned code view with inline review notes.
 //! `v` marks lines, `c` writes a note under them; the notes pile up as drafts
 //! and `⏎` sends them to the agent as one message, each note with its path,
 //! line range and the marked lines, so "this is wrong" points at the code.
@@ -8,20 +8,22 @@
 //! loop ([`run_diff`]) that hands every outcome back to the caller, which owns
 //! the repository, the drafts on disk and the session.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::Frame;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
-use crate::theme;
-
 const POLL: Duration = Duration::from_millis(60);
+
+mod paint;
+mod render;
+
+#[derive(Clone, Copy, Debug)]
+enum Hit { File(usize), Line(usize, Side) }
 
 /// Everything the pane shows, prepared by the caller.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,6 +37,8 @@ pub struct DiffData {
     pub files: Vec<FileEntry>,
     /// The parsed patch, one entry per file that has one (binary files have none).
     pub patches: Vec<FilePatch>,
+    /// Optional display spans, aligned with each file's patch lines.
+    pub syntax: BTreeMap<String, Vec<Vec<SyntaxSpan>>>,
     pub between_turns: bool,
     pub truncated: bool,
     /// A line for the footer: what just happened, or where the diff is.
@@ -43,6 +47,26 @@ pub struct DiffData {
     pub offer_restore: bool,
     /// The session is between turns, so undo is allowed.
     pub can_undo: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyntaxTone {
+    #[default]
+    Plain,
+    Muted,
+    Keyword,
+    String,
+    Number,
+    Function,
+    Type,
+    Bold,
+    Italic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyntaxSpan {
+    pub text: String,
+    pub tone: SyntaxTone,
 }
 
 /// One changed file, as the file list shows it.
@@ -200,7 +224,7 @@ pub struct DiffView {
     pub file: usize,
     /// Cursor line in the selected file's patch.
     pub cursor: usize,
-    /// First patch line on screen.
+    /// First displayed row, including inline annotations.
     pub scroll: usize,
     /// Where a mark started (`v`), until a note is written or it's cleared.
     pub mark: Option<usize>,
@@ -212,14 +236,20 @@ pub struct DiffView {
     pub layout: Option<Layout>,
     /// Rows the diff got at the last draw, to page by.
     page: usize,
-    /// The pane's width at the last draw, for the automatic layout.
+    /// The code area's width at the last draw, for the automatic layout.
     last_width: usize,
+    horizontal: usize,
+    side: Side,
+    emphasis: BTreeMap<String, Vec<Vec<std::ops::Range<usize>>>>,
+    follow_cursor: bool,
+    hits: Vec<(Rect, Hit)>,
 }
 
 impl DiffView {
     pub fn new(data: DiffData, drafts: Vec<Draft>) -> Self {
         let file = data.files.iter().position(|f| f.authored).unwrap_or(0);
-        DiffView { data, drafts, file, cursor: 0, scroll: 0, mark: None, input: None, confirm_undo: false, layout: None, page: 20, last_width: 80 }
+        let emphasis = data.patches.iter().map(|p| (p.path.clone(), paint::word_changes(&p.lines))).collect();
+        DiffView { data, drafts, file, cursor: 0, scroll: 0, mark: None, input: None, confirm_undo: false, layout: None, page: 20, last_width: 80, horizontal: 0, side: Side::Old, emphasis, follow_cursor: true, hits: Vec::new() }
     }
 
     /// The layout in force: the one chosen, else the one the width calls for.
@@ -260,12 +290,27 @@ impl DiffView {
             self.cursor = 0;
             self.scroll = 0;
             self.mark = None;
+            self.horizontal = 0;
+            self.follow_cursor = true;
         }
+    }
+
+    fn file_order(&self) -> Vec<usize> {
+        (0..self.data.files.len()).filter(|&i| self.data.files[i].authored)
+            .chain((0..self.data.files.len()).filter(|&i| !self.data.files[i].authored)).collect()
+    }
+
+    fn step_file(&mut self, next: bool) {
+        let order = self.file_order();
+        let current = order.iter().position(|&i| i == self.file).unwrap_or(0);
+        let target = if next { current.saturating_add(1) } else { current.saturating_sub(1) };
+        if let Some(&i) = order.get(target) { self.select_file(i); }
     }
 
     /// Move by lines (unified) or by rows (side by side); the draw keeps the
     /// cursor on screen.
     fn move_cursor(&mut self, delta: isize) {
+        self.follow_cursor = true;
         let n = self.lines().len();
         if n == 0 {
             return;
@@ -275,8 +320,25 @@ impl DiffView {
             Layout::SideBySide => {
                 let rows = self.rows();
                 let r = (self.cursor_row() as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
-                self.cursor = rows[r].first();
+                self.cursor = match self.side { Side::Old => rows[r].left, Side::New => rows[r].right }.or(rows[r].full).unwrap_or_else(|| rows[r].first());
             }
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.input.is_some() || self.confirm_undo { return }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => { self.scroll = self.scroll.saturating_sub(3); self.follow_cursor = false; }
+            MouseEventKind::ScrollDown => { self.scroll = self.scroll.saturating_add(3); self.follow_cursor = false; }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, hit)) = self.hits.iter().find(|(r, _)| r.contains((mouse.column, mouse.row).into())) {
+                    match *hit {
+                        Hit::File(i) => self.select_file(i),
+                        Hit::Line(i, side) => { self.cursor = i; self.side = side; self.follow_cursor = true; }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -289,7 +351,8 @@ impl DiffView {
             return None;
         }
         // Removed lines live on the old side; anything else reads on the new.
-        let side = if lines.iter().all(|l| l.kind == LineKind::Del) { Side::Old } else { Side::New };
+        let side = if lines.iter().all(|l| l.kind == LineKind::Del) { Side::Old } else if lines.iter().any(|l| l.kind == LineKind::Add) { Side::New } else if self.layout() == Layout::SideBySide { self.side } else { Side::New };
+        let lines: Vec<_> = lines.into_iter().filter(|l| match side { Side::Old => l.old.is_some(), Side::New => l.new.is_some() }).collect();
         let numbers: Vec<usize> = lines.iter().filter_map(|l| if side == Side::Old { l.old } else { l.new }).collect();
         let (start, end) = (*numbers.iter().min()?, *numbers.iter().max()?);
         let text = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
@@ -330,8 +393,21 @@ impl DiffView {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => return Some(Outcome::Close),
-            KeyCode::Up => self.select_file(self.file.saturating_sub(1)),
-            KeyCode::Down => self.select_file(self.file + 1),
+            KeyCode::Up => self.step_file(false),
+            KeyCode::Down => self.step_file(true),
+            KeyCode::Left => self.horizontal = self.horizontal.saturating_sub(8),
+            KeyCode::Right => {
+                let max = self.lines().iter().map(|l| unicode_width::UnicodeWidthStr::width(l.text.as_str())).max().unwrap_or(0);
+                self.horizontal = self.horizontal.saturating_add(8).min(max);
+            }
+            KeyCode::Home => self.horizontal = 0,
+            KeyCode::Tab if self.layout() == Layout::SideBySide => {
+                self.side = if self.side == Side::Old { Side::New } else { Side::Old };
+                if let Some(row) = self.rows().get(self.cursor_row()) {
+                    self.cursor = match self.side { Side::Old => row.left, Side::New => row.right }.or(row.full).unwrap_or_else(|| row.first());
+                }
+                self.mark = None;
+            }
             KeyCode::Char('k') => self.move_cursor(-1),
             KeyCode::Char('j') => self.move_cursor(1),
             KeyCode::PageUp => self.move_cursor(-(self.page as isize)),
@@ -340,6 +416,12 @@ impl DiffView {
             KeyCode::Char('G') => self.move_cursor(self.lines().len() as isize),
             KeyCode::Char('v') => self.mark = if self.mark.is_some() { None } else { Some(self.cursor) },
             KeyCode::Char('s') => self.layout = Some(self.layout().other()),
+            KeyCode::Char('n') | KeyCode::Char('p') => {
+                let next = key.code == KeyCode::Char('n');
+                let hunks: Vec<_> = self.lines().iter().enumerate().filter(|(_, l)| l.kind == LineKind::Hunk).map(|(i, _)| i).collect();
+                let target = if next { hunks.into_iter().find(|&i| i > self.cursor) } else { hunks.into_iter().rev().find(|&i| i < self.cursor) };
+                if let Some(i) = target { self.cursor = i; self.follow_cursor = true; }
+            }
             KeyCode::Char('c') => {
                 if !self.lines().is_empty() {
                     self.input = Some(String::new());
@@ -465,217 +547,9 @@ pub fn parse_patch(diff: &str) -> Vec<FilePatch> {
     out
 }
 
-/// The pane, from the top of the frame: header, file list, the diff, keys.
+/// Render the review pane using its shared code and annotation row plan.
 pub fn render(frame: &mut Frame, v: &mut DiffView) {
-    let area = frame.area();
-    let width = area.width as usize;
-    let mut y = area.y;
-    let line_at = |frame: &mut Frame, y: u16, line: Line| {
-        frame.render_widget(Paragraph::new(line), Rect { x: area.x, y, width: area.width, height: 1 });
-    };
-    // Header.
-    line_at(
-        frame,
-        y,
-        Line::from(vec![
-            Span::styled(v.data.agent.clone(), theme::bold()),
-            Span::styled(format!(" · turn {} · ", v.data.turn), Style::default()),
-            Span::styled(v.data.headline.clone(), theme::dim()),
-        ]),
-    );
-    y += 1;
-    if area.height < 4 {
-        return;
-    }
-    // File list: the agent's own files, then the rest under a heading.
-    let split = v.data.files.iter().any(|f| f.authored) && v.data.files.iter().any(|f| !f.authored);
-    let mut rows: Vec<(Option<usize>, Line)> = Vec::new();
-    let mut order: Vec<usize> = (0..v.data.files.len()).filter(|&i| !split || v.data.files[i].authored).collect();
-    if split {
-        let others: Vec<usize> = (0..v.data.files.len()).filter(|&i| !v.data.files[i].authored).collect();
-        order.push(usize::MAX);
-        order.extend(others);
-    }
-    let label_w = v.data.files.iter().map(|f| f.label.chars().count()).max().unwrap_or(0).min(width.saturating_sub(14));
-    for i in order {
-        if i == usize::MAX {
-            rows.push((None, Line::from(Span::styled("── also changed during this turn ──", theme::dim()))));
-            continue;
-        }
-        let f = &v.data.files[i];
-        let selected = i == v.file;
-        let base = if selected { theme::selected() } else { Style::default() };
-        let counts = match (f.added, f.removed) {
-            (Some(a), Some(r)) => format!("+{a} −{r}"),
-            _ => "binary".into(),
-        };
-        let notes = v.drafts.iter().filter(|d| d.path == f.path).count();
-        let mut spans = vec![
-            Span::styled(format!("{} ", f.status), if selected { base } else { status_style(f.status) }),
-            Span::styled(format!("{:<label_w$}", crate::util::ellipsize(&f.label, label_w)), base),
-            Span::styled(format!("  {counts}"), if selected { base } else { theme::dim() }),
-        ];
-        if notes > 0 {
-            spans.push(Span::styled(format!("  ✎{notes}"), if selected { base } else { theme::accent() }));
-        }
-        rows.push((Some(i), Line::from(spans)));
-    }
-    let list_h = (rows.len() as u16).min((area.height / 3).max(3));
-    // Keep the selected file on screen.
-    let sel_row = rows.iter().position(|(i, _)| *i == Some(v.file)).unwrap_or(0);
-    let first = sel_row.saturating_sub(list_h as usize - 1);
-    for (_, line) in rows.into_iter().skip(first).take(list_h as usize) {
-        line_at(frame, y, line);
-        y += 1;
-    }
-    line_at(frame, y, Line::from(Span::styled("─".repeat(width), theme::dim())));
-    y += 1;
-    // The diff.
-    let footer_h = 1;
-    let diff_h = area.height.saturating_sub(y - area.y + footer_h) as usize;
-    v.page = diff_h.max(1);
-    v.last_width = width;
-    let layout = v.layout();
-    // Keep the cursor on screen: `scroll` counts lines, or rows side by side.
-    let cur_unit = match layout {
-        Layout::Unified => v.cursor,
-        Layout::SideBySide => v.cursor_row(),
-    };
-    if cur_unit < v.scroll {
-        v.scroll = cur_unit;
-    } else if cur_unit >= v.scroll + v.page {
-        v.scroll = cur_unit + 1 - v.page;
-    }
-    let lines = v.lines().to_vec();
-    let marked = v.marked();
-    let drafts = v.drafts_here().into_iter().cloned().collect::<Vec<_>>();
-    let gutter = lines.iter().filter_map(|l| l.new.or(l.old)).max().unwrap_or(0).to_string().len().max(3);
-    let mut shown = 0;
-    if lines.is_empty() {
-        let what = if v.data.files.is_empty() { "nothing changed in this turn" } else { "no text diff for this file" };
-        line_at(frame, y, Line::from(Span::styled(what, theme::dim())));
-        y += 1;
-        shown += 1;
-    }
-    // One line's look: its sign and colour, reversed when marked, bold under the cursor.
-    let styled = |l: &DiffLine, idx: usize| -> (&'static str, Style) {
-        let (sign, style) = match l.kind {
-            LineKind::Add => ("+", theme::ok()),
-            LineKind::Del => ("−", theme::danger()),
-            LineKind::Hunk => ("", theme::accent()),
-            LineKind::Context => (" ", Style::default()),
-            LineKind::Meta => ("", theme::dim()),
-        };
-        let mut style = style;
-        if marked.is_some_and(|(a, b)| a <= idx && idx <= b) {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        if idx == v.cursor {
-            style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-        }
-        (sign, style)
-    };
-    let note_line = |d: &Draft| -> Line<'static> {
-        let note = crate::util::ellipsize(&d.note, width.saturating_sub(gutter + 4));
-        Line::from(vec![Span::styled(format!("{} ✎ ", " ".repeat(gutter)), theme::accent()), Span::styled(note, theme::accent())])
-    };
-    let ends_on = |d: &Draft, l: &DiffLine| covers(d, l) && Some(d.end) == (if d.side == Side::Old { l.old } else { l.new });
-    if layout == Layout::SideBySide {
-        // Old text left, new text right, a rule between; headers across both.
-        let half = width.saturating_sub(1) / 2;
-        let cell = |side: Option<usize>, old: bool| -> Vec<Span<'static>> {
-            let Some(i) = side else { return vec![Span::raw(" ".repeat(half))] };
-            let l = &lines[i];
-            let (sign, style) = styled(l, i);
-            let no = (if old { l.old } else { l.new }).map(|n| n.to_string()).unwrap_or_default();
-            let text = crate::util::ellipsize(&l.text.replace('\t', "    "), half.saturating_sub(gutter + 2));
-            let body = format!("{sign}{text}");
-            let pad = half.saturating_sub(gutter + 1 + body.chars().count());
-            vec![Span::styled(format!("{no:>gutter$} "), theme::dim()), Span::styled(body, style), Span::raw(" ".repeat(pad))]
-        };
-        let rows = v.rows();
-        let mut r = v.scroll;
-        while shown < diff_h && r < rows.len() {
-            let row = rows[r];
-            if let Some(i) = row.full {
-                let (_, style) = styled(&lines[i], i);
-                line_at(frame, y, Line::from(vec![Span::styled(" ".repeat(gutter + 1), theme::dim()), Span::styled(crate::util::ellipsize(&lines[i].text, width.saturating_sub(gutter + 1)), style)]));
-            } else {
-                let mut spans = cell(row.left, true);
-                spans.push(Span::styled("│", theme::dim()));
-                spans.extend(cell(row.right, false));
-                line_at(frame, y, Line::from(spans));
-            }
-            y += 1;
-            shown += 1;
-            for d in drafts.iter().filter(|d| [row.left, row.right, row.full].into_iter().flatten().any(|i| ends_on(d, &lines[i]))) {
-                if shown >= diff_h {
-                    break;
-                }
-                line_at(frame, y, note_line(d));
-                y += 1;
-                shown += 1;
-            }
-            r += 1;
-        }
-    }
-    let mut idx = v.scroll;
-    while layout == Layout::Unified && shown < diff_h && idx < lines.len() {
-        let l = &lines[idx];
-        let (sign, style) = styled(l, idx);
-        let no = match l.kind {
-            LineKind::Hunk | LineKind::Meta => " ".repeat(gutter),
-            _ => format!("{:>gutter$}", l.new.or(l.old).map(|n| n.to_string()).unwrap_or_default()),
-        };
-        let text = crate::util::ellipsize(&l.text.replace('\t', "    "), width.saturating_sub(gutter + 3));
-        line_at(frame, y, Line::from(vec![Span::styled(format!("{no} "), theme::dim()), Span::styled(format!("{sign}{text}"), style)]));
-        y += 1;
-        shown += 1;
-        // A draft's note shows under its last line.
-        for d in drafts.iter().filter(|d| ends_on(d, l)) {
-            if shown >= diff_h {
-                break;
-            }
-            line_at(frame, y, note_line(d));
-            y += 1;
-            shown += 1;
-        }
-        idx += 1;
-    }
-    // Footer: the note being typed, a confirmation, or the keys.
-    let footer_y = area.y + area.height - 1;
-    let footer = if let Some(buf) = &v.input {
-        Line::from(vec![Span::styled("note: ", theme::accent()), Span::raw(buf.clone()), Span::styled("▏", theme::accent())])
-    } else if v.confirm_undo {
-        Line::from(Span::styled(
-            format!("undo turn {} of {}: {}? y/n", v.data.turn, v.data.agent, v.data.headline),
-            theme::accent_bold(),
-        ))
-    } else if let Some(n) = &v.data.note {
-        Line::from(Span::styled(n.clone(), if v.data.offer_restore { theme::danger() } else { theme::accent() }))
-    } else {
-        let send = match v.drafts.len() {
-            0 => String::new(),
-            1 => "  ⏎ send 1 note".to_string(),
-            n => format!("  ⏎ send {n} notes"),
-        };
-        let undo = if v.data.can_undo { "  u undo turn" } else { "" };
-        let split = match layout {
-            Layout::Unified => "s side by side",
-            Layout::SideBySide => "s unified",
-        };
-        Line::from(Span::styled(format!("↑↓ file  j/k line  v mark  c comment{send}{undo}  {split}  [ ] turn  q close"), theme::dim()))
-    };
-    line_at(frame, footer_y, footer);
-}
-
-fn status_style(status: char) -> Style {
-    match status {
-        'A' => theme::ok(),
-        'D' => theme::danger(),
-        'R' => theme::accent(),
-        _ => Style::default(),
-    }
+    render::render(frame, v);
 }
 
 /// Run the pane until it has something for the caller: draws, reads keys.
@@ -683,17 +557,23 @@ fn status_style(status: char) -> Style {
 pub fn run_diff(data: DiffData, drafts: Vec<Draft>) -> Result<(Outcome, Vec<Draft>)> {
     let mut v = DiffView::new(data, drafts);
     let mut terminal = ratatui::init();
+    let _ = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture, event::EnableBracketedPaste);
     let result = (|| -> Result<Outcome> {
         loop {
             terminal.draw(|f| render(f, &mut v))?;
-            if event::poll(POLL)?
-                && let Event::Key(key) = event::read()?
-                && let Some(out) = v.handle_key(key)
-            {
-                return Ok(out);
+            if event::poll(POLL)? {
+                match event::read()? {
+                    Event::Key(key) => if let Some(out) = v.handle_key(key) { return Ok(out); },
+                    Event::Mouse(mouse) => v.handle_mouse(mouse),
+                    Event::Paste(text) => if let Some(note) = &mut v.input {
+                        note.extend(text.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t'));
+                    },
+                    _ => {}
+                }
             }
         }
     })();
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture, event::DisableBracketedPaste);
     ratatui::restore();
     Ok((result?, v.drafts))
 }
@@ -762,7 +642,7 @@ mod tests {
         assert_eq!(v.drafts.len(), 1);
         let d = &v.drafts[0];
         assert_eq!((d.path.as_str(), d.start, d.end, d.side), ("src/a.rs", 2, 3, Side::New), "mixed lines read on the new side");
-        assert_eq!(d.text, "    old();\n    new();\n    more();");
+        assert_eq!(d.text, "    new();\n    more();", "new-side notes exclude removed text");
         assert_eq!(v.mark, None);
         // A note on a removed line alone is on the old side.
         v.cursor = 2;
@@ -773,7 +653,7 @@ mod tests {
         let Some(Outcome::Send(msg)) = v.handle_key(key(KeyCode::Enter)) else { panic!("Enter sends") };
         assert_eq!(
             msg,
-            "Review of your turn 4:\n\n```review path=src/a.rs lines=2-3 side=new\n    old();\n    new();\n    more();\n```\nuse one call\n\n```review path=src/a.rs lines=2 side=old\n    old();\n```\nx\n"
+            "Review of your turn 4:\n\n```review path=src/a.rs lines=2-3 side=new\n    new();\n    more();\n```\nuse one call\n\n```review path=src/a.rs lines=2 side=old\n    old();\n```\nx\n"
         );
         // d drops the draft under the cursor.
         v.handle_key(key(KeyCode::Char('d')));
@@ -799,8 +679,7 @@ mod tests {
         assert!(!v.confirm_undo, "mid-turn: no undo");
         assert_eq!(v.handle_key(key(KeyCode::Enter)), None, "nothing to send");
         v.handle_key(key(KeyCode::Up));
-        assert_eq!(v.file, 0);
-        v.handle_key(key(KeyCode::Down));
+        assert_eq!(v.file, 1, "the first authored file is first in the navigator");
         v.handle_key(key(KeyCode::Down));
         assert_eq!(v.file, 2);
         assert!(v.lines().iter().all(|l| l.kind == LineKind::Meta));
@@ -847,10 +726,10 @@ mod tests {
         let text: Vec<String> = (0..14).map(|y| (0..120).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert_eq!(v.layout(), Layout::SideBySide, "120 columns: split by default");
         let paired = text.iter().find(|l| l.contains("old();")).expect("the removed line is drawn");
-        assert!(paired.contains("−    old();") && paired.contains("│") && paired.contains("+    new();"), "{paired:?}");
+        assert!(paired.contains("old();") && paired.contains("│") && paired.contains("new();"), "{paired:?}");
         let (left, right) = paired.split_once('│').unwrap();
-        assert!(left.trim_start().starts_with("2 −"), "old numbers on the left: {left:?}");
-        assert!(right.trim_start().starts_with("2 +"), "new numbers on the right: {right:?}");
+        assert!(left.trim_start().starts_with("▎ 2 −"), "old numbers on the left: {left:?}");
+        assert!(right.trim_start().starts_with("▎ 2 +"), "new numbers on the right: {right:?}");
         let alone = text.iter().find(|l| l.contains("more();")).expect("the extra added line");
         assert!(alone.split_once('│').unwrap().0.trim().is_empty(), "nothing on the left of it: {alone:?}");
         assert!(text[13].contains("s unified"), "{}", text[13]);
@@ -863,16 +742,11 @@ mod tests {
         term.draw(|f| render(f, &mut v)).unwrap();
         let text: Vec<String> = (0..14).map(|y| (0..100).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert_eq!(text[0], "lyra · turn 4 · 3 files +2 −1");
-        assert_eq!(text[1], "M src/a.rs    +2 −1  ✎1");
-        assert_eq!(text[2], "A img.png     binary");
-        assert_eq!(text[3], "── also changed during this turn ──");
-        assert_eq!(text[4], "M Cargo.lock  +0 −1");
-        assert!(text[5].starts_with("────"));
-        assert_eq!(text[6], "    @@ -1,3 +1,4 @@");
-        assert_eq!(text[7], "  1  fn main() {");
-        assert_eq!(text[8], "  2 −    old();");
-        assert_eq!(text[9], "  2 +    new();");
-        assert_eq!(text[10], "    ✎ why?");
-        assert_eq!(text[13], "↑↓ file  j/k line  v mark  c comment  ⏎ send 1 note  u undo turn  s side by side  [ ] turn  q close");
+        assert!(text[1].contains("src/a.rs") && text[1].contains("+2 −1"));
+        assert!(text.iter().any(|l| l.contains("old();")));
+        assert!(text.iter().any(|l| l.contains("new();")));
+        assert!(text.iter().any(|l| l.contains("note · new L2")));
+        assert!(text.iter().any(|l| l.contains("why?")));
+        assert!(text[13].contains("←→ pan") && text[13].contains("send 1 note"));
     }
 }

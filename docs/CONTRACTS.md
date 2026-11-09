@@ -361,7 +361,11 @@ pub enum ItemBody { …, Changes { files: usize, authored: usize, added: i64, re
 pub enum Row { …, Changes(usize) }   // the change line under a turn: "Δ 3 files  +42 −7"
 pub struct util::DiffLink { pub thread: String, pub session_id: String, pub turn: i64, pub rex_session: String, pub server: Option<String> }   // axel-links://diff?…
 pub mod diff {   // the diff pane (pure state + a loop), run by `axel thread diff --pane`
-    pub struct DiffData { pub agent, pub turn: i64, pub title, pub headline, pub files: Vec<FileEntry>, pub patches: Vec<FilePatch>, pub between_turns, pub truncated, pub note: Option<String>, pub offer_restore: bool, pub can_undo: bool }
+    pub struct DiffData { pub agent, pub turn: i64, pub title, pub headline, pub files: Vec<FileEntry>, pub patches: Vec<FilePatch>, pub syntax: BTreeMap<String, Vec<Vec<SyntaxSpan>>> /* path → patch line → spans; optional display-only data */, pub between_turns, pub truncated, pub note: Option<String>, pub offer_restore: bool, pub can_undo: bool }
+    pub struct SyntaxSpan { pub text: String, pub tone: SyntaxTone }
+    pub enum SyntaxTone { Plain, Muted, Keyword, String, Number, Function, Type, Bold, Italic }
+    // Syntax comes from the immutable before/after checkpoint blobs, never the
+    // current working tree. Missing or oversized source falls back to plain code.
     pub struct FileEntry { pub path, pub label, pub status: char, pub added: Option<i64>, pub removed: Option<i64>, pub authored: bool }
     pub struct FilePatch { pub path, pub lines: Vec<DiffLine> }   // from parse_patch(git diff --no-color)
     pub struct DiffLine { pub kind: LineKind /* Hunk|Context|Add|Del|Meta */, pub old: Option<usize>, pub new: Option<usize>, pub text }

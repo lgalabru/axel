@@ -680,9 +680,20 @@ outside a repository, the turn simply has no checkpoint.
   or `2 files (+1 not this agent)` when other hands changed files during the turn. In Rex
   it's a link that opens the turn's diff in a floating pane; `axel thread diff THREAD
   [--session S] [--turn N] [--stat]` prints the same.
-- **The diff pane** (`axel_tui::diff`): the file list on top, the agent's own files
-  first, the selected file's diff below, old and new text side by side when the pane is
-  wide enough (`s` switches). `v` marks lines, `c` writes a note under them;
+- **The diff pane** (`axel_tui::diff`): wide panes put a compact file navigator beside
+  the code; smaller panes keep a single file header so the code gets the height.
+  The agent's own files come first in both display and keyboard order. Old and new
+  text sit side by side when the code area has 110 columns (`s` switches).
+  Native syntax colours come from the immutable before/after checkpoint blobs,
+  parsed as complete files to preserve multiline syntax state. Highlighting is
+  bounded and optional. Coloured gutters identify additions and removals; stronger
+  highlights identify changed words while leaving the rest of the syntax visible.
+  Only on-screen code is painted. Tabs and wide characters use terminal columns,
+  and Left/Right pan long lines without changing source anchors. Mouse wheel scrolls
+  code; clicking a file or code line selects it. `n`/`p` jump between hunks. `v` marks
+  lines, `c` writes a note, and Tab selects the old or new side in a split view.
+  Notes wrap beside the side they annotate and participate in scroll geometry;
+  review text contains only source lines from the chosen side. The
   notes pile up as drafts (kept in `~/.axel/reviews/`, so closing the pane loses
   nothing) and `⏎` sends them as one message, a fenced `review` block per note with the
   path, the line range, the side (`old` for removed lines) and the marked lines, then
