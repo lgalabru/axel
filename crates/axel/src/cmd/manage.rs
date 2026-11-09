@@ -85,6 +85,10 @@ fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> 
             super::thread::set_state(ctx, thread_id, ThreadOp::Archive)?;
             "archived".into()
         }
+        Outcome::StopAgent { agent } => {
+            let n = super::thread::stop_agent(ctx, thread_id, agent)?;
+            format!("stopped {agent}: {n} session{}", if n == 1 { "" } else { "s" })
+        }
         Outcome::Stop => {
             let n = super::thread::stop_thread(ctx, thread_id)?;
             format!("stopped {n} session{}", if n == 1 { "" } else { "s" })
@@ -236,4 +240,54 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         hosts: ctx.store.hosts()?.into_iter().map(|h| h.label).collect(),
         note,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axel_identity::{Keypair, Keystore, attest};
+    use axel_store::{Harness, NewAgent, NewSession, RuntimeMode, SessionRuntime, Store};
+
+    #[test]
+    fn stopping_one_agent_preserves_other_agents_and_other_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = Ctx { store: Store::open_memory().unwrap(), keystore: Keystore::open_at(temp.path().join("keys.json"), false).unwrap(), rex: None };
+        let owner = ctx.owner().unwrap();
+        let register = |name: &str| {
+            let key = Keypair::generate();
+            ctx.store.insert_agent(&NewAgent {
+                pubkey: key.public().to_base58(), name: name.into(), harness: Harness::Claude,
+                model: None, skills: vec![], prompt: None, color: None, runtime_mode: RuntimeMode::default(),
+                auth_tag: Some(attest(&owner, &key.public(), "").unwrap().to_tag()),
+            }).unwrap();
+            key
+        };
+        let chosen = register("chosen");
+        let peer = register("peer");
+        let thread = ctx.store.create_thread(&owner, "here", "here", None).unwrap();
+        let other = ctx.store.create_thread(&owner, "elsewhere", "elsewhere", None).unwrap();
+        let environment = ctx.store.local_environment().unwrap();
+        let start = |thread: &str, agent: &Keypair| ctx.store.start_session(agent, &NewSession {
+            thread_id: thread.into(), agent_pubkey: agent.public().to_base58(),
+            environment_id: environment.id.clone(), environment_label: environment.label.clone(),
+            project_repo_key: None, harness: Harness::Claude, runtime_mode: RuntimeMode::default(),
+            resumed_from: None, runtime: SessionRuntime::Managed,
+        }).unwrap();
+        let a = start(&thread.id, &chosen);
+        let b = start(&thread.id, &chosen);
+        let untouched_peer = start(&thread.id, &peer);
+        let untouched_thread = start(&other.id, &chosen);
+        let outcome = Outcome::StopAgent { agent: "chosen".into() };
+        assert_eq!(act(&ctx, &thread.id, &outcome).unwrap(), Some("stopped chosen: 2 sessions".into()));
+        for id in [&a.id, &b.id] {
+            let session = ctx.store.get_session(id).unwrap().unwrap();
+            assert!(session.ended_at.is_some());
+            assert_eq!(session.ended_reason.as_deref(), Some("stopped by owner"));
+        }
+        for id in [&untouched_peer.id, &untouched_thread.id] {
+            assert!(ctx.store.get_session(id).unwrap().unwrap().ended_at.is_none());
+        }
+        assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
+        assert_eq!(act(&ctx, &thread.id, &outcome).unwrap(), Some("stopped chosen: 0 sessions".into()));
+    }
 }

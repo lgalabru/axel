@@ -218,8 +218,18 @@ pub fn stop_thread(ctx: &Ctx, thread_id: &str) -> Result<usize> {
 
 /// [`stop_thread`], recording `reason` on each session it ends.
 pub fn stop_thread_with(ctx: &Ctx, thread_id: &str, reason: &str) -> Result<usize> {
+    stop_sessions(ctx, thread_id, None, reason)
+}
+
+/// Stop one agent on this thread, preserving every other agent and thread.
+pub fn stop_agent(ctx: &Ctx, thread_id: &str, agent: &str) -> Result<usize> {
+    let agent = ctx.store.agent_by_name(agent)?.with_context(|| format!("no agent named {agent:?}"))?;
+    stop_sessions(ctx, thread_id, Some(&agent.pubkey), "stopped by owner")
+}
+
+fn stop_sessions(ctx: &Ctx, thread_id: &str, agent_pubkey: Option<&str>, reason: &str) -> Result<usize> {
     let owner = ctx.owner()?;
-    let live = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), states: Some(vec![axel_store::SessionState::Starting, axel_store::SessionState::Running, axel_store::SessionState::Blocked, axel_store::SessionState::Idle]), ..Default::default() })?;
+    let live = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), agent_pubkey: agent_pubkey.map(str::to_owned), states: Some(vec![axel_store::SessionState::Starting, axel_store::SessionState::Running, axel_store::SessionState::Blocked, axel_store::SessionState::Idle]), ..Default::default() })?;
     let mut hosts = Vec::new();
     for s in &live {
         if let Some(h) = super::host::host_of(ctx, s)? {

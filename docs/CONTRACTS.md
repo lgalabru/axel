@@ -357,6 +357,9 @@ pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String,
 // Deps gains: pub open_terminal: Option<&'a OpenThreadFn<'a>>;
 // ThreadAction gains: OpenTerminal; Ctrl+T opens a floating shell in the thread's
 // workspace. Ctrl+D returns Manage and opens the thread controls.
+// manage::Action::StopAgent (`t`) selects among the thread's live agents.
+// manage::Outcome::StopAgent { agent: String } stops only that agent's live
+// sessions on this thread. Existing Stop (`x`, "Stop all") remains thread-wide.
 pub enum ItemBody { …, Changes { files: usize, authored: usize, added: i64, removed: i64, between_turns: bool } }   // a TurnEnd that changed files
 pub enum Row { …, Changes(usize) }   // the change line under a turn: "↗ 3 files  +42 −7"
 pub struct util::DiffLink { pub thread: String, pub session_id: String, pub turn: i64, pub rex_session: String, pub server: Option<String> }   // axel-links://diff?…

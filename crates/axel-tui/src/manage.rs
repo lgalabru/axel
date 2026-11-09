@@ -79,6 +79,7 @@ pub enum Action {
     Reopen,
     Archive,
     Stop,
+    StopAgent,
     Rename,
     /// Everything ends, nobody restarts: the next message starts from scratch.
     HardReset,
@@ -94,6 +95,7 @@ impl Action {
             Action::Reopen => 'o',
             Action::Archive => 'a',
             Action::Stop => 'x',
+            Action::StopAgent => 't',
             Action::Rename => 'n',
             Action::HardReset => 'h',
         }
@@ -106,7 +108,8 @@ impl Action {
             Action::Settle => "Settle",
             Action::Reopen => "Reopen",
             Action::Archive => "Archive",
-            Action::Stop => "Stop",
+            Action::Stop => "Stop all",
+            Action::StopAgent => "Stop agent",
             Action::Rename => "Rename",
             Action::HardReset => "Hard reset",
         }
@@ -130,6 +133,8 @@ pub enum Outcome {
     Reopen,
     Archive,
     Stop,
+    /// End only this agent's live sessions on the current thread.
+    StopAgent { agent: String },
     Rename(String),
     /// End every session and relaunch the panes; no agent, no recap.
     HardReset,
@@ -139,7 +144,7 @@ pub enum Outcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     Menu,
-    /// Which agent, for reset or move.
+    /// Which agent, for reset, move, or stop.
     PickAgent { action: Action, idx: usize },
     /// Which host, for move.
     PickHost { agent: String, idx: usize },
@@ -174,6 +179,7 @@ impl ManageView {
             out.push(Action::Archive);
         }
         if self.data.sessions.iter().any(|s| s.live) {
+            out.push(Action::StopAgent);
             out.push(Action::Stop);
         }
         out.push(Action::Rename);
@@ -190,6 +196,7 @@ impl ManageView {
             Action::Settle => "mark it done; it stays listed, dimmed".into(),
             Action::Reopen => "back to open".into(),
             Action::Archive => "stop its sessions and hide it (axel thread reopen brings it back)".into(),
+            Action::StopAgent => "choose a running agent on this thread and end its sessions".into(),
             Action::Stop => format!("end {} live session{}", self.live_count(), if self.live_count() == 1 { "" } else { "s" }),
             Action::Rename => "change the title (the window follows)".into(),
             Action::HardReset => "end every session and relaunch the panes; no agent, no recap: the next message starts from scratch".into(),
@@ -198,6 +205,15 @@ impl ManageView {
 
     fn live_count(&self) -> usize {
         self.data.sessions.iter().filter(|s| s.live).count()
+    }
+
+    fn agents_for(&self, action: Action) -> Vec<String> {
+        if action != Action::StopAgent { return self.data.agents.clone() }
+        let mut live = Vec::new();
+        for session in self.data.sessions.iter().filter(|s| s.live) {
+            if !live.contains(&session.agent) { live.push(session.agent.clone()); }
+        }
+        live
     }
 
     /// Handle a key; `Some` when the caller has something to do.
@@ -228,15 +244,17 @@ impl ManageView {
                     _ => {}
                 }
             }
-            Step::PickAgent { action, idx } => match key.code {
-                KeyCode::Esc => self.step = Step::Menu,
-                KeyCode::Up | KeyCode::Char('k') => self.step = Step::PickAgent { action, idx: idx.saturating_sub(1) },
-                KeyCode::Down | KeyCode::Char('j') => self.step = Step::PickAgent { action, idx: (idx + 1).min(self.data.agents.len() - 1) },
-                KeyCode::Enter => {
-                    let agent = self.data.agents[idx].clone();
-                    self.after_agent(action, agent);
+            Step::PickAgent { action, idx } => {
+                let candidates = self.agents_for(action);
+                match key.code {
+                    KeyCode::Esc => self.step = Step::Menu,
+                    KeyCode::Up | KeyCode::Char('k') => self.step = Step::PickAgent { action, idx: idx.saturating_sub(1) },
+                    KeyCode::Down | KeyCode::Char('j') => self.step = Step::PickAgent { action, idx: (idx + 1).min(candidates.len().saturating_sub(1)) },
+                    KeyCode::Enter => {
+                        if let Some(agent) = candidates.get(idx) { self.after_agent(action, agent.clone()); }
+                    }
+                    _ => {}
                 }
-                _ => {}
             },
             Step::PickHost { agent, idx } => match key.code {
                 KeyCode::Esc => self.step = Step::Menu,
@@ -277,10 +295,11 @@ impl ManageView {
 
     fn start(&mut self, action: Action) {
         match action {
-            Action::Reset | Action::Move => {
-                if self.data.agents.len() > 1 {
+            Action::Reset | Action::Move | Action::StopAgent => {
+                let candidates = self.agents_for(action);
+                if candidates.len() > 1 {
                     self.step = Step::PickAgent { action, idx: 0 };
-                } else if let Some(agent) = self.data.agents.first().cloned() {
+                } else if let Some(agent) = candidates.first().cloned() {
                     self.after_agent(action, agent);
                 }
             }
@@ -295,6 +314,7 @@ impl ManageView {
 
     fn after_agent(&mut self, action: Action, agent: String) {
         match action {
+            Action::StopAgent => self.step = Step::Confirm(Outcome::StopAgent { agent }),
             Action::Move if self.data.hosts.len() > 1 => self.step = Step::PickHost { agent, idx: 0 },
             Action::Move => {
                 let host = self.data.hosts[0].clone();
@@ -413,7 +433,7 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
         Step::PickAgent { action, idx } => {
             line_at(frame, y, Line::from(Span::styled(format!("{} which agent?", action.label()), theme::accent_bold())));
             y += 1;
-            for (i, a) in d.agents.iter().enumerate() {
+            for (i, a) in v.agents_for(*action).iter().enumerate() {
                 let sel = i == *idx;
                 line_at(frame, y, Line::from(Span::styled(format!("{} {a}", if sel { "›" } else { " " }), if sel { theme::accent_bold() } else { Style::default() })));
                 y += 1;
@@ -430,7 +450,7 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
         }
         _ => {
             let actions = v.actions();
-            let label_w = 10;
+            let label_w = 11;
             for (i, a) in actions.iter().enumerate() {
                 let sel = i == v.cursor && v.step == Step::Menu;
                 let marker = if sel { "› " } else { "  " };
@@ -466,6 +486,7 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
                 Outcome::Reopen => "reopen this thread?".into(),
                 Outcome::Archive => "archive this thread: stop its sessions and hide it?".into(),
                 Outcome::Stop => "stop every live session?".into(),
+                Outcome::StopAgent { agent } => format!("stop {agent}'s live sessions on this thread?"),
                 Outcome::Rename(t) => format!("rename to {t}?"),
                 Outcome::HardReset => "hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?".into(),
                 Outcome::Close => String::new(),
@@ -544,12 +565,33 @@ mod tests {
     #[test]
     fn the_menu_offers_what_fits_the_thread() {
         let v = ManageView::new(data());
-        assert_eq!(v.actions(), vec![Action::Reset, Action::Move, Action::Settle, Action::Archive, Action::Stop, Action::Rename, Action::HardReset]);
+        assert_eq!(v.actions(), vec![Action::Reset, Action::Move, Action::Settle, Action::Archive, Action::StopAgent, Action::Stop, Action::Rename, Action::HardReset]);
         let mut done = data();
         done.state = "done".into();
         done.hosts.clear();
         done.sessions.iter_mut().for_each(|s| s.live = false);
         assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::Rename, Action::HardReset], "no hosts: no move; nothing live: no stop");
+    }
+
+    #[test]
+    fn stop_agent_selects_only_live_agents_and_keeps_stop_all_separate() {
+        let mut v = ManageView::new(data());
+        v.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(v.step, Step::Confirm(Outcome::StopAgent { agent: "opus".into() }));
+        v.handle_key(key(KeyCode::Char('n')));
+        v.data.sessions.push(SessionRow { agent: "sol".into(), live: true, ..Default::default() });
+        v.data.sessions.push(SessionRow { agent: "opus".into(), live: true, ..Default::default() });
+        v.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(v.step, Step::PickAgent { action: Action::StopAgent, idx: 0 });
+        assert_eq!(v.agents_for(Action::StopAgent), vec!["opus", "sol"]);
+        v.handle_key(key(KeyCode::Down));
+        v.handle_key(key(KeyCode::Enter));
+        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::StopAgent { agent: "sol".into() }));
+        v.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(v.step, Step::Confirm(Outcome::Stop));
+        assert_eq!(Action::Stop.label(), "Stop all");
+        v.data.sessions.iter_mut().for_each(|s| s.live = false);
+        assert!(!v.actions().contains(&Action::StopAgent));
     }
 
     #[test]
@@ -594,8 +636,8 @@ mod tests {
         assert!(text[4].starts_with("opus") && text[4].contains("claude/opus") && text[4].contains("idle") && text[4].contains("34M") && text[4].contains("62%") && text[4].contains("5h 12m"), "{:?}", text[4]);
         assert!(text[6].starts_with("37M tokens") && text[6].contains("16 turns") && text[6].contains("9 files changed"), "{:?}", text[6]);
         assert!(text[8].starts_with("› r Reset") && text[9].starts_with("  m Move"), "{:?}", &text[8..10]);
-        assert!(text[14].starts_with("  h Hard reset"), "last, apart: {:?}", text[14]);
-        let red = term.backend().buffer()[(4, 14)].style().fg;
+        assert!(text[15].starts_with("  h Hard reset"), "last, apart: {:?}", text[15]);
+        let red = term.backend().buffer()[(4, 15)].style().fg;
         assert_eq!(red, Some(theme::DANGER), "drawn in red");
         assert_eq!(text[16], "↑↓ choose  ⏎ go  Esc close");
         // Narrow: the rightmost columns go first.

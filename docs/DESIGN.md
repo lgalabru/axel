@@ -621,7 +621,10 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   title, and the stream pane watches `rex events` for `window_label_changed`: a name typed
   over the window in Rex becomes the thread's title (Rex's placeholder and the title as
   Axel shortens it for the tab don't count, so Axel's own labelling renames nothing).
-- **Composer panels**: Ctrl+D opens the thread controls. Ctrl+T opens a focused
+- **Composer panels**: Ctrl+D opens the thread controls. `t` selects a live agent
+  to stop on this thread; `x` stops all live sessions. Stopping one agent leaves
+  its configuration, history, other threads, and other agents intact.
+  Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
 - **Terminal colours**: normal text and surfaces use the terminal's own foreground
