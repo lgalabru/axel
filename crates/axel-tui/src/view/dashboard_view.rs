@@ -222,18 +222,6 @@ fn row_styles(selected: bool) -> (Style, Style) {
     }
 }
 
-#[cfg(test)]
-mod selection_tests {
-    use super::*;
-
-    #[test]
-    fn selections_reverse_native_colours_instead_of_assuming_a_dark_surface() {
-        for style in [row_styles(true).0, row_styles(true).1] {
-            assert!(style.add_modifier.contains(Modifier::REVERSED));
-            assert_eq!(style.bg, None);
-        }
-    }
-}
 
 fn span_len(spans: &[Span]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
@@ -568,4 +556,17 @@ fn render_inbox(frame: &mut Frame, d: &Dashboard, area: Rect, now: i64) {
     }
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn selections_reverse_native_colours_instead_of_assuming_a_dark_surface() {
+        for style in [row_styles(true).0, row_styles(true).1] {
+            assert!(style.add_modifier.contains(Modifier::REVERSED));
+            assert_eq!(style.bg, None);
+        }
+    }
 }

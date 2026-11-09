@@ -252,7 +252,8 @@ pub struct Deps<'a> { pub store: &'a axel_store::Store, pub keystore: &'a axel_i
 // model rows (AgentRow, DashAgentRow, ThreadRow, StatusRow, NewAgentSpec) carry axel_store's Harness / RuntimeMode / AgentColor / StatusState, never their strings;
 // theme::agent_color(Option<AgentColor>), theme::state_color(StatusState) and model::state_glyph(StatusState) match on the enums.
 pub fn run(deps: Deps, initial: Screen) -> anyhow::Result<Outcome>;   // owns the terminal (raw mode + alt screen), restores on exit/panic
-pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&dyn Fn(&str) -> anyhow::Result<()>>) -> anyhow::Result<()>;
+pub type RedirectInputFn<'a> = dyn Fn(&str) -> anyhow::Result<()> + 'a;
+pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&RedirectInputFn<'_>>) -> anyhow::Result<()>;
 // With redirect_input, the stream reads plain typing and bracketed paste without
 // echo or an alternate screen. The callback inserts it into the matching composer
 // and focuses that pane. Navigation keys stay inert; Ctrl+C exits the stream.

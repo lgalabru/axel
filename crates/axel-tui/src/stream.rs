@@ -25,8 +25,11 @@ use crate::view::thread_view::row_lines;
 const TICK: Duration = Duration::from_millis(250);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
+/// Forward text typed in the read-only stream to its composer.
+pub type RedirectInputFn<'a> = dyn Fn(&str) -> Result<()> + 'a;
+
 /// Follow `thread_id` until the process is killed (the pane closes with its window).
-pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&dyn Fn(&str) -> Result<()>>) -> Result<()> {
+pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&RedirectInputFn<'_>>) -> Result<()> {
     let _input = redirect_input.map(|_| StreamInput::new()).transpose()?;
     let mut out = std::io::stdout();
     let data = glue::load_thread(store, owner_pk, thread_id, now_secs())?;

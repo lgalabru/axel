@@ -251,11 +251,11 @@ pub(super) fn render(frame: &mut Frame, v: &mut DiffView) {
     v.scroll = v.scroll.min(planned.len().saturating_sub(1));
     // Scrolling adopts the source at the viewport top so a later note addresses
     // the code being read, rather than an off-screen file.
-    if !v.follow_cursor && v.mark.is_none() && v.input.is_none() {
-        if let Some(row) = planned.iter().skip(v.scroll).find(|r| r.code.is_some()) {
-            v.file = row.file;
-            v.cursor = row.code.unwrap().first();
-        }
+    if !v.follow_cursor && v.mark.is_none() && v.input.is_none()
+        && let Some(row) = planned.iter().skip(v.scroll).find(|r| r.code.is_some())
+    {
+        v.file = row.file;
+        v.cursor = row.code.unwrap().first();
     }
     let pinned = planned.get(v.scroll).map(|r| r.file).unwrap_or(v.file);
     if v.data.files.get(pinned).is_some() {

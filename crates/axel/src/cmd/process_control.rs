@@ -84,13 +84,13 @@ pub(super) fn pause(ctx: &Ctx, session: &Session) -> Result<()> {
             && p.command.get(2).map(String::as_str) == Some("host")
             && p.command.get(3) == Some(&session.id)
     }).map(|p| p.identity).collect();
-    if roots.is_empty() && session.runtime == axel_store::SessionRuntime::Pane {
-        if let (Some(rex), Some(block)) = (&ctx.rex, &session.rex_block_id) {
-            let info = rex.process(block)?;
-            if let Some(pid) = info.pointer("/child/pid").and_then(|v| v.as_i64()) {
-                if let Some(process) = processes()?.remove(&(pid as i32)) { roots.push(process.identity); }
-            }
-        }
+    if roots.is_empty() && session.runtime == axel_store::SessionRuntime::Pane
+        && let (Some(rex), Some(block)) = (&ctx.rex, &session.rex_block_id)
+    {
+        let info = rex.process(block)?;
+        if let Some(pid) = info.pointer("/child/pid").and_then(|v| v.as_i64())
+            && let Some(process) = processes()?.remove(&(pid as i32))
+        { roots.push(process.identity); }
     }
     if roots.is_empty() { bail!("this session's process is not running here") }
     let signer = ctx.agent_signer(&session.agent_pubkey, Some(&session.thread_id)).or_else(|_| ctx.owner())?;

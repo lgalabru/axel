@@ -32,7 +32,7 @@ fn changed_words(old: &str, new: &str, budget: &mut usize) -> (Vec<Range<usize>>
         let b: Vec<_> = new.chars().collect();
         let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
         let suffix = a[prefix..].iter().rev().zip(b[prefix..].iter().rev()).take_while(|(x, y)| x == y).count();
-        return (vec![prefix..a.len() - suffix], vec![prefix..b.len() - suffix]);
+        return (std::iter::once(prefix..a.len() - suffix).collect(), std::iter::once(prefix..b.len() - suffix).collect());
     }
     *budget -= work;
     let mut lcs = vec![vec![0usize; b.len() + 1]; a.len() + 1];

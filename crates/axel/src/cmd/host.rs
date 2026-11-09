@@ -374,9 +374,9 @@ fn handle(req: Request) -> Result<Response> {
             Response::Reply { reply: socket::Reply::Ok }
         }
         Request::StopSession { session_id } => {
-            if let Some(session) = ctx.store.get_session(&session_id)? {
-                if session.state == axel_store::SessionState::Paused { super::process_control::resume(&ctx, &session)?; }
-            }
+            if let Some(session) = ctx.store.get_session(&session_id)?
+                && session.state == axel_store::SessionState::Paused
+            { super::process_control::resume(&ctx, &session)?; }
             if let Some(sock) = ctx.store.get_session(&session_id)?.and_then(|s| s.socket_path) {
                 let _ = socket::send(&sock, &socket::Command::Stop);
             }

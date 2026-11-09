@@ -38,7 +38,7 @@ pub enum PromptSize {
     /// The full launch form, which takes most of the layer.
     Form,
 }
-pub use stream::run_stream;
+pub use stream::{RedirectInputFn, run_stream};
 pub use thread::{SendCommand, SendReply};
 pub use util::{relative_time, slugify};
 

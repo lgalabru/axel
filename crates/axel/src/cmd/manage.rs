@@ -249,9 +249,9 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         }); }
     }
     for pk in &roster {
-        if let Some(agent) = agents.get(pk) {
-            if agent.archived_at.is_none() && !agent_names.contains(&agent.name) { agent_names.push(agent.name.clone()); }
-        }
+        if let Some(agent) = agents.get(pk)
+            && agent.archived_at.is_none() && !agent_names.contains(&agent.name)
+        { agent_names.push(agent.name.clone()); }
     }
     let state = match t.state {
         ThreadState::Open => "open",

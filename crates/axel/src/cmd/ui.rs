@@ -514,7 +514,7 @@ fn stream_with_input(ctx: &Ctx, thread_id: &str) -> Result<()> {
         rex.api_call("session.focus_block", serde_json::json!({ "block_id": composer }))?;
         Ok(())
     };
-    let redirect: Option<&dyn Fn(&str) -> Result<()>> = ctx.rex.as_ref().map(|_| &redirect as _);
+    let redirect: Option<&axel_tui::RedirectInputFn<'_>> = ctx.rex.as_ref().map(|_| &redirect as _);
     axel_tui::run_stream(&ctx.store, &owner_pk, thread_id, redirect)
 }
 
