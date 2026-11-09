@@ -612,6 +612,9 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
 - **Composer panels**: Ctrl+D opens the thread controls. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
+- **Composer arrows**: Up and Down move through the wrapped rows on screen,
+  keeping the intended column across shorter lines. This also applies to recalled
+  prompts. History changes only beyond the first or last screen row.
 - **Typing in the message pane**: plain typing or pasted text goes into the composer
   directly below that stream, which takes focus. Existing draft text is preserved.
   The transfer is a paste, so digits cannot answer a waiting approval and newlines

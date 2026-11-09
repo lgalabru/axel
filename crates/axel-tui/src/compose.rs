@@ -57,6 +57,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
         let mut pane = PaneFit::default();
         loop {
             let size = terminal.size()?;
+            v.set_composer_width(size.width);
             let want = desired_height(&v, size.width);
             if let Some(ask) = pane.next(want, size.height, Instant::now()) {
                 fit(ask, size.height);
@@ -370,6 +371,32 @@ mod tests {
             assert_eq!(v.composer.text(), draft);
             assert_eq!(v.pending_choice(), pending);
         }
+    }
+
+    #[test]
+    fn arrows_move_through_a_draft_taller_than_the_composer_and_return_to_the_end() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.set_composer_width(12);
+        let draft = format!("{}end", "0123456789".repeat(12));
+        v.handle_paste(&draft);
+        let mut term = Terminal::new(TestBackend::new(12, 10)).unwrap();
+        term.draw(|f| render(f, &v)).unwrap();
+        let end = term.get_cursor_position().unwrap();
+        assert!(text(&term).contains("end"));
+        for _ in 0..10 {
+            v.handle_compose_key(key(KeyCode::Up));
+            term.draw(|f| render(f, &v)).unwrap();
+        }
+        assert_eq!(v.composer.cursor(), 23);
+        for _ in 0..10 {
+            v.handle_compose_key(key(KeyCode::Down));
+            term.draw(|f| render(f, &v)).unwrap();
+        }
+        assert_eq!(v.composer.text(), draft);
+        assert_eq!(v.composer.cursor(), 123);
+        assert_eq!(term.get_cursor_position().unwrap(), end);
+        assert!(text(&term).contains("end"));
     }
 
     #[test]

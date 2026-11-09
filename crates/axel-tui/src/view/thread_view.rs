@@ -704,43 +704,7 @@ pub fn composer_text_rows(v: &ThreadView, width: u16, max: usize) -> usize {
 /// (row, column).  Each row is a `(start, end)` range of `chars`.  A cursor
 /// right after a full row gets a row of its own.
 pub fn input_rows(chars: &[char], width: usize, cursor: usize) -> (Vec<(usize, usize)>, (usize, usize)) {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    let mut start = 0;
-    loop {
-        let line_end = chars[start..].iter().position(|c| *c == '\n').map_or(chars.len(), |i| start + i);
-        let mut s = start;
-        loop {
-            let e = (s + width).min(line_end);
-            rows.push((s, e));
-            if e >= line_end {
-                break;
-            }
-            s = e;
-        }
-        if line_end >= chars.len() {
-            break;
-        }
-        start = line_end + 1;
-    }
-    let mut at = None;
-    for (r, &(s, e)) in rows.iter().enumerate() {
-        let last_of_line = rows.get(r + 1).is_none_or(|&(ns, _)| ns != e);
-        if cursor >= s && (cursor < e || (cursor == e && (last_of_line || e == s))) {
-            at = Some((r, cursor - s));
-            break;
-        }
-    }
-    let at = match at {
-        Some((r, c)) if c >= width => {
-            // After a full row: the next row, which may not exist yet.
-            rows.insert(r + 1, (cursor, cursor));
-            (r + 1, 0)
-        }
-        Some(p) => p,
-        None => (rows.len().saturating_sub(1), 0),
-    };
-    (rows, at)
+    crate::input::input_rows(chars, width, cursor)
 }
 
 /// Composer height: text rows · chips row · rule · footer.

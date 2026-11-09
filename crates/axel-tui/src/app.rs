@@ -567,6 +567,9 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &s
     let mut app = App::new(deps, owner_pk, initial);
     loop {
         let size = terminal.size()?;
+        if let Some(thread) = app.thread.as_mut() {
+            thread.set_composer_width(size.width);
+        }
         app.dashboard.compact =
             view::dashboard_view::mode_for(ratatui::layout::Rect::new(0, 0, size.width, size.height))
                 == view::dashboard_view::Mode::Compact;
