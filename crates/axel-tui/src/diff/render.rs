@@ -219,6 +219,13 @@ fn stream(v: &DiffView, width: usize) -> Vec<Row> {
     out
 }
 
+/// The same code and note geometry, printed once into normal scrollback.
+pub(super) fn scrollback_rows(v: &DiffView, width: usize) -> impl Iterator<Item = Line<'static>> + '_ {
+    stream(v, width).into_iter().map(move |row| {
+        row.line.unwrap_or_else(|| code_row(v, row.file, row.code.expect("a review row has code or a note"), width))
+    })
+}
+
 pub(super) fn render(frame: &mut Frame, v: &mut DiffView) {
     let area = frame.area();
     v.hits.clear();
@@ -291,11 +298,11 @@ pub(super) fn render(frame: &mut Frame, v: &mut DiffView) {
         let notes = if v.drafts.is_empty() { String::new() } else { format!("  ⏎ send {} note{}", v.drafts.len(), if v.drafts.len() == 1 { "" } else { "s" }) };
         let undo = if v.data.can_undo { "  u undo" } else { "" };
         if area.width < 90 {
-            format!("↑↓ file  j/k line  v mark  c note  s split  q close{notes}")
+            format!("↑↓ file  j/k line  v mark  c note  s split  q back{notes}")
         } else if area.width < 140 {
-            format!("↑↓ files  j/k lines  ←→ pan  c note{notes}  {layout}  q close")
+            format!("↑↓ files  j/k lines  ←→ pan  c note{notes}  {layout}  q back")
         } else {
-            format!("↑↓ file  j/k line  ←→ pan  n/p hunk  v mark  c note{notes}{undo}  {layout}  [ ] turn  q close")
+            format!("↑↓ file  j/k line  ←→ pan  n/p hunk  v mark  c note{notes}{undo}  {layout}  [ ] turn  q back")
         }
     };
     draw(frame, area.x, area.bottom() - 1, area.width, Line::from(plain(&footer, area.width as usize, if v.input.is_some() || v.confirm_undo { theme::accent() } else { theme::dim() })));

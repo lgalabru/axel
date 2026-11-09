@@ -22,6 +22,7 @@ const POLL: Duration = Duration::from_millis(60);
 mod paint;
 mod palette;
 mod render;
+mod native;
 
 #[derive(Clone, Copy, Debug)]
 enum Hit { File(usize), Line(usize, usize, Side) }
@@ -580,11 +581,18 @@ pub fn render(frame: &mut Frame, v: &mut DiffView) {
 pub fn run_diff(data: DiffData, drafts: Vec<Draft>) -> Result<(Outcome, Vec<Draft>)> {
     let mut v = DiffView::new(data, drafts);
     v.palette = palette::Palette::detect();
+    let outcome = native::run(&mut v)?;
+    Ok((outcome, v.drafts))
+}
+
+/// Explicit line review borrows the alternate screen only while marking or
+/// editing. The default reader leaves scrolling and selection to the terminal.
+fn run_review(v: &mut DiffView) -> Result<Outcome> {
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture, event::EnableBracketedPaste);
     let result = (|| -> Result<Outcome> {
         loop {
-            terminal.draw(|f| render(f, &mut v))?;
+            terminal.draw(|f| render(f, v))?;
             if event::poll(POLL)? {
                 match event::read()? {
                     Event::Key(key) => if let Some(out) = v.handle_key(key) { return Ok(out); },
@@ -599,7 +607,7 @@ pub fn run_diff(data: DiffData, drafts: Vec<Draft>) -> Result<(Outcome, Vec<Draf
     })();
     let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture, event::DisableBracketedPaste);
     ratatui::restore();
-    Ok((result?, v.drafts))
+    result
 }
 
 #[cfg(test)]

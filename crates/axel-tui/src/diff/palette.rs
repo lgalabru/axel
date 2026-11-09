@@ -34,6 +34,13 @@ fn blend(bg: (u8, u8, u8), tint: (u8, u8, u8), amount: f32) -> Color {
 
 impl Palette {
     pub fn detect() -> Self {
+        // Crossterm owns terminal input after the first event poll. Query only
+        // before that reader starts, and reuse the palette across turn changes.
+        static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+        PALETTE.get_or_init(Self::query).clone()
+    }
+
+    fn query() -> Self {
         let mut options = terminal_colorsaurus::QueryOptions::default();
         options.timeout = std::time::Duration::from_millis(150);
         terminal_colorsaurus::color_palette(options).map(|p| {

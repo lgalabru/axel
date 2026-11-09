@@ -96,6 +96,21 @@ what you can do to it.
 
 Opened from a turn's change line, or with `axel thread diff <id> --pane`.
 
+The reader uses normal terminal scrollback, like the message view. Scroll,
+select text, and search with Rex's usual controls.
+
+| Key | |
+|---|---|
+| **r** | Enter line review to mark source lines and write comments. |
+| **s** | Switch between split and unified layouts. |
+| **[ ]** | Read the previous or next turn. |
+| **Enter** | Send saved review notes to the agent. |
+| **u**, then **y** | Undo the turn. Available between turns. |
+| **R** | Restore after an undo that encountered overlapping work. |
+| **q**, **Esc** | Close the diff pane. |
+
+In line review:
+
 | Key | |
 |---|---|
 | **↑ ↓**, click a file | Jump to a file in the continuous review. The agent's own files come first, the rest under *also changed*. Wide panes show directory groups beside the code. |
@@ -112,7 +127,7 @@ Opened from a turn's change line, or with `axel thread diff <id> --pane`.
 | **u**, then **y** | Undo the turn in the working tree, keeping later work unless it overlaps. Not offered while the agent is mid-turn. |
 | **R** | After an undo that hit overlapping work: restore the turn's files to how they were before it. |
 | **[ ]** | The previous or next turn of the same agent. |
-| **q**, **Esc** | Close. Notes you haven't sent are kept. |
+| **q**, **Esc** | Return to native scrolling. Notes you haven't sent are kept. |
 
 Syntax colors come from the turn's saved source snapshots. The gutters identify
 added and removed lines; stronger highlights mark the words that changed. Notes

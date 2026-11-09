@@ -680,30 +680,31 @@ outside a repository, the turn simply has no checkpoint.
   or `2 files (+1 not this agent)` when other hands changed files during the turn. In Rex
   it's a link that opens the turn's diff in a floating pane; `axel thread diff THREAD
   [--session S] [--turn N] [--stat]` prints the same.
-- **The diff pane** (`axel_tui::diff`): wide panes put a compact file navigator beside
-  the code. All files form one continuous stream with in-stream file headers
-  and a pinned header for the file at the viewport top. The sidebar groups file
-  names under directories and jumps within the stream. Smaller panes hide it.
-  The agent's own files come first in both display and keyboard order. Old and new
-  text sit side by side when the code area has 110 columns (`s` switches).
-  Syntax colours come from the immutable before/after checkpoint blobs,
-  parsed as complete files to preserve multiline syntax state. Highlighting is
-  bounded and optional. Terminal foreground and background queries derive soft
-  addition and removal surfaces. Changed words use a slightly stronger tint while
+- **The diff pane** (`axel_tui::diff`): the default reader prints all changed
+  files as ordinary terminal output, like the conversation and tool-call panes.
+  Rex owns scrolling, trackpad momentum, text selection, and search. The reader
+  does not use the alternate screen or capture the mouse. Output changes only
+  when the terminal width settles after a resize, a layout is selected, or the
+  turn or saved notes change. `s` switches split and unified layouts. `[` and
+  `]` step between the session's turns. The agent's own files come first.
+  Old and new text sit side by side when the code area has 110 columns.
+  Syntax comes from the immutable before/after checkpoint blobs, parsed as
+  complete files to preserve multiline state. Highlighting is bounded and
+  optional. Terminal foreground and background queries derive soft addition
+  and removal surfaces. Changed words use a slightly stronger tint while
   retaining syntax colours. Unsupported terminals use native surfaces and word
-  underlines. Coloured gutters identify additions and removals.
-  Only on-screen code is painted. Tabs and wide characters use terminal columns,
-  and Left/Right pan long lines without changing source anchors. Mouse wheel scrolls
-  code; clicking a file or code line selects it. `n`/`p` jump between hunks. `v` marks
-  lines, `c` writes a note, and Tab selects the old or new side in a split view.
-  Notes wrap beside the side they annotate and participate in scroll geometry;
-  review text contains only source lines from the chosen side. The
-  notes pile up as drafts (kept in `~/.axel/reviews/`, so closing the pane loses
-  nothing) and `⏎` sends them as one message, a fenced `review` block per note with the
-  path, the line range, the side (`old` for removed lines) and the marked lines, then
-  the note: plain text, so every harness reads it. It goes into the live managed
-  session, else it summons the agent back onto the thread. `[` and `]` step between
-  the session's turns.
+  underlines. Tabs and wide characters use terminal columns.
+  `r` enters explicit line review on the alternate screen. Wide panes show a
+  directory-grouped file navigator and a pinned file header. Left/Right pan
+  long lines; clicking a file or line selects it. `n`/`p` jump between hunks.
+  `v` marks lines, `c` writes a note, and Tab chooses the old or new side.
+  `q` or Esc returns to native reading. With no edits, the printed diff stays
+  intact. Notes wrap on their source side and share geometry with code.
+  Drafts are kept in `~/.axel/reviews/`; Enter sends them as one message, a
+  fenced `review` block per note with its path, line range, side, source text,
+  and note. Delivery uses the live managed session, else summons the agent.
+  Enter, undo, restore, and turn navigation work in both modes. See
+  [ADR 0010](adr/0010-native-scrollback-for-diff-reading.md).
 - **Undo** (`u` in the pane, `axel thread undo`): the reverse of the turn's
   `before..after` patch, limited to its authored files (all of them when none is
   marked), applied to the working tree only, after a snapshot of the tree under
