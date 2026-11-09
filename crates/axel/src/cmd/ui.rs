@@ -271,6 +271,8 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
         focus_peer: focus_peer_ref,
         fit_prompt: fit_prompt_ref,
         manage_thread: Some(&manage_thread),
+        open_controls: None,
+        open_terminal: None,
     };
     match axel_tui::run(deps, initial)? {
         Outcome::Quit => {
@@ -495,8 +497,34 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     if let Some(compose) = ids.first() {
         settle_thread_row(rex, &me, compose, ids.get(1).map(String::as_str), size.map(|s| s.rows), width);
     }
+    stream_with_input(ctx, thread_id)
+}
+
+fn stream_with_input(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let owner_pk = ctx.owner()?.public().to_string();
-    axel_tui::run_stream(&ctx.store, &owner_pk, thread_id)
+    let redirect = |text: &str| -> Result<()> {
+        let rex = ctx.rex.as_ref().context("not inside Rex")?;
+        let view = rex.view()?;
+        let composer = composer_below(&view, &rex.env().block).context("no composer below this message pane")?;
+        // Paste into the owner's composer, never into an agent's terminal.
+        // In particular, a digit must not answer a pending approval.
+        rex.api_call("block.event", serde_json::json!({
+            "block_id": composer, "event": { "type": "paste", "payload": { "text": text } }
+        }))?;
+        rex.api_call("session.focus_block", serde_json::json!({ "block_id": composer }))?;
+        Ok(())
+    };
+    let redirect: Option<&dyn Fn(&str) -> Result<()>> = ctx.rex.as_ref().map(|_| &redirect as _);
+    axel_tui::run_stream(&ctx.store, &owner_pk, thread_id, redirect)
+}
+
+/// Resolve by layout, rather than picking another thread's composer by label.
+fn composer_below(view: &serde_json::Value, stream: &str) -> Option<String> {
+    let blocks = tiled_layer_of(view, stream)?.get("blocks")?.as_array()?;
+    blocks.iter().find_map(|block| {
+        let id = block.get("block_id")?.as_str()?;
+        (block.get("label")?.as_str()? == COMPOSE_LABEL && block_above(view, id).as_deref() == Some(stream)).then(|| id.to_string())
+    })
 }
 
 /// Dock `thread_id` into the window this floating launcher sits over, the
@@ -505,7 +533,7 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
 /// window, still running, and comes back when the composer closes.  When the
 /// shell is busy (or unknown), the thread docks as a column on the right.
 /// Then Axel's floating panes close, this one last (which ends this process).
-fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
+pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     let me = rex.env().block.clone();
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
@@ -539,6 +567,54 @@ fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
     name_window_after_thread(ctx, rex, thread_id);
     close_axel_layers(ctx, rex);
     Ok(())
+}
+
+/// Relaunch a thread's panes on the installed binary: hang up its composers
+/// (each undocks: the shell comes back, its stream and tokens panes close),
+/// then dock the thread again from this floating pane, into that shell when
+/// it is known.  Returns what was done; `Ok(false)` when the thread has no
+/// panes open here.  Docking closes Axel's floating panes, this one included.
+pub(super) fn relaunch_thread_panes(ctx: &Ctx, thread_id: &str) -> Result<bool> {
+    let out = std::process::Command::new("ps").args(["-eo", "pid,command"]).output().context("listing processes")?;
+    let needle = format!("axel thread compose {thread_id}");
+    let mut composers: Vec<i32> = Vec::new();
+    let mut origin: Option<String> = None;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        // Rex starts each pane through a login wrapper whose command line
+        // carries the environment: that's where the origin shell is named.
+        if line.contains("/usr/bin/login") {
+            if let Some(o) = line.split_whitespace().find_map(|w| w.strip_prefix(&format!("{ORIGIN_BLOCK_ENV}="))) {
+                origin = Some(o.to_string());
+            }
+            continue;
+        }
+        if let Some(pid) = line.split_whitespace().next().and_then(|p| p.parse::<i32>().ok()) {
+            composers.push(pid);
+        }
+    }
+    if composers.is_empty() {
+        return Ok(false);
+    }
+    for pid in &composers {
+        // SAFETY: SIGHUP to a pane of ours; its handler undocks and exits.
+        unsafe { libc::kill(*pid, libc::SIGHUP) };
+    }
+    let start = std::time::Instant::now();
+    // SAFETY: signal 0 only checks that the process exists.
+    while composers.iter().any(|pid| unsafe { libc::kill(*pid, 0) } == 0) && start.elapsed() < std::time::Duration::from_secs(4) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let Some(rex) = &ctx.rex else { return Ok(true) };
+    if let Some(o) = origin {
+        // SAFETY: single-threaded here; `reusable_origin` reads it right after.
+        unsafe { std::env::set_var(ORIGIN_BLOCK_ENV, o) };
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    dock_thread(ctx, rex, thread_id)?;
+    Ok(true)
 }
 
 /// The pane `axel` was typed in, when the thread can take its place: in the
@@ -660,11 +736,10 @@ pub fn run_stream(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
     // Its runs of tool calls are `axel-links://` links: make sure something opens them.
     super::links::ensure_installed();
-    let owner_pk = ctx.owner()?.public().to_string();
     if let Some(rex) = &ctx.rex {
         follow_window_label(&ctx, rex, thread_id);
     }
-    axel_tui::run_stream(&ctx.store, &owner_pk, thread_id)
+    stream_with_input(&ctx, thread_id)
 }
 
 /// Rename the thread when its window is renamed in Rex.  The window took the
@@ -733,7 +808,13 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |thread_id: &str, agent: &str, text: &str, files: &[std::path::PathBuf]| -> Result<String> { summon(&ctx, thread_id, agent, text, files) };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
-    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None };
+    let open_controls = |thread_id: &str| {
+        if let Some(rex) = &ctx.rex {
+            open_controls(rex, thread_id);
+        }
+    };
+    let open_terminal = |thread_id: &str| open_thread_terminal(&ctx, thread_id);
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: Some(&open_controls), open_terminal: Some(&open_terminal) };
     let stream = ctx.rex.as_ref().and_then(stream_block);
     // The tokens pane opened beside us, in the same row, if there is one.
     let usage = ctx.rex.as_ref().and_then(|rex| rex.view().ok().and_then(|v| block_beside(&v, &rex.env().block, TOKENS_LABEL)));
@@ -890,6 +971,32 @@ fn open_question(rex: &axel_rex::Rex, thread_id: &str, item_id: &str) {
     }
 }
 
+/// The thread controls, floating over the thread (Ctrl+D in the composer).
+const CONTROLS_BOUNDS: [f64; 4] = [0.22, 0.14, 0.56, 0.52];
+const CONTROLS_LABEL: &str = "thread";
+
+fn open_controls(rex: &axel_rex::Rex, thread_id: &str) {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+    let cmd = vec![exe, "thread".into(), "manage".into(), thread_id.to_string()];
+    if let Err(e) = rex.new_floating_terminal_with_focus(CONTROLS_LABEL, CONTROLS_BOUNDS, &cmd, None, &passthrough_env(), true) {
+        eprintln!("axel: could not open the thread controls: {e}");
+    }
+}
+
+/// The owner's shell, at the same project or worktree the thread works in.
+fn open_thread_terminal(ctx: &Ctx, thread_id: &str) -> Result<()> {
+    let rex = ctx.rex.as_ref().context("floating terminals need Rex")?;
+    let cwd = super::links::thread_dir(ctx, thread_id)
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)
+        .context("reading the thread's working directory")?;
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
+    let command = vec![shell, "-i".into()];
+    rex.new_floating_terminal_with_focus("terminal", DASHBOARD_BOUNDS, &command, Some(&cwd), &passthrough_env(), true)
+        .context("opening the thread's terminal")?;
+    Ok(())
+}
+
 /// `axel thread answer`: one question, alone; the floating layer closes with it.
 pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
@@ -897,7 +1004,7 @@ pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |_: &str, _: &str, _: &str, _: &[std::path::PathBuf]| -> Result<String> { anyhow::bail!("not from here") };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
-    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None };
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: None, open_terminal: None };
     let res = axel_tui::run_answer(deps, thread_id, item_id);
     close_own_layer(&ctx);
     res
@@ -1190,6 +1297,12 @@ fn revive(ctx: &Ctx, session: &axel_store::Session, text: &str, attachments: &[s
 
 /// Start another agent on a thread with `text` as its first message.
 pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, files: &[std::path::PathBuf]) -> Result<String> {
+    summon_with(ctx, thread_id, agent_name, text, files, false)
+}
+
+/// [`summon`], with `fresh` starting a new harness conversation instead of
+/// resuming the agent's last one on the thread (a reset).
+pub(crate) fn summon_with(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, files: &[std::path::PathBuf], fresh: bool) -> Result<String> {
     // `atlas@mini` runs it on that host, `atlas@local` here; plain `atlas`
     // wherever it runs by default.
     let (name, asked) = match agent_name.split_once('@') {
@@ -1201,8 +1314,9 @@ pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, f
         return super::host::launch_remote(ctx, &h.label, thread_id, &agent.name, text, files);
     }
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
-    // Back on a thread it worked on: it picks up its own conversation there.
-    let resume = previous_conversation(ctx, &thread.id, &agent.pubkey);
+    // Back on a thread it worked on: it picks up its own conversation there,
+    // unless a reset asked for a fresh one.
+    let resume = if fresh { None } else { previous_conversation(ctx, &thread.id, &agent.pubkey) };
     let req = axel_tui::LaunchRequest {
         title: thread.title.clone(),
         projects: vec![],
@@ -1228,11 +1342,15 @@ pub(crate) fn summon(ctx: &Ctx, thread_id: &str, agent_name: &str, text: &str, f
 /// The harness conversation of the agent's last session on the thread, to
 /// resume when it comes back to the thread.
 fn previous_conversation(ctx: &Ctx, thread_id: &str, agent: &str) -> Option<String> {
-    ctx.store
+    let sessions = ctx
+        .store
         .list_sessions(axel_store::SessionFilter { thread_id: Some(thread_id.to_string()), agent_pubkey: Some(agent.to_string()), ..Default::default() })
-        .ok()?
-        .into_iter()
-        .find_map(|s| s.harness_session_id)
+        .ok()?;
+    // After a hard reset the thread starts from scratch: nothing to resume.
+    if sessions.first().is_some_and(|s| s.ended_reason.as_deref() == Some(super::manage::HARD_RESET)) {
+        return None;
+    }
+    sessions.into_iter().find_map(|s| s.harness_session_id)
 }
 
 /// Full id, unique id prefix, or case-insensitive title substring.
@@ -1409,6 +1527,20 @@ mod dock_tests {
     fn a_docked_composer_finds_its_stream() {
         assert_eq!(block_above(&view(), "block:compose").as_deref(), Some("block:stream"));
         assert_eq!(block_above(&view(), "block:shell"), None, "side by side is not above");
+    }
+
+    #[test]
+    fn typing_in_a_stream_targets_only_the_composer_below_it() {
+        assert_eq!(composer_below(&view(), "block:stream").as_deref(), Some("block:compose"));
+        assert_eq!(composer_below(&view(), "block:shell"), None);
+        assert_eq!(composer_below(&view(), "block:x"), None);
+        let row = json!({"windows": [{"layers": [{"kind": "tiled",
+            "blocks": [{"block_id": "S", "label": "thread"}, {"block_id": "C", "label": "compose"}, {"block_id": "U", "label": "tokens"}],
+            "layout": {"split": {"direction": "vertical", "before": {"block_id": "S"},
+                "after": {"split": {"direction": "horizontal", "before": {"block_id": "C"}, "after": {"block_id": "U"}}}}}
+        }]}]});
+        assert_eq!(composer_below(&row, "S").as_deref(), Some("C"));
+        assert_eq!(composer_below(&row, "U"), None);
     }
 }
 

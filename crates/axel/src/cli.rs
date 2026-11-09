@@ -344,6 +344,10 @@ pub enum ThreadCommand {
         #[arg(long, hide = true)]
         pane: bool,
     },
+    /// The thread controls: its sessions and spend, and reset, move, settle,
+    /// archive, stop, rename (Ctrl+D in the composer opens the same).
+    #[command(alias = "controls")]
+    Manage { thread: String },
     /// Take a turn's change back out of the working tree, keeping work done
     /// since (a snapshot is kept first). Without --turn, the latest turn that
     /// changed a file.

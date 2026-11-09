@@ -503,6 +503,8 @@ impl<'a> App<'a> {
 
     fn on_thread(&mut self, action: ThreadAction) -> Option<Outcome> {
         match action {
+            // The thread controls are a floating pane of the composer; inline, nothing opens.
+            ThreadAction::Manage | ThreadAction::OpenTerminal => None,
             ThreadAction::None => None,
             ThreadAction::Quit => Some(Outcome::Quit),
             ThreadAction::Back => {

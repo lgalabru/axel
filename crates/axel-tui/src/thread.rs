@@ -137,6 +137,10 @@ pub enum ThreadAction {
     OpenLog(String),
     Send { session_id: String, cmd: SendCommand },
     Summon { thread_id: String, agent: String, text: String, attachments: Vec<PathBuf> },
+    /// Ctrl+D: the thread controls (reset, move, settle, archive, stop, rename).
+    Manage,
+    /// Ctrl+T: a floating shell in the thread's workspace.
+    OpenTerminal,
 }
 
 /// Where composer text goes.
@@ -391,6 +395,8 @@ impl ThreadView {
             }
         }
         match key.code {
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => ThreadAction::Manage,
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => ThreadAction::OpenTerminal,
             // ^L: show or minimize the session log of the agent you talk to.
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => match self.mode_session() {
                 Some(s) => ThreadAction::OpenLog(s.id.clone()),

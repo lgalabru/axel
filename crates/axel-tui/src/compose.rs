@@ -81,6 +81,18 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                                 v.on_reply(reply.map(|_| crate::thread::SendReply::Ok));
                                 last = Instant::now() - REFRESH;
                             }
+                            ThreadAction::Manage => {
+                                if let Some(open) = deps.open_controls {
+                                    open(thread_id);
+                                }
+                            }
+                            ThreadAction::OpenTerminal => {
+                                if let Some(open) = deps.open_terminal
+                                    && let Err(e) = open(thread_id)
+                                {
+                                    v.on_reply(Err(format!("could not open terminal: {e:#}")));
+                                }
+                            }
                         }
                     }
                     Event::Paste(text) => v.handle_paste(&text),
@@ -344,6 +356,33 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn panel_shortcuts_keep_the_draft_and_do_not_answer_pending_questions() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        for draft in ["", "unfinished message"] {
+            v.composer = crate::input::TextInput::with_text(draft);
+            let pending = v.pending_choice();
+            assert_eq!(v.handle_compose_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)), ThreadAction::Manage);
+            assert_eq!(v.handle_compose_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)), ThreadAction::OpenTerminal);
+            assert_eq!(v.composer.text(), draft);
+            assert_eq!(v.pending_choice(), pending);
+        }
+    }
+
+    #[test]
+    fn redirected_text_preserves_the_draft_without_answering_an_approval() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        v.compose_only = true;
+        v.composer.paste("draft: ");
+        let pending = v.pending_choice();
+        assert!(pending.is_some());
+        v.handle_paste("1 hello 🦀\nsecond line");
+        assert_eq!(v.composer.text(), "draft: 1 hello 🦀\nsecond line");
+        assert_eq!(v.pending_choice(), pending);
+        assert_eq!(v.focus, crate::thread::Focus::Composer);
     }
 
     fn text(term: &Terminal<TestBackend>) -> String {

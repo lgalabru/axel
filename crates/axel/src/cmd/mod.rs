@@ -10,6 +10,7 @@ mod host;
 mod inbox;
 mod launch;
 mod log;
+mod manage;
 mod policy;
 mod reconcile;
 mod session;

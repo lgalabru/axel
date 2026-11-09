@@ -252,6 +252,10 @@ pub struct Deps<'a> { pub store: &'a axel_store::Store, pub keystore: &'a axel_i
 // model rows (AgentRow, DashAgentRow, ThreadRow, StatusRow, NewAgentSpec) carry axel_store's Harness / RuntimeMode / AgentColor / StatusState, never their strings;
 // theme::agent_color(Option<AgentColor>), theme::state_color(StatusState) and model::state_glyph(StatusState) match on the enums.
 pub fn run(deps: Deps, initial: Screen) -> anyhow::Result<Outcome>;   // owns the terminal (raw mode + alt screen), restores on exit/panic
+pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&dyn Fn(&str) -> anyhow::Result<()>>) -> anyhow::Result<()>;
+// With redirect_input, the stream reads plain typing and bracketed paste without
+// echo or an alternate screen. The callback inserts it into the matching composer
+// and focuses that pane. Navigation keys stay inert; Ctrl+C exits the stream.
 // Dashboard screen (default): bashtop-style widgets — agents table (state glyph, name, harness, project, environment, tokens, sparkline from usage_samples, last event age), environments, tokens (1h series + totals + est cost), inbox panel. Enter on an agent → Outcome::FocusThread(thread_id) for its latest running thread; n → Launcher; i → Inbox; q → Quit. Refresh every 1s.
 ```
 The TUI creates new agents itself: `Keypair::generate()` → `keystore.put_agent` → `attest(&keystore.owner()?, &pk, "")` → `store.insert_agent`.
@@ -344,6 +348,9 @@ pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String,
 ## axel-tui additions (thread view)
 
 ```rust
+// Deps gains: pub open_terminal: Option<&'a OpenThreadFn<'a>>;
+// ThreadAction gains: OpenTerminal; Ctrl+T opens a floating shell in the thread's
+// workspace. Ctrl+D returns Manage and opens the thread controls.
 pub enum ItemBody { …, Changes { files: usize, authored: usize, added: i64, removed: i64, between_turns: bool } }   // a TurnEnd that changed files
 pub enum Row { …, Changes(usize) }   // the change line under a turn: "Δ 3 files  +42 −7"
 pub struct util::DiffLink { pub thread: String, pub session_id: String, pub turn: i64, pub rex_session: String, pub server: Option<String> }   // axel-links://diff?…

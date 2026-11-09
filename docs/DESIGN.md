@@ -609,6 +609,13 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   title, and the stream pane watches `rex events` for `window_label_changed`: a name typed
   over the window in Rex becomes the thread's title (Rex's placeholder and the title as
   Axel shortens it for the tab don't count, so Axel's own labelling renames nothing).
+- **Composer panels**: Ctrl+D opens the thread controls. Ctrl+T opens a focused
+  floating shell in the thread’s project directory, using its worktree when present.
+  A thread without a local project uses the composer’s directory.
+- **Typing in the message pane**: plain typing or pasted text goes into the composer
+  directly below that stream, which takes focus. Existing draft text is preserved.
+  The transfer is a paste, so digits cannot answer a waiting approval and newlines
+  cannot send a message. Scrolling and selection stay native to the terminal.
 - **Agent panes**: a managed session's host pane (`<agent> · <thread> · log`) starts
   minimized: a detached Rex block, running but in no window. ^L in the composer shows the
   log of the agent you're talking to beside the conversation (`session.move_block`), and

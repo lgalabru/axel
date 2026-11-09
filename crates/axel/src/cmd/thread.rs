@@ -69,6 +69,10 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
             drop(ctx);
             super::diff::run(&thread, session.as_deref(), turn, stat, pane)
         }
+        ThreadCommand::Manage { thread } => {
+            drop(ctx);
+            super::manage::run(&thread)
+        }
         ThreadCommand::Undo { thread, session, turn, restore, yes } => {
             drop(ctx);
             super::undo::run(&thread, session.as_deref(), turn, restore, yes)
@@ -209,6 +213,11 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
 /// End every live session on a thread (closing their panes; remote ones
 /// through their host).  Returns how many ended.
 pub fn stop_thread(ctx: &Ctx, thread_id: &str) -> Result<usize> {
+    stop_thread_with(ctx, thread_id, "stopped by owner")
+}
+
+/// [`stop_thread`], recording `reason` on each session it ends.
+pub fn stop_thread_with(ctx: &Ctx, thread_id: &str, reason: &str) -> Result<usize> {
     let owner = ctx.owner()?;
     let live = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), states: Some(vec![axel_store::SessionState::Starting, axel_store::SessionState::Running, axel_store::SessionState::Blocked, axel_store::SessionState::Idle]), ..Default::default() })?;
     let mut hosts = Vec::new();
@@ -218,7 +227,7 @@ pub fn stop_thread(ctx: &Ctx, thread_id: &str) -> Result<usize> {
             if let Err(e) = super::host::stop_remote(ctx, s) {
                 eprintln!("{}: couldn't reach it to stop the session ({e:#}); it ends there at the next sync", h.label);
             }
-            ctx.store.end_session(&owner, &s.id, Some("stopped by owner"))?;
+            ctx.store.end_session(&owner, &s.id, Some(reason))?;
             hosts.push(h);
             continue;
         }
@@ -226,7 +235,7 @@ pub fn stop_thread(ctx: &Ctx, thread_id: &str) -> Result<usize> {
         if let Some(sock) = &s.socket_path {
             let _ = axel_acp::socket::send(sock, &axel_acp::socket::Command::Stop);
         }
-        ctx.store.end_session(&owner, &s.id, Some("stopped by owner"))?;
+        ctx.store.end_session(&owner, &s.id, Some(reason))?;
         if let (Some(rex), Some(block)) = (&ctx.rex, s.rex_block_id.as_deref()) {
             rex.api_call("block.close", serde_json::json!({"block_id": block})).ok();
         }
