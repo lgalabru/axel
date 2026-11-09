@@ -385,6 +385,8 @@ pub mod diff {   // the diff pane (pure state + a loop), run by `axel thread dif
 ```
 CLI: `axel thread diff THREAD [--session S] [--turn N] [--stat] [--pane]` (the pane flag is what a DiffLink click runs);
 `axel thread undo THREAD [--session S] [--turn N] [--restore] [-y]`; `axel gc`.
+`axel thread refresh THREAD` relaunches that thread's open Rex views on the
+installed binary without ending or restarting any agent session.
 
 ## axel (bin) additions: checkpoints
 
@@ -409,4 +411,4 @@ pub enum Outcome { Launch(LaunchRequest), FocusSession(String), OpenLog(String /
 // Deps gains: pub send: &'a dyn Fn(&str /*session_id*/, axel_acp::socket::Command) -> anyhow::Result<axel_acp::socket::Reply>
 //            pub summon: &'a dyn Fn(&str /*thread_id*/, &str /*agent name*/, &str /*text*/) -> anyhow::Result<String /*session_id*/>
 ```
-Thread view: header (title · agents with state glyphs · env · tokens · $), timeline from `thread_items` + `turns` (turns used when a session has no local items, i.e. remote), folds for consecutive ToolCall items between prose, Space/→ expands a fold, Shift-Space folds all, `l` → `Outcome::OpenLog(session_id of item under cursor or latest live)`, pending Permission/Question rendered inline with options; ↑/↓ moves, Enter on a pending item picks the highlighted option → `send(Answer)`; composer at the bottom: Enter → `send(Prompt)` to the thread's latest live managed session, or `summon()` when text starts with `@name` (or when no live session exists: summon the thread's last agent); Esc → Dashboard. Dashboard: Enter on a thread → `Screen::Thread`. Poll every 300 ms while a session is live.
+Thread view: header (title · agents with state glyphs · env · tokens · $), timeline from `thread_items` + `turns` (turns used only when a session has no local items anywhere, not merely outside the latest 500-item window), folds for consecutive ToolCall items between prose, Space/→ expands a fold, Shift-Space folds all, `l` → `Outcome::OpenLog(session_id of item under cursor or latest live)`, pending Permission/Question rendered inline with options; ↑/↓ moves, Enter on a pending item picks the highlighted option → `send(Answer)`; composer at the bottom: Enter → `send(Prompt)` to the thread's latest live managed session, or `summon()` when text starts with `@name` (or when no live session exists: summon the thread's last agent); Esc → Dashboard. Dashboard: Enter on a thread → `Screen::Thread`. Poll every 300 ms while a session is live.

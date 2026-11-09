@@ -73,6 +73,13 @@ pub fn run(cmd: ThreadCommand) -> Result<()> {
             drop(ctx);
             super::manage::run(&thread)
         }
+        ThreadCommand::Refresh { thread } => {
+            let t = resolve(&ctx, &thread)?;
+            if !super::ui::relaunch_thread_panes(&ctx, &t.id)? {
+                bail!("this thread has no open views here");
+            }
+            Ok(())
+        }
         ThreadCommand::Undo { thread, session, turn, restore, yes } => {
             drop(ctx);
             super::undo::run(&thread, session.as_deref(), turn, restore, yes)

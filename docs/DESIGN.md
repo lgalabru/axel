@@ -624,13 +624,17 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
 - **Composer panels**: Ctrl+D opens the thread controls. `t` selects a live agent
   to stop on this thread; `x` stops all live sessions. Stopping one agent leaves
   its configuration, history, other threads, and other agents intact.
-  Ctrl+T opens a focused
+  `axel thread refresh THREAD` reloads the thread's Rex views on the installed
+  binary while its agents keep running. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
 - **Terminal colours**: normal text and surfaces use the terminal's own foreground
   and background. Selections reverse those colours, and code explicitly resets
   its background and uses the terminal's blue. Approval cards do not force a dark
   surface. The same rendering works with light and dark Rex themes.
+- **Conversation history**: the latest 500 local items form the visible window.
+  Shared turn summaries fill in sessions that have no local items anywhere.
+  Local sessions that age out of the window do not reappear as summary rows.
 - **Composer arrows**: Up and Down move through the wrapped rows on screen,
   keeping the intended column across shorter lines. This also applies to recalled
   prompts. History changes only beyond the first or last screen row.

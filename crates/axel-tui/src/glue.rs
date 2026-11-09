@@ -662,9 +662,21 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         });
     }
 
-    // Turn summaries stand in for sessions without local items (remote sessions).
+    // The visible window is bounded. Falling outside it does not make a local
+    // session remote: otherwise its summary gains a new row identity and the
+    // append-only stream prints old conversation beneath today's messages.
+    let mut has_local_items: std::collections::HashMap<String, bool> = sessions_with_items.into_iter().map(|id| (id, true)).collect();
+    // Turn summaries stand in only when the session has no local items at all.
     for t in store.turns(thread_id).map_err(se)? {
-        if sessions_with_items.contains(&t.session_id) {
+        let local = match has_local_items.get(&t.session_id) {
+            Some(found) => *found,
+            None => {
+                let found = !store.items(&t.session_id, 0, 1).map_err(se)?.is_empty();
+                has_local_items.insert(t.session_id.clone(), found);
+                found
+            }
+        };
+        if local {
             continue;
         }
         let agent = by_id.get(&t.session_id).map(|s| names.lookup(&s.agent_pubkey)).or_else(|| Some(names.lookup(&t.from_pubkey)));
@@ -829,6 +841,40 @@ fn add(to: &mut axel_store::UsageTotals, u: &axel_store::UsageTotals) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_local_session_falling_outside_the_window_does_not_reappear_as_a_summary() {
+        use axel_store::{Harness, Keypair, NewItem, NewSession, RuntimeMode, SessionRuntime, TurnSummary};
+        let store = Store::open_memory().unwrap();
+        let owner = Keypair::generate();
+        let pk = owner.public().to_base58();
+        let thread = store.create_thread(&owner, "Long thread", "Long thread", None).unwrap();
+        let env = store.local_environment().unwrap();
+        let start = || store.start_session(&owner, &NewSession {
+            thread_id: thread.id.clone(), agent_pubkey: pk.clone(),
+            environment_id: env.id.clone(), environment_label: env.label.clone(),
+            project_repo_key: None, harness: Harness::Codex, runtime_mode: RuntimeMode::default(),
+            resumed_from: None, runtime: SessionRuntime::Managed,
+        }).unwrap();
+        let old = start();
+        let current = start();
+        let remote = start();
+        let item = |session: &str, text: &str| store.push_item(&NewItem {
+            session_id: session.into(), thread_id: thread.id.clone(), turn: 1,
+            kind: axel_store::ItemKind::AssistantMessage, status: Some(axel_store::ItemStatus::Completed),
+            ref_id: None, content: json!({"text": text}),
+        }).unwrap();
+        item(&old.id, "Old introduction");
+        store.record_turn(&owner, &old.id, &TurnSummary { ordinal: 1, user_text: "Introduce yourself".into(), assistant_text: "Old introduction".into(), ..Default::default() }).unwrap();
+        store.record_turn(&owner, &remote.id, &TurnSummary { ordinal: 1, user_text: "Remote prompt".into(), assistant_text: "Remote reply".into(), ..Default::default() }).unwrap();
+        for _ in 0..499 { item(&current.id, "Current work"); }
+        let before = load_thread(&store, &pk, &thread.id, 0).unwrap();
+        assert!(before.items.iter().any(|i| i.session_id == old.id));
+        item(&current.id, "Cross the window boundary");
+        let after = load_thread(&store, &pk, &thread.id, 0).unwrap();
+        assert!(!after.items.iter().any(|i| i.session_id == old.id), "old local history must not acquire new summary rows");
+        assert!(after.items.iter().any(|i| i.session_id == remote.id && i.body == ItemBody::Text("Remote reply".into())), "sessions with no local items still need their shared turn summaries");
+    }
 
     #[test]
     fn decode_tool_call_permission_and_text() {

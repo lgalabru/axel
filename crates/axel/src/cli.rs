@@ -314,6 +314,8 @@ pub enum ThreadCommand {
     },
     /// Open a thread's view in this terminal.
     Open { thread: String },
+    /// Reload the thread's open Rex views on the installed binary; agents keep running.
+    Refresh { thread: String },
     /// Open a thread as a Rex window of two panes: the conversation streaming
     /// as plain terminal output (native scrollback) above, the composer below.
     Split { thread: String },
