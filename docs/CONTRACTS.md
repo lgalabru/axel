@@ -358,7 +358,7 @@ pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String,
 // ThreadAction gains: OpenTerminal; Ctrl+T opens a floating shell in the thread's
 // workspace. Ctrl+D returns Manage and opens the thread controls.
 pub enum ItemBody { …, Changes { files: usize, authored: usize, added: i64, removed: i64, between_turns: bool } }   // a TurnEnd that changed files
-pub enum Row { …, Changes(usize) }   // the change line under a turn: "Δ 3 files  +42 −7"
+pub enum Row { …, Changes(usize) }   // the change line under a turn: "↗ 3 files  +42 −7"
 pub struct util::DiffLink { pub thread: String, pub session_id: String, pub turn: i64, pub rex_session: String, pub server: Option<String> }   // axel-links://diff?…
 pub mod diff {   // the diff pane (pure state + a loop), run by `axel thread diff --pane`
     // Files form one continuous stream. `file` and `cursor` address source;

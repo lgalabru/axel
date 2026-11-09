@@ -676,7 +676,7 @@ outside a repository, the turn simply has no checkpoint.
   the file list (status, lines added and removed, `authored` when this session's edit
   tools touched the file) and `between_turns` when the tree at the start didn't match the
   previous turn's end. The diff itself stays in the repository that ran the turn.
-- **Seeing it**: a dim change line under the turn in the thread view, `Δ 3 files  +42 −7`,
+- **Seeing it**: a dim change line under the turn in the thread view, `↗ 3 files  +42 −7`,
   or `2 files (+1 not this agent)` when other hands changed files during the turn. In Rex
   it's a link that opens the turn's diff in a floating pane; `axel thread diff THREAD
   [--session S] [--turn N] [--stat]` prints the same.

@@ -1338,7 +1338,7 @@ mod tests {
         assert_eq!(rows.last().unwrap().key(&v.data.items), "e1");
         let line = crate::view::thread_view::row_lines(&v, &Row::Changes(8), 80, false);
         let text: String = line[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "  Δ 2 files (+1 not this agent)  +42 −7");
+        assert_eq!(text, "  ↗ 2 files (+1 not this agent)  +42 −7");
     }
 
     #[test]

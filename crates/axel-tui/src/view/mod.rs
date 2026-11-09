@@ -556,11 +556,11 @@ mod tests {
             // leading "\n\n" of the assistant chunk is trimmed: the text starts right after the label
             assert!(t.contains("Looking at the auth"), "{w}x{h}\n{t}");
             let after = t.lines().position(|l| l.contains("Looking at the auth")).unwrap() + 1;
-            assert!(t.lines().nth(after).unwrap().contains("▸ Read "), "no trailing blank lines {w}x{h}\n{t}");
+            assert!(t.lines().nth(after).unwrap().contains("↗ Read "), "no trailing blank lines {w}x{h}\n{t}");
             // fold line: what the calls did, then how many and how long
             assert!(t.contains("· 5 calls · 3.2s"), "{w}x{h}\n{t}");
             if w >= 100 {
-                assert!(t.contains("▸ Read auth.rs, login.rs, search for “session_token”, edit login.rs, run tests · 5 calls · 3.2s"), "{w}x{h}\n{t}");
+                assert!(t.contains("↗ Read auth.rs, login.rs, search for “session_token”, edit login.rs, run tests · 5 calls · 3.2s"), "{w}x{h}\n{t}");
             }
             assert!(!t.contains("Read src/auth.rs"), "collapsed by default {w}x{h}\n{t}");
             // pending permission card with options, first highlighted

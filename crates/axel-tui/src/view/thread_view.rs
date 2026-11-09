@@ -412,7 +412,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
             if *between_turns {
                 what.push_str(" incl. changes between turns");
             }
-            let mut spans = vec![Span::styled("  Δ ", marker), Span::styled(what, dim), Span::styled("  ", dim)];
+            let mut spans = vec![Span::styled("  ↗ ", marker), Span::styled(what, dim), Span::styled("  ", dim)];
             spans.push(Span::styled(format!("+{added}"), if selected { base.fg(theme::OK) } else { Style::default().fg(theme::OK) }));
             spans.push(Span::styled(" ", dim));
             spans.push(Span::styled(format!("−{removed}"), if selected { base.fg(theme::DANGER) } else { Style::default().fg(theme::DANGER) }));
@@ -457,7 +457,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
             let room = width.saturating_sub(2 + tail.chars().count()).max(12);
             let what = fold_summary(&tools, room);
             vec![Line::from(vec![
-                Span::styled("▸ ", marker),
+                Span::styled("↗ ", marker),
                 Span::styled(ellipsize(&what, room), base),
                 Span::styled(ellipsize(&tail, width.saturating_sub(2 + what.chars().count().min(room))), dim),
             ])]
