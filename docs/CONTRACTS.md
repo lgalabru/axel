@@ -408,6 +408,14 @@ The composer reserves one extra row for it, leaving drafts and status intact.
 
 ## axel (bin) additions: checkpoints
 
+`theme::TerminalColors { foreground: (u8,u8,u8), background: (u8,u8,u8) }`
+and `theme::terminal_colors() -> Option<TerminalColors>` expose one cached,
+150ms-bounded terminal palette query. Call before crossterm starts reading input.
+Unsupported terminals return `None`; native tool-detail bands then reset to the
+terminal foreground/background rather than assuming a dark surface. Supported
+terminals derive subtle bands and inline added/removed backgrounds from their
+actual background, for both light and dark themes.
+
 Usage reconciliation: `NativeUsage { id: String, at: i64, delta: UsageDelta }`.
 `Store::replace_native_usage(session_id, &[NativeUsage])` atomically replaces a
 local, rebuildable native-log cache. `effective_usage_log` substitutes its token

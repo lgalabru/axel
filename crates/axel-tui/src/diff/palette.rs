@@ -41,10 +41,8 @@ impl Palette {
     }
 
     fn query() -> Self {
-        let mut options = terminal_colorsaurus::QueryOptions::default();
-        options.timeout = std::time::Duration::from_millis(150);
-        terminal_colorsaurus::color_palette(options).map(|p| {
-            Self::from_colors(p.foreground.scale_to_8bit(), p.background.scale_to_8bit())
+        crate::theme::terminal_colors().map(|p| {
+            Self::from_colors(p.foreground, p.background)
         }).unwrap_or_default()
     }
 

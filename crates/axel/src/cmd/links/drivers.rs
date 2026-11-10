@@ -3,7 +3,7 @@
 //! terminal output reads (cargo's diagnostics and test results, git's diffs,
 //! log and status, grep's matches), with a one-line summary for the header.
 
-use super::{ADDED_BG, Cell, Lang, Link, Linker, REMOVED_BG, colour_lines, emit_linked, grep_view, parse_grep_line, GrepLine, MAX_LINES};
+use super::{change_bg, Change, Cell, Lang, Link, Linker, colour_lines, emit_linked, grep_view, parse_grep_line, GrepLine, MAX_LINES};
 
 /// The program whose output a command shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,7 +341,9 @@ fn cargo_line(l: &str, level: &mut Level, links: &Linker, line_links: &mut Vec<L
 fn git_diff_view(output: &str, width: usize, links: &Linker) -> String {
     let mut lines: Vec<Vec<Cell>> = Vec::new();
     let mut spans: Vec<Vec<Link>> = Vec::new();
-    let mut bgs: Vec<Option<&'static str>> = Vec::new();
+    let removed_bg = change_bg(Change::Removed);
+    let added_bg = change_bg(Change::Added);
+    let mut bgs: Vec<Option<&str>> = Vec::new();
     let mut file: Option<String> = None;
     let mut new_line: Option<usize> = None;
     let paint = |s: &str, c: Option<&'static str>| -> Vec<Cell> { s.chars().map(|ch| (ch, c)).collect() };
@@ -383,11 +385,11 @@ fn git_diff_view(output: &str, width: usize, links: &Linker) -> String {
             new_line = new_line.map(|n| n + 1);
             let mut cells = paint("+", Some("32"));
             cells.extend(code(rest, &file));
-            (cells, Some(ADDED_BG))
+            (cells, Some(added_bg.as_str()))
         } else if let Some(rest) = l.strip_prefix('-') {
             let mut cells = paint("-", Some("31"));
             cells.extend(code(rest, &file));
-            (cells, Some(REMOVED_BG))
+            (cells, Some(removed_bg.as_str()))
         } else if let Some(rest) = l.strip_prefix(' ') {
             new_line = new_line.map(|n| n + 1);
             let mut cells = paint(" ", None);
@@ -577,7 +579,7 @@ mod tests {
         let out = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,2 +12,3 @@ fn main() {\n     let a = 1;\n-    let b = 2;\n+    let b = 3;";
         let view = git_diff_view(out, 80, &links);
         assert_eq!(plain(&view).lines().map(str::trim_end).collect::<Vec<_>>()[5], "-    let b = 2;");
-        assert!(view.contains(REMOVED_BG) && view.contains(ADDED_BG));
+        assert!(view.contains(&change_bg(Change::Removed)) && view.contains(&change_bg(Change::Added)));
         let file = url_path(&dir.path().join("a.rs"));
         assert!(view.contains(&format!("zed://file{file}:12")), "the hunk opens at its first new line");
         assert!(view.contains(&format!("zed://file{file}\x1b\\")), "the +++ path opens the file");

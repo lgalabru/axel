@@ -659,7 +659,10 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
 - **Terminal colours**: normal text and surfaces use the terminal's own foreground
   and background. Selections reverse those colours, and code explicitly resets
   its background and uses the terminal's blue. Approval cards do not force a dark
-  surface. The same rendering works with light and dark Rex themes.
+  surface. Tool-detail bands and their inline edit diffs derive subtle backgrounds
+  from the terminal palette, using native defaults when the bounded probe fails.
+  Tools and diffs share a cached probe, run before terminal event reading begins.
+  The same rendering works with light and dark Rex themes.
 - **Conversation history**: the latest 500 local items form the visible window.
   Shared turn summaries fill in sessions that have no local items anywhere.
   Local sessions that age out of the window do not reappear as summary rows.

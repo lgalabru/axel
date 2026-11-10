@@ -198,6 +198,8 @@ fn agent_name(ctx: &super::Ctx, session_id: &str) -> Option<String> {
 /// for, in full, as plain terminal output (scroll it natively); then a key
 /// closes the floating pane.
 pub fn show_tools(thread_id: &str, fold: &str) -> Result<()> {
+    // Probe before settled_width starts crossterm's event reader.
+    let _ = axel_tui::theme::terminal_colors();
     let ctx = super::Ctx::open()?;
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| format!("no thread {thread_id}"))?;
     let items = ctx.store.thread_items(&thread.id, 5_000)?;
@@ -529,7 +531,7 @@ fn without_harness_notes(output: &str) -> String {
 const COPY_LABEL: &str = "⧉ copy";
 const COPY_STYLE: &str = "\x1b[34m";
 
-/// Which part of a call a band is: each its own shade of slate.
+/// Which part of a call a band is: each its own subtle terminal-derived shade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Band {
     /// What was called, and how it went.
@@ -541,15 +543,17 @@ enum Band {
 }
 
 impl Band {
-    /// Its background, as SGR: slate, lightest for the header, darkest
-    /// (nearly the black a command used to sit on) for the body.
-    fn bg(self) -> &'static str {
-        match self {
-            Band::Header => "48;2;30;41;59",
-            Band::Body => "48;2;2;6;23",
-            Band::Result => "48;2;17;24;39",
-        }
+    /// Subtle surfaces derived from the terminal, or its native background.
+    fn bg(self, colors: Option<axel_tui::theme::TerminalColors>) -> String {
+        let Some(colors) = colors else { return "49".into() };
+        let amount = match self { Self::Header => 0.08, Self::Body => 0.0, Self::Result => 0.04 };
+        background(colors.background, colors.foreground, amount)
     }
+}
+
+fn background(base: (u8,u8,u8), tint: (u8,u8,u8), amount: f32) -> String {
+    let mix = |a: u8,b: u8| (a as f32 + (b as f32-a as f32)*amount).round() as u8;
+    format!("48;2;{};{};{}",mix(base.0,tint.0),mix(base.1,tint.1),mix(base.2,tint.2))
 }
 
 /// One band of a call: its rendered lines.
@@ -566,11 +570,15 @@ const BAND_PAD: usize = 2;
 /// bands touching. Every reset in a line puts the band's shade back, so
 /// colours inside it (a diff's green and red) sit on it.
 fn frame(sections: &[Section], width: usize) -> String {
+    frame_with_colors(sections, width, axel_tui::theme::terminal_colors())
+}
+
+fn frame_with_colors(sections: &[Section], width: usize, colors: Option<axel_tui::theme::TerminalColors>) -> String {
     let room = width.saturating_sub(2 * BAND_PAD);
     let pad = " ".repeat(BAND_PAD);
     let mut out = String::new();
     for section in sections {
-        let bg = format!("\x1b[{}m", section.band.bg());
+        let bg = format!("\x1b[39;{}m", section.band.bg(colors));
         let blank = format!("{bg}{}{RESET}\r\n", " ".repeat(width));
         out.push_str(&blank);
         for line in section.text.trim_end_matches(['\r', '\n']).split("\r\n") {
@@ -1185,10 +1193,21 @@ enum Change {
     Added,
 }
 
-/// Background of a removed line (a dark red) and of an added one (a dark
-/// green), as GitHub's dark theme shows a diff.
-const REMOVED_BG: &str = "48;2;63;22;27";
-const ADDED_BG: &str = "48;2;18;54;33";
+/// Added and removed surfaces use the same terminal background as the bands.
+fn change_bg(change: Change) -> String {
+    change_bg_with_colors(change, axel_tui::theme::terminal_colors())
+}
+
+fn change_bg_with_colors(change: Change, colors: Option<axel_tui::theme::TerminalColors>) -> String {
+    let Some(colors) = colors else { return "49".into() };
+    let light = u32::from(colors.background.0)*299 + u32::from(colors.background.1)*587 + u32::from(colors.background.2)*114 > 150_000;
+    let tint = match (change,light) {
+        (Change::Added,true) => (26,127,55), (Change::Added,false) => (86,190,112),
+        (Change::Removed,true) => (207,34,46), (Change::Removed,false) => (235,109,112),
+        _ => return "49".into(),
+    };
+    background(colors.background,tint,0.10)
+}
 
 /// `old` → `new` line by line: what stayed, what went, what came, in order
 /// (a longest-common-subsequence diff). Each line comes with its index in
@@ -1225,18 +1244,20 @@ fn diff_lines(old: &[&str], new: &[&str]) -> Vec<(Change, usize)> {
 }
 
 /// An edit as a diff: unchanged lines once, as context; removed lines on a
-/// dark red background, added ones on a dark green, across the pane; each
+/// terminal-derived red background, added ones on a green, across the pane; each
 /// side highlighted in its language.
 fn diff_view(old: &str, new: &str, lang: Lang, width: usize) -> String {
     let (old_lines, new_lines): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
     let (old_cells, new_cells) = (colour_lines(old, lang), colour_lines(new, lang));
     let room = width.saturating_sub(2).max(10);
     let mut out = String::new();
+    let removed_bg = change_bg(Change::Removed);
+    let added_bg = change_bg(Change::Added);
     for (change, k) in diff_lines(&old_lines, &new_lines) {
         let (cells, mark, bg) = match change {
             Change::Same => (&old_cells[k], ("  ", None), None),
-            Change::Removed => (&old_cells[k], ("- ", Some("31")), Some(REMOVED_BG)),
-            Change::Added => (&new_cells[k], ("+ ", Some("32")), Some(ADDED_BG)),
+            Change::Removed => (&old_cells[k], ("- ", Some("31")), Some(removed_bg.as_str())),
+            Change::Added => (&new_cells[k], ("+ ", Some("32")), Some(added_bg.as_str())),
         };
         for (n, chunk) in word_chunks(cells, room).into_iter().enumerate() {
             out.push_str(INDENT);
@@ -1747,6 +1768,33 @@ mod tests {
     }
 
     #[test]
+    fn tool_surfaces_follow_light_dark_and_unknown_terminal_palettes() {
+        use axel_tui::theme::TerminalColors;
+        let sections=[Section {text:format!("value{RESET} plain"),band:Band::Header},Section {text:"code".into(),band:Band::Body},Section {text:"output".into(),band:Band::Result}];
+        for (fg,bg,light) in [((35,35,35),(245,245,245),true),((225,225,225),(20,20,20),false)] {
+            let colors=Some(TerminalColors {foreground:fg,background:bg});
+            let rendered=frame_with_colors(&sections,40,colors);
+            for band in [Band::Header,Band::Body,Band::Result] {
+                let sgr=band.bg(colors);
+                let rgb:Vec<u8>=sgr.split(';').skip(2).map(|n|n.parse().unwrap()).collect();
+                assert!(rgb.iter().all(|v|if light {*v>200} else {*v<70}),"{sgr}");
+                assert!(rendered.contains(&format!("\x1b[39;{sgr}m")),"native foreground on each surface");
+            }
+            assert!(rendered.contains(&format!("{RESET}\x1b[39;{}m plain",Band::Header.bg(colors))),"inline resets restore the current band");
+            for change in [Change::Added,Change::Removed] {
+                let sgr=change_bg_with_colors(change,colors);
+                let rgb:Vec<u8>=sgr.split(';').skip(2).map(|n|n.parse().unwrap()).collect();
+                assert!(rgb.iter().all(|v|if light {*v>200} else {*v<70}),"{sgr}");
+            }
+        }
+        let native=frame_with_colors(&sections,40,None);
+        assert!(native.contains("\x1b[39;49m"));
+        assert!(!native.contains("48;2;"),"unsupported probes must never assume a dark surface");
+        assert_eq!(change_bg_with_colors(Change::Added,None),"49");
+        assert_eq!(change_bg_with_colors(Change::Removed,None),"49");
+    }
+
+    #[test]
     fn a_command_breaks_after_each_step() {
         assert_eq!(shell_lines("$ ls -la", 80), vec!["$ ls -la"], "one step, one line");
         // Every &&, || and ; ends a line, even when it would all fit.
@@ -1829,7 +1877,7 @@ mod tests {
     }
 
     #[test]
-    fn each_call_is_bands_of_slate() {
+    fn each_call_uses_terminal_derived_bands() {
         let sec = |text: &str, band: Band| Section { text: text.into(), band };
         let banded = frame(&[sec("▸ cargo test   ✓\r\n", Band::Header), sec("$ ls\r\n", Band::Body), sec("🤖 \x1b[32mdone\x1b[0m\r\n\tx\r\n", Band::Result)], 20);
         let rows: Vec<&str> = banded.split("\r\n").filter(|r| !r.is_empty()).collect();
@@ -1841,11 +1889,11 @@ mod tests {
             vec!["", "  ▸ cargo test   ✓", "", "", "  $ ls", "", "", "  🤖 done", "      x", ""],
             "a blank line above and below each band's text, two columns in, no border"
         );
-        let shade = |row: usize| rows[row].starts_with(&format!("\x1b[{}m", [Band::Header, Band::Body, Band::Result][row / 3].bg()));
-        assert!((0..9).all(shade), "each band on its own slate, the blank lines too: {rows:#?}");
+        let shade = |row: usize| rows[row].starts_with(&format!("\x1b[39;{}m", [Band::Header, Band::Body, Band::Result][row / 3].bg(axel_tui::theme::terminal_colors())));
+        assert!((0..9).all(shade), "each band on its own native surface, the blank lines too: {rows:#?}");
         assert!(!rows.iter().any(|r| r.contains(['│', '┌', '▐'])), "no border");
-        assert!(rows[7].contains(&format!("{RESET}\x1b[{}m", Band::Result.bg())), "a reset inside a line puts the band's shade back: {:?}", rows[7]);
-        let shades = [Band::Header.bg(), Band::Body.bg(), Band::Result.bg()];
+        assert!(rows[7].contains(&format!("{RESET}\x1b[39;{}m", Band::Result.bg(axel_tui::theme::terminal_colors()))), "a reset inside a line puts the band's shade back: {:?}", rows[7]);
+        let shades = [Band::Header, Band::Body, Band::Result].map(|b| b.bg(Some(axel_tui::theme::TerminalColors {foreground:(40,40,40),background:(240,240,240)})));
         assert!(shades[0] != shades[1] && shades[1] != shades[2] && shades[0] != shades[2], "three different shades");
         // Too long a line is cut, its link closed, rather than push the border out.
         let (cut, used) = fit(&format!("{}{}", axel_tui::util::hyperlink("file:///a", "aaaaaaaaaa"), "b"), 6);
@@ -1992,7 +2040,7 @@ mod tests {
         let edit = plain(&edit_raw);
         assert!(edit.contains("/w/a.rs") && edit.contains("-     let a = 1;") && edit.contains("+     let a = 2;"), "a diff: {edit}");
         assert_eq!(edit.matches("fn f() {").count(), 1, "unchanged lines show once, as context: {edit}");
-        assert!(edit_raw.contains(&format!("31;{REMOVED_BG}m- ")) && edit_raw.contains(&format!("32;{ADDED_BG}m+ ")), "red and green, on their backgrounds: {edit_raw:?}");
+        assert!(edit_raw.contains(&format!("31;{}m- ",change_bg(Change::Removed))) && edit_raw.contains(&format!("32;{}m+ ",change_bg(Change::Added))), "red and green, on their backgrounds: {edit_raw:?}");
         assert!(edit_raw.matches("\x1b[").count() > 12, "and the Rust in it highlighted: {edit_raw:?}");
         assert!(edit.contains("▸ x  "), "the title loses its backticks: {edit}");
         let titled = plain(&describe_call(&item("t", axel_store::ItemKind::ToolCall, serde_json::json!({ "title": "Edit `/w/a.rs`" })), None, 100, &no_links()));

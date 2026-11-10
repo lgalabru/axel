@@ -3,6 +3,26 @@
 use axel_store::{AgentColor, StatusState};
 use ratatui::style::{Color, Modifier, Style};
 
+/// The terminal's own foreground and background, in 8-bit RGB.
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalColors {
+    pub foreground: (u8, u8, u8),
+    pub background: (u8, u8, u8),
+}
+
+/// Query once before crossterm owns terminal input. Unknown palettes use native
+/// colors; a failed or unsupported probe never implies a dark theme.
+pub fn terminal_colors() -> Option<TerminalColors> {
+    static COLORS: std::sync::OnceLock<Option<TerminalColors>> = std::sync::OnceLock::new();
+    *COLORS.get_or_init(|| {
+        let mut options = terminal_colorsaurus::QueryOptions::default();
+        options.timeout = std::time::Duration::from_millis(150);
+        terminal_colorsaurus::color_palette(options).ok().map(|p| TerminalColors {
+            foreground: p.foreground.scale_to_8bit(), background: p.background.scale_to_8bit(),
+        })
+    })
+}
+
 /// The single accent colour (titles, selection, active input): coral red #FF7565.
 pub const ACCENT: Color = Color::Rgb(255, 117, 101);
 /// Muted text for hints, breadcrumbs and timestamps.
