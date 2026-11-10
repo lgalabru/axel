@@ -1,5 +1,8 @@
 //! Token accounting from harness transcripts (no telemetry server).
 
+mod native;
+pub(super) fn start_reconciliation() { native::start(); }
+
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -142,6 +145,20 @@ fn find_codex_rollout(codex_thread_id: &str) -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Explicit refresh for diagnosis, without opening a TUI.
+pub fn refresh() -> Result<()> {
+    let store = Store::open_default()?;
+    let (claude, codex) = native::roots().ok_or_else(|| anyhow::anyhow!("home directory unavailable"))?;
+    let n = native::Scanner::default().scan(&store, &claude, &codex)?;
+    println!("Reconciled {n} sessions from local harness logs. Axel estimates, rolling 24h:");
+    let now = chrono::Utc::now().timestamp();
+    for u in store.usage_by_agent(now)? {
+        let name = store.agent_by_pubkey(&u.key)?.map(|a| a.name).unwrap_or(u.key);
+        println!("{name}: ${:.2} · {} tokens", u.last_day.cost_usd, u.last_day.tokens());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

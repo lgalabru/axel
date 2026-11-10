@@ -22,6 +22,7 @@
 mod error;
 mod items;
 mod local;
+mod native_usage;
 mod log;
 mod policy;
 mod reads;
@@ -53,7 +54,7 @@ pub use types::{
     ItemStatus, NewAgent, NewItem, NewSession, Participant, ParticipantRole, Project, Relationship,
     RuntimeMode, Session, SessionFilter, SessionRuntime, SessionState, SessionUpdate, Status,
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,
-    ThreadWorkspace, Turn, TurnChanges, TurnMark, FileChange, ChangeStatus, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
+    ThreadWorkspace, Turn, TurnChanges, TurnMark, FileChange, ChangeStatus, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, NativeUsage, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
 };
 pub use wire::kind;
 

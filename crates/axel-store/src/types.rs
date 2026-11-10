@@ -788,6 +788,14 @@ pub struct UsageDelta {
     pub model: Option<String>,
 }
 
+/// One deduplicated API call from a verified local harness log.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeUsage {
+    pub id: String,
+    pub at: i64,
+    pub delta: UsageDelta,
+}
+
 /// Token counts and cost summed over some window.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageTotals {

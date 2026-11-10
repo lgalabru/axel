@@ -203,6 +203,7 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
         (Some(ScreenArg::Thread), None) => anyhow::bail!("--screen thread needs --thread ID"),
         (other, _) => initial_screen(other)?,
     };
+    if initial == Screen::Usage { super::usage::start_reconciliation(); }
     let _ = &owner_pk;
 
     let cwd = std::env::current_dir().context("reading current directory")?;

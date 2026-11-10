@@ -110,7 +110,11 @@ pub enum Command {
     CodexAcp,
     /// Show the tokens each agent spent, in the top-right corner of this
     /// Rex window (again to hide it); outside Rex, right here.
-    Usage,
+    Usage {
+        /// Reconcile native logs and print 24-hour estimates instead of opening the pane.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Check Rex, keystore and database health.
     Doctor,
     /// Prune old turn checkpoints (archived threads after a week; a month for

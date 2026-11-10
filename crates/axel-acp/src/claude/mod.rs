@@ -384,7 +384,7 @@ impl Agent {
             tool_uses: Mutex::new(HashMap::new()),
             hooked: Mutex::new(HashSet::new()),
             steering: Mutex::new(Steering::default()),
-            meter: Mutex::new(ClaudeMeter::default()),
+            meter: Mutex::new(if resume.is_some() { ClaudeMeter::resumed() } else { ClaudeMeter::default() }),
         });
         self.spawn_reader(session.clone(), stdout, tx);
         self.spawn_idle_relay(session.clone());

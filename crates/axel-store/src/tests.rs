@@ -2564,3 +2564,32 @@ fn removed_agents_leave_the_roster_without_losing_their_history() {
     s.start_session(&agent, &new_session(&t.id, &agent, "mac")).unwrap();
     assert!(s.thread_agents(&t.id).unwrap().contains(&pk(&agent)), "an explicit new session rejoins the thread");
 }
+
+#[test]
+fn native_usage_replaces_estimates_without_mutating_history_or_double_counting() {
+    let s = store();
+    let owner = Keypair::generate();
+    let t = s.create_thread(&owner, "usage", "", None).unwrap();
+    let session = s.start_session(&owner, &new_session(&t.id, &owner, "mac")).unwrap();
+    s.add_usage(&owner, &session.id, &UsageDelta { input_tokens: 100, cost_usd_est: 139.60, turns:1, ..Default::default() }, None).unwrap();
+    let raw = s.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap();
+    let now = crate::now();
+    let record = NativeUsage { id:"one-call".into(), at:now-100, delta:UsageDelta { input_tokens:10, cache_read_tokens:200, cost_usd_est:0.25,..Default::default() } };
+    for _ in 0..2 { s.replace_native_usage(&session.id, std::slice::from_ref(&record)).unwrap(); }
+    // A legacy host can keep reporting: its estimates must not get added again.
+    s.add_usage(&owner, &session.id, &UsageDelta { input_tokens:999, cost_usd_est:100.0, ..Default::default() }, None).unwrap();
+    let usage = s.usage(&session.id).unwrap().unwrap();
+    assert_eq!((usage.input_tokens,usage.cache_read_tokens,usage.turns,usage.cost_usd_est),(10,200,1,0.25));
+    assert_eq!(s.thread_usage(&t.id).unwrap().cost_usd_est,0.25);
+    assert_eq!(s.agent_spend_since(&pk(&owner),now-50).unwrap(),0.0,"budget window uses call timestamps, not lifetime session cost");
+    assert_eq!(s.agent_spend_since(&pk(&owner),now-200).unwrap(),0.25);
+    assert_eq!(s.usage_by_agent(now).unwrap()[0].last_day.cost_usd,0.25);
+    assert_eq!(s.usage_series(None,now,60,60).unwrap().iter().sum::<i64>(),210);
+    assert_eq!(s.conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_,i64>(0)).unwrap(),raw+1);
+    s.rebuild_projections().unwrap();
+    assert_eq!(s.usage(&session.id).unwrap().unwrap().cost_usd_est,0.25,"native cache survives projection replay");
+    assert_eq!(s.conn.query_row("SELECT SUM(cost_usd_est) FROM usage",[],|r|r.get::<_,f64>(0)).unwrap(),239.60,"raw signed projection remains intact");
+    // Invalid replacement rolls back the complete previous snapshot.
+    assert!(s.replace_native_usage(&session.id,&[record.clone(),record]).is_err());
+    assert_eq!(s.usage(&session.id).unwrap().unwrap().cost_usd_est,0.25);
+}

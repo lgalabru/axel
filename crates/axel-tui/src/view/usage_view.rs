@@ -1,13 +1,13 @@
 //! The usage pane: what each agent spent, laid out for the room it has.
 //!
 //! One row per agent. Columns join as the pane widens, most needed first:
-//! the last 24 hours, a chart of the last hour, today's cost, then how full
+//! the last 24 hours, a chart of the last hour, 24-hour estimated cost, then how full
 //! its context is. The chart takes what's left, up to a bar a minute (two
 //! to a cell, in braille), on one scale for every agent so their bars
 //! compare. Rows join as it grows taller: column labels, a line for
 //! everyone together, each harness's plan limits (how much of its five-hour
 //! and weekly windows the account has used, with a bar and the time to the
-//! reset as width allows), then the threads that spent today. Under
+//! reset as width allows), then the threads that spent in 24 hours. Under
 //! [`BOX_MIN_HEIGHT`] rows it's the same table without the box or threads,
 //! the plan limits folded onto one line. One row high, or under
 //! [`BOX_MIN_WIDTH`] columns, it's one line: the last hour's tokens, today's
@@ -53,7 +53,7 @@ impl Col {
     fn label(self) -> &'static str {
         match self {
             Col::Day => "24h",
-            Col::DayCost => "$ 24h",
+            Col::DayCost => "~$ 24h",
             Col::Context => "ctx",
             Col::Spark => "last hour",
         }
@@ -101,14 +101,14 @@ pub fn render(frame: &mut Frame, data: &UsageData, area: Rect) {
         frame.render_widget(Paragraph::new(lines(data, area.width as usize, area.height as usize, true)), area);
         return;
     }
-    // No box of its own: the Rex pane is the frame. A header line, "tokens"
-    // at the left and today's cost at the right, then the table, one column in.
+    // No box of its own: the Rex pane is the frame. A header line, "Axel"
+    // at the left and 24-hour estimated cost at the right, then the table, one column in.
     let inner = Rect { x: area.x + 1, y: area.y, width: area.width.saturating_sub(2), height: area.height };
-    let today = format!("{} today", cost(data.last_day.cost_usd));
-    let mut header = vec![Span::styled("tokens", theme::accent_bold())];
+    let today = format!("{} 24h", cost(data.last_day.cost_usd));
+    let mut header = vec![Span::styled("Axel", theme::accent_bold())];
     let room = usize::from(inner.width);
-    if room >= "tokens".len() + today.len() + 2 {
-        header.push(Span::raw(" ".repeat(room - "tokens".len() - today.len())));
+    if room >= "Axel".len() + today.len() + 2 {
+        header.push(Span::raw(" ".repeat(room - "Axel".len() - today.len())));
         header.push(Span::styled(today, theme::dim()));
     }
     frame.render_widget(Paragraph::new(Line::from(header)), Rect { height: 1, ..inner });
@@ -116,13 +116,13 @@ pub fn render(frame: &mut Frame, data: &UsageData, area: Rect) {
     frame.render_widget(Paragraph::new(lines(data, body.width as usize, body.height as usize, false)), body);
 }
 
-/// One line: the last hour's tokens, today's cost and, when it fits, the
+/// One line: the last hour's tokens, 24-hour estimated cost and, when it fits, the
 /// fullest plan window.
 fn summary(data: &UsageData, width: u16) -> Line<'static> {
     {
         let mut spans = vec![
             Span::styled(format_tokens(data.last_hour.tokens()), theme::bold()),
-            Span::styled(" 1h · ", theme::dim()),
+            Span::styled(if width < 19 { " · " } else { " 1h · " }, theme::dim()),
             Span::styled(cost(data.last_day.cost_usd), theme::bold()),
             Span::styled(" 24h", theme::dim()),
         ];
@@ -250,10 +250,10 @@ fn lines(data: &UsageData, width: usize, rows: usize, tight: bool) -> Vec<Line<'
             _ => {}
         }
     }
-    // The threads that spent today: a gap, a label, at least one.
+    // The threads that spent in 24 hours: a gap, a label, at least one.
     if !tight && !data.threads.is_empty() && left >= 3 {
         out.push(Line::raw(""));
-        out.push(Line::styled("threads today", theme::dim()));
+        out.push(Line::styled("threads · 24h", theme::dim()));
         left -= 2;
         let money = width >= 24;
         let title_w = width.saturating_sub(7 + if money { 8 } else { 0 }).max(4);
@@ -474,7 +474,7 @@ fn tokens(n: i64, bold: bool) -> Span<'static> {
 
 /// Dollars, to the cent below $100.
 fn cost(usd: f64) -> String {
-    if usd < 100.0 { format!("${usd:.2}") } else { format!("${:.0}", usd) }
+    if usd < 100.0 { format!("~${usd:.2}") } else { format!("~${:.0}", usd) }
 }
 
 /// The last hour, a minute a sample: a short series is quiet minutes before.
@@ -523,26 +523,26 @@ mod tests {
 
     #[test]
     fn a_sliver_of_a_pane_is_one_line() {
-        assert_eq!(screen(30, 1, &data()), vec!["12k 1h · $5.30 24h"]);
-        assert_eq!(screen(18, 6, &data())[0], "12k 1h · $5.30 24h", "too narrow for the box too");
+        assert_eq!(screen(30, 1, &data()), vec!["12k 1h · ~$5.30 24h"]);
+        assert_eq!(screen(18, 6, &data())[0], "12k · ~$5.30 24h", "too narrow for the box too");
     }
 
     #[test]
     fn a_small_pane_shows_each_agents_day_and_hour() {
         let s = screen(24, 6, &data());
-        assert_eq!(s[0], " tokens     $5.30 today", "no box: a header line, today's cost at its right");
+        assert_eq!(s[0], " Axel        ~$5.30 24h", "no box: a header line, 24-hour estimated cost at its right");
         assert_eq!(s[1], "          24h last hour");
         assert_eq!(s[2], " terra   310k ⣀⣀⣀⣀⣠⣀⣀⣀⣸", "two more columns than the box left, so a wider chart");
         assert_eq!(s[3], " opus     88k ⣀⣀⣀⣀⣀⣀⣀⣀⣀", "a quiet hour is a dotted line");
-        assert_eq!(screen(20, 6, &data())[0], " tokens", "too narrow for the cost: the header waits for room");
+        assert_eq!(screen(20, 6, &data())[0], " Axel    ~$5.30 24h", "too narrow for the cost: the header waits for room");
     }
 
     #[test]
     fn a_wider_pane_adds_cost_and_context() {
         let s = screen(90, 8, &data());
-        assert!(s[0].contains("$5.30 today"), "{s:?}");
-        assert!(s[1].contains("24h") && s[1].contains("$ 24h") && s[1].contains("ctx") && s[1].contains("last hour") && !s[1].contains(" all"), "labels: {s:?}");
-        assert!(s[2].contains("terra") && s[2].contains("310k") && s[2].contains("$4.20") && s[2].contains("75%"), "{s:?}");
+        assert!(s[0].contains("~$5.30 24h"), "{s:?}");
+        assert!(s[1].contains("24h") && s[1].contains("~$ 24h") && s[1].contains("ctx") && s[1].contains("last hour") && !s[1].contains(" all"), "labels: {s:?}");
+        assert!(s[2].contains("terra") && s[2].contains("310k") && s[2].contains("~$4.20") && s[2].contains("75%"), "{s:?}");
         assert!(s[4].contains("all") && s[4].contains("398k"), "everyone together: {s:?}");
     }
 
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn a_tall_pane_lists_todays_threads() {
         let s = screen(40, 10, &data());
-        let at = s.iter().position(|l| l.contains("threads today")).expect("threads section");
+        let at = s.iter().position(|l| l.contains("threads · 24h")).expect("threads section");
         assert!(s[at + 1].contains("webhook retries") && s[at + 1].contains("300k"), "{s:?}");
         assert!(s[at + 2].contains("review"), "{s:?}");
     }
@@ -603,8 +603,8 @@ mod tests {
     fn beside_the_composer_its_a_labelled_table() {
         // 300px or so wide, as tall as the composer: no box, no summary line.
         let s = screen(36, 4, &with_limits(data()));
-        assert_eq!(s[0], "         24h   $ 24h  ctx last hour", "every number has a label");
-        assert_eq!(s[1], "terra   310k   $4.20  75% ⣀⣀⣀⣀⣀⣄⣀⣀⣀⣸");
+        assert_eq!(s[0], "         24h  ~$ 24h  ctx last hour", "every number has a label");
+        assert_eq!(s[1], "terra   310k  ~$4.20  75% ⣀⣀⣀⣀⣀⣄⣀⣀⣀⣸");
         assert!(s[2].starts_with("opus"), "{s:?}");
         assert_eq!(s[3], "claude 5h 84%  wk 9% · codex 5h new", "the plan limits on one line: {s:?}");
         let s = screen(150, 3, &with_limits(data()));
@@ -648,8 +648,8 @@ mod tests {
 
     #[test]
     fn one_line_names_the_fullest_window() {
-        assert_eq!(screen(40, 1, &with_limits(data())), vec!["12k 1h · $5.30 24h · 5h 84%"]);
-        assert_eq!(screen(22, 1, &with_limits(data())), vec!["12k 1h · $5.30 24h"], "when it fits");
+        assert_eq!(screen(40, 1, &with_limits(data())), vec!["12k 1h · ~$5.30 24h · 5h 84%"]);
+        assert_eq!(screen(22, 1, &with_limits(data())), vec!["12k 1h · ~$5.30 24h"], "when it fits");
     }
 
     #[test]

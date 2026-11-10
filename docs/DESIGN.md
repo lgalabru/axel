@@ -635,6 +635,21 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   binary while its agents keep running. Ctrl+T opens a focused
   floating shell in the thread’s project directory, using its worktree when present.
   A thread without a local project uses the composer’s directory.
+- **Usage reconciliation**: the usage pane reads native Claude transcripts and
+  Codex rollouts on a worker every 30 seconds. Deduplicated native calls replace
+  reported token and cost estimates in local read views; signed events stay intact.
+  Calls retain their timestamps and belong to the Axel session active when they
+  occurred. Resuming a native conversation cannot import its old cost as new spend.
+  Missing or invalid logs retain the last good snapshot. Unavailable local logs,
+  including remote sessions, fall back to reported usage. Rebuilds preserve this
+  local cache. Codex request ledger rows are authoritative once available; their
+  cumulative notification mirrors are not added again, including after compaction.
+  Older rollouts use cumulative differences. Prices apply per call, including
+  one-hour Claude cache writes and supported Codex long-context tiers. All cost
+  reads and budget checks use the same reconciled views, with budget windows based
+  on call timestamps. The pane labels Axel's rolling 24-hour estimates with `~$`;
+  external tools can include work outside Axel and use calendar-day windows.
+  `axel usage --refresh` reconciles explicitly and prints per-agent 24-hour totals.
 - **Release hints**: the split composer checks GitHub's latest release on a worker
   thread and only reads results through a channel. A shared six-hour cache avoids
   repeated requests across panes. A newer major or minor, or a patch gap greater

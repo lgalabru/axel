@@ -237,8 +237,8 @@ impl Store {
     /// Estimated USD an agent's sessions recorded since `since` (Unix seconds).
     pub fn agent_spend_since(&self, pubkey: &str, since: i64) -> Result<f64, Error> {
         Ok(self.conn.query_row(
-            "SELECT COALESCE(SUM(u.cost_usd_est), 0) FROM usage u JOIN sessions s ON s.id = u.session_id
-             WHERE s.agent_pubkey = ?1 AND u.updated_at >= ?2",
+            "SELECT COALESCE(SUM(u.cost_usd_est), 0) FROM effective_usage_log u JOIN sessions s ON s.id = u.session_id
+             WHERE s.agent_pubkey = ?1 AND u.at >= ?2",
             params![pubkey, since],
             |r| r.get(0),
         )?)

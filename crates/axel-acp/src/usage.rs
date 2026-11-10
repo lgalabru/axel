@@ -133,6 +133,8 @@ impl TurnUsage {
 pub struct ClaudeMeter {
     /// `total_cost_usd` at the last result: the process's running total.
     cost_seen: f64,
+    /// A resumed process may report historical spend in its first result.
+    resumed_cost_pending: bool,
     /// Each model's running `costUSD`, to tell which one did the turn.
     model_cost_seen: std::collections::HashMap<String, f64>,
     pending: TurnUsage,
@@ -150,6 +152,9 @@ pub struct ClaudeMeter {
 }
 
 impl ClaudeMeter {
+    /// Resume without attributing the native conversation's old cost to this process.
+    pub fn resumed() -> Self { Self { resumed_cost_pending: true, ..Default::default() } }
+
     /// An `assistant` message: what its API call spent (subagents' too),
     /// and how full the main context is now. Synthetic messages spend
     /// nothing; subagents' say nothing about the main context.
@@ -192,6 +197,7 @@ impl ClaudeMeter {
     /// A `result`: the turn's (or steered segment's) usage, added to the
     /// prompt's.
     pub fn on_result(&mut self, result: &Value) {
+        let resumed = std::mem::take(&mut self.resumed_cost_pending);
         let u = result.get("usage").unwrap_or(&Value::Null);
         let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
         let mut turn = TurnUsage {
@@ -224,6 +230,13 @@ impl ClaudeMeter {
             self.context_size = Some(size);
         }
         turn.model = best.map(|(m, _)| m);
+        if resumed {
+            // Seed the cumulative baseline, but price only calls observed here.
+            // A result replayed on resume with no new usage therefore costs zero.
+            let estimate = |u: &TurnUsage| axel_store::pricing::estimate_call(u.model.as_deref(), u.input as i64, u.output as i64, u.cache_read as i64, u.cache_write as i64, 0);
+            turn.cost_usd = Some(if self.calls.is_empty() { estimate(&turn) } else { self.calls.values().map(estimate).sum() });
+            if let Some(call) = self.calls.values().max_by_key(|u| u.input + u.output + u.cache_read + u.cache_write) { turn.model.clone_from(&call.model); }
+        }
         self.pending.add(turn);
     }
 
@@ -526,6 +539,18 @@ mod tests {
         let t2 = m.take();
         assert_eq!((t2.input, t2.output, t2.cache_write), (2, 21, 26545), "this turn's, not the running total");
         assert!((t2.cost_usd.unwrap() - (0.00911025 - 0.00364334)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn resumed_claude_seeds_history_without_charging_it_to_the_new_session() {
+        let mut m = ClaudeMeter::resumed();
+        m.on_result(&json!({"usage":{},"total_cost_usd":139.60,"modelUsage":{"claude-opus-5-5":{"costUSD":139.60}}}));
+        assert_eq!(m.take().cost_usd,Some(0.0));
+        m.on_result(&json!({"usage":{"input_tokens":10},"total_cost_usd":139.65}));
+        assert!((m.take().cost_usd.unwrap()-0.05).abs()<1e-10);
+        let mut m = ClaudeMeter::resumed();
+        m.on_result(&json!({"usage":{"input_tokens":1000},"total_cost_usd":140.0,"modelUsage":{"claude-opus-5-5":{"costUSD":140.0}}}));
+        assert!((m.take().cost_usd.unwrap()-0.004).abs()<1e-10,"first new calls are estimated, not lifetime cost");
     }
 
     #[test]

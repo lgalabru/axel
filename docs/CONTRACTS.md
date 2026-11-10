@@ -408,6 +408,25 @@ The composer reserves one extra row for it, leaving drafts and status intact.
 
 ## axel (bin) additions: checkpoints
 
+Usage reconciliation: `NativeUsage { id: String, at: i64, delta: UsageDelta }`.
+`Store::replace_native_usage(session_id, &[NativeUsage])` atomically replaces a
+local, rebuildable native-log cache. `effective_usage_log` substitutes its token
+and cost records for that session's signed usage reports, retaining reported turn
+counts. `effective_usage` groups that view by session. All usage reads and budget
+checks use these views. Neither signed envelopes nor the raw projections change.
+Missing native files retain the previous cache; sessions without a cache use
+their reported usage. Local Claude messages are deduplicated by request/message
+ID; Codex cumulative counters are differenced once. Native timestamps and model
+prices determine rolling windows. A native conversation resumed into multiple
+Axel sessions assigns each call to the latest session started before it.
+`axel usage --refresh` reconciles native logs and prints the current per-agent
+24-hour estimates. The usage pane reconciles on a background worker every 30s.
+`pricing::estimate_call(model, input, output, cache_read, cache_write, cache_write_1h)`
+prices one API call, including supported Codex long-context tiers and Claude's
+one-hour cache writes. `estimate` remains the standard-rate aggregate fallback.
+`ClaudeMeter::resumed()` seeds the first cumulative cost baseline without
+charging historical spend; only calls observed in this process are estimated.
+
 ```rust
 mod undo {   // reverse a turn in the working tree; the index and HEAD are untouched
     pub fn files_of(c: &TurnChanges) -> Vec<&FileChange>;   // authored files, or all when none is marked

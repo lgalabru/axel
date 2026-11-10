@@ -11,7 +11,8 @@
 //!   `thread_projects`, `thread_participants`, `sessions`, `status`, `usage`,
 //!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
-//!   `session_context`, `plan_limits`, `turn_marks`,
+//!   `session_context`, `plan_limits`, `turn_marks`, `native_usage_sources`,
+//!   `native_usage`,
 //!   plus the `sessions.transcript_offset` column.
 
 use rusqlite::Connection;
@@ -399,6 +400,38 @@ const MIGRATIONS: &[&str] = &[
         tool_calls       INTEGER NOT NULL DEFAULT 0,
         started_at       INTEGER NOT NULL DEFAULT 0
     );
+    "#,
+    // Native log reconciliation: verified native logs override local usage estimates without altering signed history.
+    r#"
+    CREATE TABLE native_usage_sources (session_id TEXT PRIMARY KEY, checked_at INTEGER NOT NULL);
+    CREATE TABLE native_usage (
+        session_id TEXT NOT NULL, id TEXT NOT NULL, at INTEGER NOT NULL, model TEXT,
+        input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+        cache_read_tokens INTEGER NOT NULL, cache_write_tokens INTEGER NOT NULL,
+        reasoning_tokens INTEGER NOT NULL, cost_usd_est REAL NOT NULL,
+        PRIMARY KEY(session_id, id)
+    );
+    CREATE INDEX native_usage_at ON native_usage(at);
+    CREATE VIEW effective_usage_log AS
+      SELECT event_id, session_id, thread_id, agent_pubkey, at, model,
+        CASE WHEN n.session_id IS NULL THEN input_tokens ELSE 0 END AS input_tokens,
+        CASE WHEN n.session_id IS NULL THEN output_tokens ELSE 0 END AS output_tokens,
+        CASE WHEN n.session_id IS NULL THEN cache_read_tokens ELSE 0 END AS cache_read_tokens,
+        CASE WHEN n.session_id IS NULL THEN cache_write_tokens ELSE 0 END AS cache_write_tokens,
+        CASE WHEN n.session_id IS NULL THEN reasoning_tokens ELSE 0 END AS reasoning_tokens,
+        turns, CASE WHEN n.session_id IS NULL THEN cost_usd_est ELSE 0 END AS cost_usd_est
+      FROM usage_log u LEFT JOIN native_usage_sources n USING(session_id)
+      UNION ALL
+      SELECT 'native:' || n.id, n.session_id, s.thread_id, s.agent_pubkey, n.at, n.model,
+        n.input_tokens, n.output_tokens, n.cache_read_tokens, n.cache_write_tokens,
+        n.reasoning_tokens, 0, n.cost_usd_est
+      FROM native_usage n JOIN sessions s ON s.id = n.session_id;
+    CREATE VIEW effective_usage AS
+      SELECT session_id, thread_id, SUM(input_tokens) AS input_tokens,
+        SUM(output_tokens) AS output_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(cache_write_tokens) AS cache_write_tokens, SUM(turns) AS turns,
+        SUM(cost_usd_est) AS cost_usd_est, MAX(at) AS updated_at
+      FROM effective_usage_log GROUP BY session_id;
     "#,
 ];
 

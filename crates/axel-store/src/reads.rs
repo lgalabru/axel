@@ -498,7 +498,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {USAGE_COLS} FROM usage WHERE session_id = ?1"),
+                &format!("SELECT {USAGE_COLS} FROM effective_usage WHERE session_id = ?1"),
                 [session_id],
                 row_usage,
             )
@@ -508,7 +508,7 @@ impl Store {
     /// Usage of every session, most recently updated first.
     pub fn usages(&self) -> Result<Vec<Usage>, Error> {
         let mut st = self.conn.prepare(&format!(
-            "SELECT {USAGE_COLS} FROM usage ORDER BY updated_at DESC, session_id"
+            "SELECT {USAGE_COLS} FROM effective_usage ORDER BY updated_at DESC, session_id"
         ))?;
         let rows = st.query_map([], row_usage)?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -521,7 +521,7 @@ impl Store {
                     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
                     COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
                     COALESCE(SUM(turns), 0), COALESCE(SUM(cost_usd_est), 0.0), COALESCE(MAX(updated_at), 0)
-             FROM usage WHERE thread_id = ?1",
+             FROM effective_usage WHERE thread_id = ?1",
             [thread_id],
             |r| {
                 Ok(Usage {
@@ -558,7 +558,7 @@ impl Store {
                 .join(", ")
         };
         let sql = format!(
-            "SELECT {key}, {}, {}, {}, MAX(at) FROM usage_log GROUP BY {key} ORDER BY MAX(at) DESC, {key} LIMIT ?3",
+            "SELECT {key}, {}, {}, {}, MAX(at) FROM effective_usage_log GROUP BY {key} ORDER BY MAX(at) DESC, {key} LIMIT ?3",
             sums("at >= ?1"),
             sums("at >= ?2"),
             sums("1"),
@@ -590,7 +590,7 @@ impl Store {
         let mut out = vec![0i64; buckets];
         let mut st = self.conn.prepare(
             "SELECT (at - ?1) / ?2, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
-             FROM usage_log WHERE at >= ?1 AND at < ?3 AND (?4 IS NULL OR agent_pubkey = ?4) GROUP BY 1",
+             FROM effective_usage_log WHERE at >= ?1 AND at < ?3 AND (?4 IS NULL OR agent_pubkey = ?4) GROUP BY 1",
         )?;
         let rows = st.query_map(params![since, bucket_secs, now + 1, agent], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
