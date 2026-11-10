@@ -569,11 +569,11 @@ fn cancel_ends_the_turn_as_cancelled() {
         .find(|i| i.kind == ItemKind::TurnEnd)
         .unwrap();
     assert_eq!(end.status, Some(ItemStatus::Cancelled));
-    assert!(
-        f.pane.text().contains("turn 1 cancelled"),
-        "{}",
-        f.pane.text()
-    );
+    // Recording the turn precedes writing its pane line. Wait for both
+    // observable effects; a busy runner can read the store between them.
+    wait_until("cancelled pane line", Duration::from_secs(10), || {
+        f.pane.text().contains("turn 1 cancelled")
+    });
     send_ok(&sock, Command::Stop);
     host.join().unwrap().unwrap();
 }
