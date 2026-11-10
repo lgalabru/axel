@@ -187,7 +187,7 @@ fn prompt(
         return;
     }
 
-    if text == "ask" {
+    if text == "ask" || text == "ask-many" {
         // A question for the owner, as the Claude adapter asks AskUserQuestion.
         let resp = request(
             lines,
@@ -195,7 +195,7 @@ fn prompt(
             "session/request_permission",
             json!({
                 "sessionId": sid,
-                "toolCall": { "toolCallId": "toolu_q#0", "title": "Database: Which one?", "kind": "think" },
+                "toolCall": { "toolCallId": "toolu_q#0", "title": "Database: Which one?", "kind": "think", "rawInput":{"multiSelect":text=="ask-many","minSelections":1,"maxSelections":2} },
                 "options": [
                     { "optionId": "answer:0", "name": "Postgres", "kind": "allow_once" },
                     { "optionId": "answer:1", "name": "SQLite", "kind": "allow_once" },

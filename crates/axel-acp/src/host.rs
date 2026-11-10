@@ -347,6 +347,27 @@ struct PendingPermission {
     title: String,
     /// `(option_id, kind)` with kind as the protocol string.
     options: Vec<(String, String)>,
+    multiple: Option<(usize,usize)>,
+}
+
+/// Composite answers are an Axel extension for explicit multi-select questions,
+/// never a way to select unoffered options or combine permission grants.
+fn validate_answer(options: &[(String,String)], multiple: Option<(usize,usize)>, answer: &str) -> Result<bool> {
+    if let Some(encoded)=answer.strip_prefix(crate::claude::MULTI_ANSWER_PREFIX) {
+        let Some((min,max))=multiple else { anyhow::bail!("this question does not allow multiple selections") };
+        let ids:Vec<String>=serde_json::from_str(encoded)?;
+        anyhow::ensure!(ids.len()>=min && ids.len()<=max,"select {min}–{max} options");
+        let unique:std::collections::HashSet<_>=ids.iter().collect();
+        anyhow::ensure!(unique.len()==ids.len(),"duplicate selections");
+        for id in ids {
+            anyhow::ensure!(options.iter().any(|(offered,kind)|offered==&id && kind.starts_with("allow")),"option {id} is not an offered selection");
+        }
+        return Ok(true)
+    }
+    let Some((_,kind))=options.iter().find(|(id,_)|id==answer) else { anyhow::bail!("option {answer} is not offered") };
+    let allowed=kind.starts_with("allow");
+    if allowed && let Some((min,max))=multiple {anyhow::ensure!(min<=1 && max>=1,"select {min}–{max} options");}
+    Ok(allowed)
 }
 
 // --- ansi --------------------------------------------------------------------
@@ -1865,6 +1886,13 @@ impl<W: Write> Host<W> {
         // A question for the owner (its choices are `answer:` options) is never
         // a permission: no policy may pick an answer, whatever the mode.
         let question = !req.options.is_empty() && req.options.iter().all(|o| o.option_id.to_string().starts_with(crate::claude::ANSWER_PREFIX));
+        let multiple = if question && raw_input.get("multiSelect").and_then(Value::as_bool)==Some(true) {
+            let count=options.iter().filter(|(_,k)|k.starts_with("allow")).count();
+            let min=raw_input.get("minSelections").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let max=raw_input.get("maxSelections").and_then(Value::as_u64).map(|n|n as usize).unwrap_or(count);
+            anyhow::ensure!(min<=max && max<=count,"invalid question selection bounds");
+            Some((min,max))
+        } else {None};
         let decision = if question {
             Decision::Ask
         } else {
@@ -1915,7 +1943,7 @@ impl<W: Write> Host<W> {
                     if question { ItemKind::Question } else { ItemKind::Permission },
                     Some(ItemStatus::Pending),
                     Some(perm_ref),
-                    json!({ "title": title, "kind": kind.as_str(), "raw_input": truncate_json(&raw_input, RAW_LIMIT), "options": opts }),
+                    json!({ "title": title, "kind": kind.as_str(), "raw_input": truncate_json(&raw_input, RAW_LIMIT), "options": opts, "multi_select": multiple.map(|(min,max)|json!({"min":min,"max":max})) }),
                 )?;
                 let who = std::env::var("AXEL_AGENT_NAME").unwrap_or_else(|_| "agent".into());
                 self.notify(&if question { format!("{who} asks: {title}") } else { format!("{who} needs permission: {title}") });
@@ -1955,6 +1983,7 @@ impl<W: Write> Host<W> {
                         reply,
                         title,
                         options,
+                        multiple,
                     },
                 );
                 self.line(MAGENTA, "?", &format!("permission: {label}"));
@@ -1967,10 +1996,7 @@ impl<W: Write> Host<W> {
         let Some(p) = self.pending.get(item_id) else {
             anyhow::bail!("no pending permission {item_id}");
         };
-        let Some((_, kind)) = p.options.iter().find(|(id, _)| id == option_id) else {
-            anyhow::bail!("option {option_id} is not offered on {item_id}");
-        };
-        let allowed = kind.starts_with("allow");
+        let allowed = validate_answer(&p.options,p.multiple,option_id)?;
         let p = self.pending.remove(item_id).expect("checked above");
         let _ = p.reply.send(acp::RequestPermissionResponse::new(
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
@@ -2431,6 +2457,21 @@ fn usage_delta(u: &TurnUsage) -> axel_store::UsageDelta {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composite_answers_are_bounded_unique_and_never_permission_grants() {
+        let options=vec![("answer:0".into(),"allow_once".into()),("answer:1".into(),"allow_once".into()),("answer:none".into(),"reject_once".into())];
+        let both=r#"answer:multi:["answer:0","answer:1"]"#;
+        assert!(validate_answer(&options,Some((1,2)),both).unwrap());
+        assert!(validate_answer(&options,None,both).is_err());
+        assert!(validate_answer(&options,Some((1,1)),both).is_err());
+        assert!(validate_answer(&options,Some((2,2)),"answer:0").is_err());
+        for invalid in [r#"answer:multi:["answer:0","answer:0"]"#,r#"answer:multi:["answer:none"]"#,r#"answer:multi:["answer:99"]"#,"answer:multi:[]"] {
+            assert!(validate_answer(&options,Some((1,2)),invalid).is_err(),"{invalid}");
+        }
+        assert!(validate_answer(&options,Some((0,2)),"answer:multi:[]").unwrap());
+        assert!(!validate_answer(&options,Some((1,2)),"answer:none").unwrap());
+    }
 
     #[test]
     fn long_text_is_cut_as_text_not_as_its_json() {

@@ -1283,3 +1283,25 @@ fn the_owner_message_is_visible_while_the_before_checkpoint_is_still_running() {
     send_ok(&f.cfg.socket_path, Command::Stop);
     host.join().unwrap().unwrap();
 }
+
+#[test]
+fn multiple_choice_questions_validate_and_deliver_the_complete_set() {
+    let f=fixture(RuntimeMode::Autopilot,fake_harness(),Some("ask-many"));
+    let host=spawn_host(&f);
+    let question=|| f.store.items(&f.session_id,0,1000).unwrap().into_iter().find(|i|i.kind==ItemKind::Question);
+    wait_until("multi-select question",Duration::from_secs(10),||question().is_some());
+    let q=question().unwrap();
+    assert_eq!(q.content["multi_select"],serde_json::json!({"min":1,"max":2}));
+    let bad=socket::send(&f.cfg.socket_path,&Command::Answer {item_id:q.id.clone(),option_id:r#"answer:multi:["answer:0","answer:0"]"#.into()}).unwrap();
+    assert!(matches!(bad,Reply::Error {..}));
+    assert_eq!(question().unwrap().status,Some(ItemStatus::Pending),"bad answers cannot consume the pending question");
+    let encoded=r#"answer:multi:["answer:0","answer:1"]"#;
+    send_ok(&f.cfg.socket_path,Command::Answer {item_id:q.id,option_id:encoded.into()});
+    wait_until("answered multi-select turn",Duration::from_secs(20),||f.store.turns(&f.thread_id).unwrap().len()==1);
+    assert_eq!(question().unwrap().content["answer"],encoded);
+    assert_eq!(question().unwrap().status,Some(ItemStatus::Answered));
+    let said=f.store.items(&f.session_id,0,1000).unwrap().into_iter().filter(|i|i.kind==ItemKind::AssistantMessage).map(|i|i.content["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    assert!(said.iter().any(|t|t.contains(encoded)),"the adapter must receive every selected option: {said:?}");
+    send_ok(&f.cfg.socket_path,Command::Stop);
+    host.join().unwrap().unwrap();
+}

@@ -408,6 +408,24 @@ The composer reserves one extra row for it, leaving drafts and status intact.
 
 ## axel (bin) additions: checkpoints
 
+Question multi-selection: `ChoiceOption::exclusive: bool` marks a decline option.
+`ItemBody::Choice` gains `multiple: Option<(usize, usize)>`, its selection bounds.
+`ThreadView::choice_checked` retains checked option IDs by item ID. Multi-select
+questions use Space/digits to toggle, Enter to confirm, and arrows to move.
+Exclusive decline choices clear other selections. Single-choice behavior and
+permission grants stay unchanged; failed sends preserve checked choices.
+Native adapters set `rawInput.multiSelect`, with optional `minSelections` and
+`maxSelections`, defaulting to one through all offered selections.
+The host persists validated bounds as `multi_select: {min,max}` on Question items.
+The existing Answer command carries `answer:multi:<JSON array of option IDs>`
+only for such questions. The host validates bounds, uniqueness and offered
+allow-options before returning that encoded ID through ACP to Axel's adapter.
+Claude `AskUserQuestion` receives selected labels joined by comma and space;
+MCP array enum elicitations receive the selected original values as an array.
+Decline/cancel remain distinct from accepting an allowed empty array. Ordinary
+permissions never accept the composite answer encoding. Existing live hosts
+require a restart to emit and accept multi-select question cards.
+
 `theme::TerminalColors { foreground: (u8,u8,u8), background: (u8,u8,u8) }`
 and `theme::terminal_colors() -> Option<TerminalColors>` expose one cached,
 150ms-bounded terminal palette query. Call before crossterm starts reading input.

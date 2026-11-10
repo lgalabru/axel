@@ -581,11 +581,11 @@ impl Agent {
             let Some(picked) = self.ask(session, &tool_call, options)? else {
                 return Err("Tool use aborted".into());
             };
-            match picked.strip_prefix(ANSWER_PREFIX).and_then(|n| n.parse::<usize>().ok()).and_then(|n| labels.get(n)) {
-                Some(label) => {
-                    answers.insert(text, Value::String(label.clone()));
+            match answer_indices(&picked,labels.len(),q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false)) {
+                Some(indices) if !indices.is_empty() => {
+                    answers.insert(text, Value::String(indices.iter().map(|i|labels[*i].clone()).collect::<Vec<_>>().join(", ")));
                 }
-                None => {
+                _ => {
                     return Ok(json!({
                         "behavior": "deny",
                         "message": "The owner didn't pick any of these options. Ask them in plain text what they want instead.",
@@ -602,15 +602,15 @@ impl Agent {
 
     /// An MCP server asks the owner something (`elicitation`), e.g. Axel's
     /// `send` asking whether an agent may reach another.  A form of one
-    /// choice is asked like a question (see [`elicitation_choice`]); anything
-    /// else is declined, since there is no form to fill in here.
+    /// field is asked like a question (see [`elicitation_choice`]); enum arrays
+    /// permit multiple selections. Other forms are declined.
     fn elicitation(&self, session: &Session, request: &Value) -> Value {
         if request.get("mode").and_then(Value::as_str) == Some("url") {
             return json!({ "action": "decline" });
         }
         let message = request.get("message").and_then(Value::as_str).unwrap_or("").trim().to_string();
         let schema = request.get("requested_schema").cloned().unwrap_or(Value::Null);
-        let Some((field, choices)) = elicitation_choice(&schema) else {
+        let Some(ElicitationChoice {field, choices, multiple}) = elicitation_choice(&schema) else {
             return json!({ "action": "decline" });
         };
         let mut options: Vec<Value> = choices
@@ -622,11 +622,15 @@ impl Agent {
         let id = request.get("elicitation_id").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("elicitation-{}", chrono::Utc::now().timestamp_millis()));
         let server = request.get("mcp_server_name").and_then(Value::as_str).unwrap_or("");
         let title = if message.is_empty() { format!("{server} asks") } else { message };
-        let tool_call = json!({ "toolCallId": id, "title": title, "kind": "think" });
+        let tool_call = json!({ "toolCallId": id, "title": title, "kind": "think", "rawInput":{"multiSelect":multiple.is_some(),"minSelections":multiple.map(|b|b.0),"maxSelections":multiple.map(|b|b.1)} });
         match self.ask(session, &tool_call, Value::Array(options)) {
-            Ok(Some(picked)) => match picked.strip_prefix(ANSWER_PREFIX).and_then(|n| n.parse::<usize>().ok()).and_then(|n| choices.get(n)) {
-                Some((value, _)) => json!({ "action": "accept", "content": { field: value } }),
-                None => json!({ "action": "decline" }),
+            Ok(Some(picked)) => match answer_indices(&picked,choices.len(),multiple.is_some()) {
+                Some(indices) if multiple.is_some_and(|(min,max)|indices.len()>=min && indices.len()<=max) || (multiple.is_none() && indices.len()==1) => {
+                    let values:Vec<_>=indices.iter().map(|i|choices[*i].0.clone()).collect();
+                    let value=if multiple.is_some() {Value::Array(values)} else {values[0].clone()};
+                    json!({"action":"accept","content":{field:value}})
+                }
+                _ => json!({ "action": "decline" }),
             },
             _ => json!({ "action": "cancel" }),
         }
@@ -946,15 +950,18 @@ fn is_edit_tool(tool: &str) -> bool {
     matches!(tool, "Edit" | "Write" | "NotebookEdit" | "MultiEdit")
 }
 
-/// An elicitation form that is one choice: its field and each (value, label).
-/// A string `enum` (labels from `enumNames` when given), a `oneOf` of
-/// `{const, title}`, or a boolean (Yes / No).
-fn elicitation_choice(schema: &Value) -> Option<(String, Vec<(Value, String)>)> {
+/// A single-field form: a scalar choice or a bounded array of enum choices.
+/// Labels come from enumNames, titled oneOf/anyOf alternatives, or Yes/No.
+struct ElicitationChoice { field:String, choices:Vec<(Value,String)>, multiple:Option<(usize,usize)> }
+
+fn elicitation_choice(schema: &Value) -> Option<ElicitationChoice> {
     let props = schema.get("properties")?.as_object()?;
     if props.len() != 1 {
         return None;
     }
-    let (field, p) = props.iter().next()?;
+    let (field, property) = props.iter().next()?;
+    let multi=property.get("type").and_then(Value::as_str)==Some("array");
+    let p=if multi {property.get("items")?} else {property};
     let choices: Vec<(Value, String)> = if let Some(values) = p.get("enum").and_then(Value::as_array) {
         let names = p.get("enumNames").and_then(Value::as_array);
         values
@@ -965,7 +972,7 @@ fn elicitation_choice(schema: &Value) -> Option<(String, Vec<(Value, String)>)> 
                 (v.clone(), label)
             })
             .collect()
-    } else if let Some(alts) = p.get("oneOf").and_then(Value::as_array) {
+    } else if let Some(alts) = p.get("oneOf").or_else(||p.get("anyOf")).and_then(Value::as_array) {
         alts.iter()
             .filter_map(|a| {
                 let v = a.get("const")?.clone();
@@ -978,12 +985,35 @@ fn elicitation_choice(schema: &Value) -> Option<(String, Vec<(Value, String)>)> 
     } else {
         return None;
     };
-    (!choices.is_empty()).then(|| (field.clone(), choices))
+    if choices.is_empty() {return None}
+    let multiple=if multi {
+        let min=property.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let max=property.get("maxItems").and_then(Value::as_u64).map(|n|n as usize).unwrap_or(choices.len()).min(choices.len());
+        if min>max {return None}
+        Some((min,max))
+    } else {None};
+    Some(ElicitationChoice {field:field.clone(),choices,multiple})
 }
 
 /// Option ids of a question's choices start with this: the host asks the
 /// owner for these, whatever its policy would do with a permission.
 pub const ANSWER_PREFIX: &str = "answer:";
+/// Native multi-choice answers travel over the existing ACP option-id channel.
+pub(crate) const MULTI_ANSWER_PREFIX: &str = "answer:multi:";
+
+fn answer_indices(answer: &str, size: usize, multiple: bool) -> Option<Vec<usize>> {
+    let ids = if let Some(encoded)=answer.strip_prefix(MULTI_ANSWER_PREFIX) {
+        if !multiple { return None }
+        serde_json::from_str::<Vec<String>>(encoded).ok()?
+    } else { vec![answer.to_string()] };
+    let mut out=Vec::new();
+    for id in ids {
+        let i=id.strip_prefix(ANSWER_PREFIX)?.parse::<usize>().ok()?;
+        if i>=size || out.contains(&i) { return None }
+        out.push(i);
+    }
+    Some(out)
+}
 
 /// The permission request for question `qi` of an `AskUserQuestion` call:
 /// the tool call (its own id per question, the question as its title), the
@@ -996,10 +1026,7 @@ fn question_request(tool_use_id: &Value, qi: usize, q: &Value) -> (Value, Value,
         Some(h) => format!("{h}: {text}"),
         None => text.to_string(),
     };
-    if multi {
-        // A permission picks one option; the agent gets the one picked.
-        title.push_str(" (pick one)");
-    }
+    if multi { title.push_str(" (select all that apply)"); }
     let mut labels = Vec::new();
     let mut options: Vec<Value> = Vec::new();
     for (i, o) in q.get("options").and_then(Value::as_array).into_iter().flatten().enumerate() {
@@ -1328,16 +1355,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn elicitation_array_choices_keep_values_titles_and_selection_bounds() {
+        let form=json!({"properties":{"databases":{"type":"array","minItems":1,"maxItems":2,"items":{"type":"string","anyOf":[{"const":"pg","title":"Postgres"},{"const":"lite","title":"SQLite"}]}}}});
+        let parsed=elicitation_choice(&form).unwrap();
+        assert_eq!(parsed.field,"databases"); assert_eq!(parsed.multiple,Some((1,2)));
+        assert_eq!(parsed.choices,vec![(json!("pg"),"Postgres".into()),(json!("lite"),"SQLite".into())]);
+        assert_eq!(answer_indices(r#"answer:multi:["answer:0","answer:1"]"#,2,true),Some(vec![0,1]));
+        assert!(answer_indices(r#"answer:multi:["answer:0","answer:0"]"#,2,true).is_none());
+        assert!(answer_indices(r#"answer:multi:["answer:0"]"#,2,false).is_none());
+        assert_eq!(answer_indices("answer:1",2,false),Some(vec![1]));
+        assert_eq!(answer_indices("answer:multi:[]",2,true),Some(vec![]));
+        let impossible=json!({"properties":{"x":{"type":"array","minItems":3,"items":{"enum":["one","two"]}}}});
+        assert!(elicitation_choice(&impossible).is_none());
+    }
+
+    #[test]
     fn an_elicitation_of_one_choice_is_asked_like_a_question() {
         // What Axel's `send` asks when an agent may not reach another.
         let form = json!({ "type": "object", "properties": { "answer": { "type": "string", "enum": ["Allow this message", "Always allow", "Don't allow"] } }, "required": ["answer"] });
-        let (field, choices) = elicitation_choice(&form).unwrap();
+        let ElicitationChoice {field,choices,multiple}=elicitation_choice(&form).unwrap();
+        assert!(multiple.is_none());
         assert_eq!(field, "answer");
         assert_eq!(choices.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>(), vec!["Allow this message", "Always allow", "Don't allow"]);
         let titled = json!({ "properties": { "db": { "oneOf": [{ "const": "pg", "title": "Postgres" }, { "const": "lite", "title": "SQLite" }] } } });
-        assert_eq!(elicitation_choice(&titled).unwrap().1, vec![(json!("pg"), "Postgres".to_string()), (json!("lite"), "SQLite".to_string())]);
+        assert_eq!(elicitation_choice(&titled).unwrap().choices, vec![(json!("pg"), "Postgres".to_string()), (json!("lite"), "SQLite".to_string())]);
         let yes_no = json!({ "properties": { "ok": { "type": "boolean" } } });
-        assert_eq!(elicitation_choice(&yes_no).unwrap().1[0], (json!(true), "Yes".to_string()));
+        assert_eq!(elicitation_choice(&yes_no).unwrap().choices[0], (json!(true), "Yes".to_string()));
         // Free text, or several fields: no form here, so it's declined.
         assert!(elicitation_choice(&json!({ "properties": { "name": { "type": "string" } } })).is_none());
         assert!(elicitation_choice(&json!({ "properties": { "a": { "type": "boolean" }, "b": { "type": "boolean" } } })).is_none());
@@ -1362,7 +1405,7 @@ mod tests {
         assert_eq!(names, vec!["Postgres — what production runs", "SQLite", "None of these (I'll answer in the chat)"]);
         assert!(options.as_array().unwrap().iter().all(|o| o["optionId"].as_str().unwrap().starts_with(ANSWER_PREFIX)), "the host knows it's a question");
         let (multi, _, _) = question_request(&json!("toolu_1"), 1, &json!({ "question": "Which?", "multiSelect": true, "options": [] }));
-        assert_eq!(multi["title"], "Which? (pick one)");
+        assert_eq!(multi["title"], "Which? (select all that apply)");
     }
 
     #[test]

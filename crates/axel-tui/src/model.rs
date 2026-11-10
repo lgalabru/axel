@@ -229,6 +229,8 @@ impl ItemStatus {
 pub struct ChoiceOption {
     pub id: String,
     pub label: String,
+    /// Declining this question is exclusive of other selections.
+    pub exclusive: bool,
 }
 
 /// Decoded body of a conversation item (the glue decodes the store's JSON).
@@ -253,6 +255,8 @@ pub enum ItemBody {
         /// Question text, or the tool title asking for permission.
         prompt: String,
         options: Vec<ChoiceOption>,
+        /// Minimum and maximum checks, or a single-choice question.
+        multiple: Option<(usize, usize)>,
         /// Label of the chosen option once answered.
         chosen: Option<String>,
     },

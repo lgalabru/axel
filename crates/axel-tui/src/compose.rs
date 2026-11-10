@@ -198,6 +198,7 @@ pub fn answer_key(v: &mut ThreadView, key: crossterm::event::KeyEvent) -> Answer
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return AnswerKey::Leave,
         KeyCode::Up | KeyCode::Down | KeyCode::Enter => {}
         KeyCode::Char(c) if c.is_ascii_digit() => {}
+        KeyCode::Char(' ') if v.pending_choice().is_some_and(|i|matches!(v.data.items[i].body,crate::model::ItemBody::Choice {multiple:Some(_),..})) => {}
         _ => return AnswerKey::None,
     }
     match v.handle_compose_key(key) {
@@ -212,8 +213,13 @@ fn render_answer(frame: &mut Frame, v: &ThreadView) {
     let Some(i) = v.pending_choice() else { return };
     let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
     let mut lines = row_lines(v, &Row::Choice(i), inner.width as usize, true);
+    // Replace the generic card hint with the popup's own controls.
+    lines.pop();
     lines.push(Line::from(""));
-    lines.push(Line::styled("↑↓ pick · Enter or 1–9 answer · Esc answer later in the composer", crate::theme::dim()));
+    let hint=if let crate::model::ItemBody::Choice {multiple:Some((min,max)),..}=v.data.items[i].body {
+        format!("↑↓ move · Space toggle · Enter confirm · {min}–{max} picks · Esc later")
+    } else {"↑↓ pick · Enter or 1–9 answer · Esc answer later in the composer".into()};
+    lines.push(Line::styled(hint, crate::theme::dim()));
     if let Some(st) = &v.status {
         lines.push(Line::styled(st.clone(), crate::theme::dim()));
     }
@@ -320,8 +326,9 @@ mod answer_tests {
             ItemKind::Question,
             ItemBody::Choice {
                 prompt: "Database: Which one?".into(),
-                options: vec![ChoiceOption { id: "answer:0".into(), label: "Postgres".into() }, ChoiceOption { id: "answer:1".into(), label: "SQLite".into() }],
+                options: vec![ChoiceOption { id: "answer:0".into(), label: "Postgres".into(), exclusive: false }, ChoiceOption { id: "answer:1".into(), label: "SQLite".into(), exclusive: false }],
                 chosen: None,
+                multiple: None,
             },
             9_000,
         );
@@ -338,6 +345,38 @@ mod answer_tests {
         assert_eq!(new_questions(&v, &asked), vec!["q1".to_string()], "the fixture's pending permission isn't a question");
         asked.insert("q1".to_string());
         assert!(new_questions(&v, &asked).is_empty());
+    }
+
+    #[test]
+    fn multi_choice_popup_toggles_confirms_and_preserves_checks_on_failure() {
+        let mut data=only_question(question_data(),"q1");
+        if let ItemBody::Choice {multiple,options,..}=&mut data.items[0].body {
+            *multiple=Some((1,2));
+            options.push(ChoiceOption {id:"answer:none".into(),label:"Decline".into(),exclusive:true});
+        }
+        let mut v=ThreadView::new("T1",data.clone()); v.compose_only=true;
+        let key=|code|KeyEvent::new(code,KeyModifiers::NONE);
+        assert_eq!(answer_key(&mut v,key(KeyCode::Enter)),AnswerKey::None,"minimum selection is enforced");
+        assert_eq!(answer_key(&mut v,key(KeyCode::Char(' '))),AnswerKey::None);
+        assert_eq!(answer_key(&mut v,key(KeyCode::Char('2'))),AnswerKey::None,"digits toggle; they do not submit");
+        assert_eq!(v.choice_checked["q1"].len(),2);
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,12)).unwrap();
+        terminal.draw(|f|render_answer(f,&v)).unwrap();
+        let buffer=terminal.backend().buffer();
+        let text=(0..12).map(|y|(0..80).map(|x|buffer[(x,y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("[x] Postgres") && text.contains("[x] SQLite") && text.contains("[ ] Decline"),"{text}");
+        assert!(text.contains("toggle") && text.contains("confirm"),"{text}");
+        v.set_data(data.clone());
+        let expected=AnswerKey::Send("S1".into(),SendCommand::Answer {item_id:"q1".into(),option_id:r#"answer:multi:["answer:0","answer:1"]"#.into()});
+        assert_eq!(answer_key(&mut v,key(KeyCode::Enter)),expected);
+        v.on_reply(Err("temporarily offline".into()));
+        assert_eq!(v.choice_checked["q1"].len(),2);
+        assert_eq!(answer_key(&mut v,key(KeyCode::Enter)),expected);
+        v.on_reply(Err("temporarily offline".into()));
+        answer_key(&mut v,key(KeyCode::Char('3')));
+        assert_eq!(v.choice_checked["q1"],std::collections::HashSet::from(["answer:none".into()]));
+        assert_eq!(answer_key(&mut v,key(KeyCode::Enter)),AnswerKey::Send("S1".into(),SendCommand::Answer {item_id:"q1".into(),option_id:"answer:none".into()}));
+        assert!(v.composer.is_empty(),"question shortcuts cannot leak into the draft");
     }
 
     #[test]

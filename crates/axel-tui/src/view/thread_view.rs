@@ -502,9 +502,9 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
         }
         Row::Choice(i) => {
             let it = &items[*i];
-            let (prompt, options, chosen) = match &it.body {
-                ItemBody::Choice { prompt, options, chosen } => (prompt.clone(), options.clone(), chosen.clone()),
-                _ => (String::new(), Vec::new(), None),
+            let (prompt, options, chosen, multiple) = match &it.body {
+                ItemBody::Choice { prompt, options, chosen, multiple } => (prompt.clone(), options.clone(), chosen.clone(), *multiple),
+                _ => (String::new(), Vec::new(), None, None),
             };
             let who = it.agent.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "agent".into());
             let (glyph, color, verb) = match it.kind {
@@ -521,12 +521,15 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 let sel = v.choice_index(&it.id);
                 for (oi, o) in options.iter().enumerate() {
                     let on = oi == sel;
+                    let checkbox = if multiple.is_some() {
+                        if v.choice_checked.get(&it.id).is_some_and(|s|s.contains(&o.id)) {"[x] "} else {"[ ] "}
+                    } else {""};
                     lines.push(Line::from(vec![
                         Span::styled(if on { "   ▸ " } else { "     " }, card.fg(theme::ACCENT)),
-                        Span::styled(o.label.clone(), if on { card.fg(theme::ACCENT).bold() } else { card }),
+                        Span::styled(format!("{checkbox}{}",o.label), if on { card.fg(theme::ACCENT).bold() } else { card }),
                     ]));
                 }
-                let hint = if selected { "↑↓ pick · Enter answer" } else { "Tab then ↑↓ to this card, Enter answers" };
+                let hint = if multiple.is_some() {"↑↓ move · Space toggle · Enter confirm"} else if selected { "↑↓ pick · Enter answer" } else { "Tab then ↑↓ to this card, Enter answers" };
                 lines.push(Line::from(Span::styled(format!("     {hint}"), card.fg(theme::DIM))));
                 lines
             } else {

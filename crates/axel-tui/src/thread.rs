@@ -219,6 +219,8 @@ pub struct ThreadView {
     pub expanded_tools: HashSet<String>,
     /// Highlighted option per pending choice item id.
     pub choice_sel: HashMap<String, usize>,
+    /// Checked options for pending multiple-choice questions.
+    pub choice_checked: HashMap<String, HashSet<String>>,
     pub composer: TextInput,
     /// Files dropped onto the composer, sent with the next message.
     pub attachments: Vec<PathBuf>,
@@ -259,6 +261,7 @@ impl ThreadView {
             expanded: HashSet::new(),
             expanded_tools: HashSet::new(),
             choice_sel: HashMap::new(),
+            choice_checked: HashMap::new(),
             composer: TextInput::new(),
             attachments: Vec::new(),
             attach_sel: 0,
@@ -288,6 +291,12 @@ impl ThreadView {
         let old_rows = self.rows();
         let key = old_rows.get(self.cursor).map(|r| r.key(&self.data.items));
         self.data = data;
+        self.choice_checked.retain(|id,checked| {
+            let Some(it)=self.data.items.iter().find(|it|&it.id==id && it.status==Some(ItemStatus::Pending)) else {return false};
+            let ItemBody::Choice {options,multiple:Some(_),..}=&it.body else {return false};
+            checked.retain(|id|options.iter().any(|o|&o.id==id));
+            true
+        });
         // The message being edited was read (or withdrawn) meanwhile: the edit
         // ends, and what was typed stays in the composer, to send as it is.
         if let Some(id) = &self.editing
@@ -393,11 +402,17 @@ impl ThreadView {
                     self.choice_sel.insert(id, (cur + 1).min(n.saturating_sub(1)));
                     return ThreadAction::None;
                 }
+                KeyCode::Char(' ') if matches!(self.data.items[i].body, ItemBody::Choice {multiple:Some(_),..}) => {
+                    self.toggle_choice(i); return ThreadAction::None;
+                }
                 KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => return self.answer(i),
                 KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                     let k = c as usize - '1' as usize;
                     if k < n {
                         self.choice_sel.insert(id, k);
+                        if matches!(self.data.items[i].body, ItemBody::Choice {multiple:Some(_),..}) {
+                            self.toggle_choice(i); return ThreadAction::None;
+                        }
                         return self.answer(i);
                     }
                     return ThreadAction::None;
@@ -956,6 +971,9 @@ impl ThreadView {
             KeyCode::Char('k') => self.move_cursor(-1),
             KeyCode::Char('j') => self.move_cursor(1),
             KeyCode::Char(' ') | KeyCode::Right => {
+                if let Some(Row::Choice(i))=self.current_row()
+                    && matches!(self.data.items[i].body,ItemBody::Choice {multiple:Some(_),..})
+                { self.toggle_choice(i); return ThreadAction::None; }
                 self.toggle_under_cursor();
                 ThreadAction::None
             }
@@ -1077,18 +1095,45 @@ impl ThreadView {
         }
     }
 
-    /// Enter on a pending choice: answer with the highlighted option.
+    /// Space toggles a checkbox without submitting. Decline is exclusive.
+    fn toggle_choice(&mut self, i: usize) {
+        let it=&self.data.items[i];
+        if self.sending || it.status != Some(ItemStatus::Pending) { return }
+        let ItemBody::Choice {options,multiple:Some((_,max)),..}=&it.body else { return };
+        let Some(opt)=options.get(self.choice_index(&it.id)) else { return };
+        let checked=self.choice_checked.entry(it.id.clone()).or_default();
+        if checked.remove(&opt.id) { self.status=None; return }
+        if opt.exclusive { checked.clear(); }
+        else {
+            checked.retain(|id| !options.iter().any(|o|o.exclusive && &o.id==id));
+            if checked.len()>=*max { self.set_status(format!("select at most {max} options")); return }
+        }
+        checked.insert(opt.id.clone());
+        self.status=None;
+    }
+
+    /// Enter confirms the selected set, or a single highlighted choice.
     fn answer(&mut self, i: usize) -> ThreadAction {
         let it = &self.data.items[i];
-        if it.status != Some(ItemStatus::Pending) || self.sending {
-            return ThreadAction::None;
-        }
-        let ItemBody::Choice { options, .. } = &it.body else { return ThreadAction::None };
+        if it.status != Some(ItemStatus::Pending) || self.sending { return ThreadAction::None }
+        let ItemBody::Choice { options, multiple, .. } = &it.body else { return ThreadAction::None };
         let Some(opt) = options.get(self.choice_index(&it.id)).cloned() else { return ThreadAction::None };
+        let (option_id,label) = if let Some((min,max))=multiple {
+            let selected:Vec<_>=options.iter().filter(|o| self.choice_checked.get(&it.id).is_some_and(|s|s.contains(&o.id))).collect();
+            if let Some(decline)=selected.iter().find(|o|o.exclusive).copied().or_else(||opt.exclusive.then_some(&opt)) {
+                (decline.id.clone(),decline.label.clone())
+            } else {
+                if selected.len()<*min || selected.len()>*max {
+                    self.set_status(format!("select {min}–{max} options before confirming")); return ThreadAction::None;
+                }
+                let ids:Vec<_>=selected.iter().map(|o|o.id.as_str()).collect();
+                (format!("answer:multi:{}",serde_json::to_string(&ids).expect("string ids")),format!("{} selections",ids.len()))
+            }
+        } else { (opt.id,opt.label) };
         let (session_id, item_id) = (it.session_id.clone(), it.id.clone());
         self.sending = true;
-        self.set_status(format!("answering {}…", opt.label));
-        ThreadAction::Send { session_id, cmd: SendCommand::Answer { item_id, option_id: opt.id } }
+        self.set_status(format!("answering {label}…"));
+        ThreadAction::Send { session_id, cmd: SendCommand::Answer { item_id, option_id } }
     }
 
     /// Enter (or ^S with `steer`) in the composer.
@@ -1281,11 +1326,12 @@ pub(crate) mod fixtures {
                 ItemBody::Choice {
                     prompt: "Run cargo test".into(),
                     options: vec![
-                        ChoiceOption { id: "allow_once".into(), label: "Allow once".into() },
-                        ChoiceOption { id: "allow_always".into(), label: "Always allow".into() },
-                        ChoiceOption { id: "reject".into(), label: "Reject".into() },
+                        ChoiceOption { id: "allow_once".into(), label: "Allow once".into(), exclusive: false },
+                        ChoiceOption { id: "allow_always".into(), label: "Always allow".into(), exclusive: false },
+                        ChoiceOption { id: "reject".into(), label: "Reject".into(), exclusive: false },
                     ],
                     chosen: None,
+                    multiple: None,
                 },
                 6_300,
             ),

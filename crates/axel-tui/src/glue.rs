@@ -489,7 +489,7 @@ fn options_of(v: &Value) -> Vec<ChoiceOption> {
                 .filter_map(|o| {
                     let id = str_of(o, &["optionId", "option_id", "id"])?.to_string();
                     let label = str_of(o, &["name", "label", "text", "title"]).unwrap_or(&id).to_string();
-                    Some(ChoiceOption { id, label })
+                    Some(ChoiceOption { id, label, exclusive: str_of(o, &["kind"]).is_some_and(|k| k.starts_with("reject")) })
                 })
                 .collect()
         })
@@ -543,10 +543,13 @@ pub(crate) fn decode_body(kind: ItemKind, content: &Value) -> ItemBody {
                 .or_else(|| content.get("tool_call").and_then(|tc| str_of(tc, &["title"]).map(str::to_string)))
                 .unwrap_or_else(|| "permission".to_string());
             let options = options_of(content);
+            let multiple = content.get("multi_select").and_then(|v| Some((v.get("min")?.as_u64()? as usize,v.get("max")?.as_u64()? as usize)));
             let chosen = str_of(content, &["chosen", "answer", "selected", "optionId", "option_id"]).map(|c| {
-                options.iter().find(|o| o.id == c).map(|o| o.label.clone()).unwrap_or_else(|| c.to_string())
+                let ids = c.strip_prefix("answer:multi:").and_then(|s|serde_json::from_str::<Vec<String>>(s).ok()).unwrap_or_else(||vec![c.to_string()]);
+                if ids.is_empty() {return "No selections".to_string()}
+                ids.iter().map(|id|options.iter().find(|o| &o.id == id).map(|o|o.label.clone()).unwrap_or_else(||id.clone())).collect::<Vec<_>>().join(", ")
             });
-            ItemBody::Choice { prompt, options, chosen }
+            ItemBody::Choice { prompt, options, chosen, multiple }
         }
         ItemKind::Answer => ItemBody::Answered(
             str_of(content, &["label", "name", "optionId", "option_id", "text"]).map(str::to_string).or_else(|| text_of(content)).unwrap_or_default(),
@@ -846,6 +849,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn multi_choice_metadata_and_completed_labels_survive_decoding() {
+        let body=decode_body(ItemKind::Question,&json!({"title":"Pick databases","multi_select":{"min":1,"max":2},"options":[{"option_id":"answer:0","name":"Postgres","kind":"allow_once"},{"option_id":"answer:1","name":"SQLite","kind":"allow_once"},{"option_id":"answer:none","name":"Decline","kind":"reject_once"}],"answer":r#"answer:multi:["answer:0","answer:1"]"#}));
+        let ItemBody::Choice {multiple,chosen,options,..}=body else {panic!("expected choice")};
+        assert_eq!(multiple,Some((1,2))); assert_eq!(chosen.as_deref(),Some("Postgres, SQLite"));
+        assert!(options[2].exclusive); assert!(!options[0].exclusive);
+    }
+
+    #[test]
     fn archived_usage_keeps_history_and_its_name_without_crowding_current_rows() {
         let store = Store::open_memory().unwrap();
         let owner = axel_identity::Keypair::generate();
@@ -923,8 +934,9 @@ mod tests {
             perm,
             ItemBody::Choice {
                 prompt: "Run cargo test".into(),
-                options: vec![ChoiceOption { id: "allow".into(), label: "Allow".into() }, ChoiceOption { id: "reject".into(), label: "Reject".into() }],
+                options: vec![ChoiceOption { id: "allow".into(), label: "Allow".into(), exclusive: false }, ChoiceOption { id: "reject".into(), label: "Reject".into(), exclusive: false }],
                 chosen: Some("Allow".into()),
+                multiple: None,
             }
         );
         assert_eq!(decode_body(ItemKind::AssistantMessage, &json!({"text": "hi"})), ItemBody::Text("hi".into()));

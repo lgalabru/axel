@@ -584,7 +584,14 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   `Question` item, and reports `blocked` + `kind=question`. The composer opens each new
   question in a floating, centered pane (`axel thread answer THREAD ITEM`): ↑↓ and Enter,
   or a digit, answers it; Esc leaves it to the composer. The labels picked go back to
-  Claude as the tool's `answers`. A multi-select question takes one pick.
+  Claude as the tool's `answers`. Multi-select questions show checkboxes: Space or
+  digits toggle, Enter confirms the selected set. Decline clears other checks;
+  single-choice questions retain immediate Enter/digit answers. MCP array enum
+  forms use the same popup, honoring min/max selection counts and returning the
+  original values. The host validates composite answers only for explicitly
+  marked questions; permission grants never accept multiple selections. Failed
+  sends retain checks, and completed cards show the selected labels. Existing
+  live hosts need restarting to load this protocol extension.
 - **Tool call details**: in the conversation pane each run of tool calls is an OSC 8
   link, `axel-links://tools?thread=…&fold=<first call id>&session=…&server=…`
   (`axel://` is the app's sign-in callback). A small handler app,
