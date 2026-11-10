@@ -1,8 +1,78 @@
-# Research notes (2026-10-31, Entire added 2026-11-05)
+# Research notes
 
 Condensed findings from read-only surveys; conclusions that changed a choice are in
 `adr/`. Raw per-method Rex schemas were
 captured during research; re-derive with `rex api describe METHOD --json`.
+
+## Graph engineering (2026-11-10)
+
+Read Arcos's [Graph Engineering article](https://x.com/0xarcos/article/2119068641740091716)
+from the owner's 23-page PDF export. The article is dated 2026-11-07; the export
+was created on 2026-11-10. The PDF snapshot has SHA-256
+`2cafd22a358a36891dc0991c182803d6ae6f705b82ab72e0d03ccfb541736430`.
+All pages were read; the printed checker and runner were also inspected visually.
+Code lines are clipped at the right edge in parts of the export. This is a review
+of that printed sample and its extracted text, not an executed reference repo or
+an independent reproduction of the author's overnight results.
+
+**Mechanism.** A splitter proposes units with file ownership and dependencies.
+Fresh Claude sessions work in separate Git worktrees. `graph.py` dispatches ready
+waves and merges accepted branches into `graph/integration`. `check.py` checks
+scope and runs the repository's test command. A Stop hook feeds failures back to
+one station. Outer retries return a structured failure packet to that unit.
+Risk lanes hold some candidates for the owner. Failures append to `lessons.md`;
+the planner is instructed to turn repeated lessons into future planning rules.
+The owner performs the final merge. See PDF pp. 6-7 and 10-21.
+
+**What the sample does not establish.** These are observations of the printed
+code, not claims about unpublished production tooling:
+
+| Source location | Observation | Consequence for Axel |
+|---|---|---|
+| `check.py`, p. 11 | Uses `git diff --name-only HEAD` plus untracked files | Compare against the assigned immutable base, including commits the worker made |
+| `check.py`, pp. 11-12 | Executes checker/config from the worker worktree; allowed test files can still be edited | Run trusted verification outside worker control; a locked-file prompt is not independent enforcement |
+| `waves()`, pp. 14-15 | Checks named dependencies and a nonempty unit-level `reads` string, but does not validate disjoint ownership | Validate each edge's artifact and overlapping paths before dispatch |
+| `lane()`, pp. 14-15 | Classifies declared file strings, which can themselves be globs | Classify actual changed paths, then apply owner-controlled risk rules |
+| Integration loop, pp. 15-16 | Merges green units but does not run a final combined test gate | Verify the exact combined candidate before final review |
+| `sh()` and `drive()`, pp. 14-15 | Several worktree/commit/model-process results are unchecked; subprocesses have no deadline | Failed commands must affect run state; enforce time and resource limits |
+| Run/ref naming, pp. 14-15 | Minute-based run directories and reusable `graph/integration` / `graph/<unit>` branches; no recovery journal | Use unique run IDs, immutable references, leases and crash reconciliation |
+| Stop hook and outer loop, pp. 12-15 | Local hook retries are reset inside each outer attempt | Define one repair budget; nested limits are not three total repair cycles |
+| `RED nothing changed`, p. 11 | An already satisfied task cannot pass without an edit | Permit a verified no-op rather than encourage unnecessary changes |
+| `lessons.md` / splitter, pp. 14-15 and 20-21 | Lesson promotion depends on planner instructions, without a checked promotion record | Separate evidence, suggested planning lessons and owner-controlled policy |
+| Run report, pp. 16-17 | Counts shipped integration units and held units, including an example with two owner touches | Keep partial completion and additional owner input explicit |
+| Headline versus runner, pp. 1 and 14-16 | Claims twenty agents across four repos, while this runner operates from one root and configures four workers | Treat twenty-way and multi-repo operation as experiments, not demonstrated guarantees |
+
+**External evidence checked on 2026-11-10.** Anthropic's
+[Building effective agents](https://www.anthropic.com/research/building-effective-agents)
+separates workflows from agents and describes orchestrator-worker and
+evaluator-optimizer patterns. It supports using simple composable control flow;
+it does not require discarding advisory model review.
+
+Anthropic's [multi-agent research system](https://www.anthropic.com/research/multi-agent-research-system)
+reports a 90.2% improvement over single-agent Opus 4 on an internal research eval,
+and approximately 15 times chat token use. It also notes that coding often offers
+less parallel work. Those are research-system results, not a coding speedup or
+budget forecast for Axel.
+
+Cognition's [Don't Build Multi-Agents](https://cognition.com/blog/dont-build-multi-agents)
+warns about lost context and conflicting implicit decisions. Separate worktrees
+address filesystem interference, not all semantic coordination. Preserve shared
+requirements and interfaces, and make relevant decision traces retrievable.
+
+The current [Claude Code Stop hook reference](https://code.claude.com/docs/en/hooks#stop)
+supports blocking completion with exit 2 and describes an eight-consecutive-
+continuation cap. That counter resets on a tool call and is configurable. It is
+not an overnight run budget, and Axel should own acceptance outside a
+harness-specific hook.
+
+**What we take.** A deterministic controller, isolated worker contexts, named
+input artifacts, executable acceptance gates, scoped retries, private integration
+and an owner review of the final candidate. We do not take first-attempt green as
+a proof of low risk, worktrees as a security sandbox, or a shared mutable rule file
+as an automatic learning system.
+
+The adaptation, proposed milestones and unanswered questions are in
+[RFD 0002](rfd/0002-verified-agent-graphs.md). It remains a proposal.
 
 ## Rex (Superlogical) — Beta 0.1.0, API revision 7
 
