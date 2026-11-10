@@ -42,3 +42,4 @@ An RFD can be rough. It cannot be vague about what question it is asking.
 |---|---|---|
 | [0000](0000-template.md) | Template | – |
 | [0001](0001-thread-controls.md) | Thread controls: a pane to reset, move, settle, archive and read a thread's sessions | discussion |
+| [0002](0002-verified-agent-graphs.md) | Verified agent graphs with one final review | discussion |
