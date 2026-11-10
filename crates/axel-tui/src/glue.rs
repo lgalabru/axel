@@ -794,6 +794,11 @@ pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
         add(&mut data.last_hour, &w.last_hour);
         add(&mut data.last_day, &w.last_day);
         add(&mut data.total, &w.total);
+        // Retain historical totals without reviving dormant archived agents as
+        // anonymous rows that crowd the live pane's labels out.
+        if agent.is_none() && w.last_day.tokens() == 0 && w.last_day.cost_usd == 0.0 { continue }
+        let archived = if agent.is_none() { store.agent_by_pubkey(&w.key).map_err(se)? } else { None };
+        let agent = agent.or(archived.as_ref());
         data.agents.push(AgentSpend {
             name: agent.map(|a| a.name.clone()).unwrap_or_else(|| w.key.chars().take(8).collect()),
             color: agent.and_then(|a| a.color),
@@ -806,9 +811,7 @@ pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
         });
     }
     for w in store.usage_by_thread(now, 20).map_err(se)? {
-        if w.last_day.turns == 0 {
-            break; // most recent first: the rest are older still
-        }
+        if w.last_day.tokens() == 0 && w.last_day.cost_usd == 0.0 { continue }
         let title = store.get_thread(&w.key).map_err(se)?.map(|t| t.title).unwrap_or_else(|| w.key.chars().take(8).collect());
         data.threads.push(ThreadSpend { title, last_day: w.last_day, total: w.total });
     }
@@ -841,6 +844,25 @@ fn add(to: &mut axel_store::UsageTotals, u: &axel_store::UsageTotals) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn archived_usage_keeps_history_and_its_name_without_crowding_current_rows() {
+        let store = Store::open_memory().unwrap();
+        let owner = axel_identity::Keypair::generate();
+        let pk = owner.public().to_string();
+        store.insert_agent(&NewAgent {pubkey:pk.clone(),name:"atlas".into(),harness:axel_store::Harness::Codex,model:None,skills:vec![],prompt:None,color:None,runtime_mode:Default::default(),auth_tag:None}).unwrap();
+        let thread=store.create_thread(&owner,"usage","",None).unwrap();
+        let session=store.start_session(&owner,&axel_store::NewSession {thread_id:thread.id,agent_pubkey:pk.clone(),environment_id:"local".into(),environment_label:"local".into(),project_repo_key:None,harness:axel_store::Harness::Codex,runtime_mode:Default::default(),resumed_from:None,runtime:SessionRuntime::Managed}).unwrap();
+        store.add_usage(&owner,&session.id,&axel_store::UsageDelta {input_tokens:1,cost_usd_est:1.0,..Default::default()},None).unwrap();
+        store.archive_agent(&pk).unwrap();
+        let now=chrono::Utc::now().timestamp();
+        let today=load_usage(&store,now).unwrap();
+        assert_eq!(today.agents[0].name,"atlas","recent spend retains the archived agent's name");
+        assert_eq!(today.threads.len(),1,"an ongoing turn can spend before its first completion");
+        let old=load_usage(&store,store.usage(&session.id).unwrap().unwrap().updated_at+86_401).unwrap();
+        assert!(old.agents.is_empty(),"no anonymous row for an inactive archived agent");
+        assert_eq!(old.total.cost_usd,1.0,"history is still part of all-time totals");
+    }
 
     #[test]
     fn a_local_session_falling_outside_the_window_does_not_reappear_as_a_summary() {
