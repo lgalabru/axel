@@ -14,6 +14,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { DOCS, REPO } from "@/lib/site";
+import { DemoVideo } from "@/components/demo-video";
 
 /* ---------------------------------------------------------------- terminal */
 
@@ -523,6 +524,8 @@ export default function Home() {
           </span>
         </div>
       </section>
+
+      <DemoVideo />
 
       <div className="relative z-10 bg-ink">
         <div className="pointer-events-none absolute inset-0 mx-auto max-w-5xl">
