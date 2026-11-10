@@ -31,6 +31,9 @@ pub struct AgentEntry {
     /// Model override, if configured.
     #[schemars(description = "Model override")]
     pub model: Option<String>,
+    /// Reasoning effort, if configured: low, medium, high, xhigh, or max.
+    #[schemars(description = "Reasoning effort; null means the harness's default")]
+    pub effort: Option<String>,
     /// Runtime mode: autopilot, edits, supervised, or plan.
     #[schemars(description = "Runtime mode")]
     pub runtime_mode: String,
@@ -58,6 +61,7 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
                 pubkey: a.pubkey,
                 harness: a.harness.to_string(),
                 model: a.model,
+                effort: a.effort.map(|e| e.to_string()),
                 runtime_mode: a.runtime_mode.to_string(),
                 archived: a.archived_at.is_some(),
                 unread,

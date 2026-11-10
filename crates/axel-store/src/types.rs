@@ -173,6 +173,12 @@ str_enum! {
     AgentColor { Purple => "purple", Yellow => "yellow", Red => "red", Green => "green", Blue => "blue", Gray => "gray", Orange => "orange" }
 }
 
+str_enum! {
+    /// How hard an agent's model should think, as the owner sets it per agent.
+    /// An agent without one runs at its harness's own default.
+    Effort { Low => "low", Medium => "medium", High => "high", Xhigh => "xhigh", Max => "max" }
+}
+
 /// The CLI an agent runs in: one Axel knows how to drive, or any other command.
 ///
 /// Stored and serialised as plain text: the builtin name, or the custom
@@ -303,6 +309,40 @@ impl Harness {
         })
     }
 
+    /// Whether the harness's ACP adapter is inside `axel` (`axel claude-acp`,
+    /// `axel codex-acp`) rather than a command of its own.  Those adapters
+    /// start the harness themselves, so they take the agent's effort when
+    /// the session is created instead of as an ACP config option.
+    pub fn has_builtin_adapter(&self) -> bool {
+        matches!(self, Harness::Claude | Harness::Codex)
+    }
+
+    /// The harness CLI's own word for `effort`, when it documents that level:
+    /// Claude Code (`--effort`) and Pi (`--thinking`) take all five; Codex
+    /// (`model_reasoning_effort`) and Grok (`--reasoning-effort`) stop at
+    /// xhigh.
+    pub fn native_effort(&self, effort: Effort) -> Option<&'static str> {
+        match (self, effort) {
+            (Harness::Claude | Harness::Pi, e) => Some(e.as_str()),
+            (Harness::Codex | Harness::Grok, Effort::Max) => None,
+            (Harness::Codex | Harness::Grok, e) => Some(e.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Arguments that make the harness's CLI run at `effort` in a pane.
+    /// `None`: this pane has no documented way to take that level.
+    pub fn pane_effort_args(&self, effort: Effort) -> Option<Vec<String>> {
+        let level = self.native_effort(effort)?;
+        Some(match self {
+            Harness::Claude => vec!["--effort".into(), level.into()],
+            Harness::Codex => vec!["-c".into(), format!("model_reasoning_effort={level}")],
+            Harness::Pi => vec!["--thinking".into(), level.into()],
+            Harness::Grok => vec!["--reasoning-effort".into(), level.into()],
+            _ => return None,
+        })
+    }
+
     /// How to install it, in one line.
     pub fn install(&self) -> &str {
         match self {
@@ -414,6 +454,8 @@ pub struct Agent {
     pub name: String,
     pub harness: Harness,
     pub model: Option<String>,
+    /// How hard its model thinks; `None` is the harness's default.
+    pub effort: Option<Effort>,
     pub skills: Vec<String>,
     pub prompt: Option<String>,
     pub color: Option<AgentColor>,
@@ -431,6 +473,8 @@ pub struct NewAgent {
     pub name: String,
     pub harness: Harness,
     pub model: Option<String>,
+    /// How hard its model thinks; `None` is the harness's default.
+    pub effort: Option<Effort>,
     pub skills: Vec<String>,
     pub prompt: Option<String>,
     pub color: Option<AgentColor>,

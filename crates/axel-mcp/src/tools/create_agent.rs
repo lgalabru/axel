@@ -165,6 +165,7 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
             name: name.to_string(),
             harness: harness.clone(),
             model: params.model.clone(),
+            effort: None,
             skills,
             prompt: params.prompt,
             color,

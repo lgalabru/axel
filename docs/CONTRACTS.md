@@ -171,6 +171,7 @@ impl Store {
     pub fn touch_agent(&self, pk: &str) -> Result<(), Error>; pub fn archive_agent(&self, pk: &str) -> Result<(), Error>;
     pub fn touch_agent(&self, pk: &str) -> Result<(), Error>; pub fn rename_agent(&self, pk: &str, name: &str) -> Result<(), Error>;   // key, policy, history stay; running sessions keep the old name
     pub fn touch_agent(&self, pk: &str) -> Result<(), Error>; pub fn set_agent_profile(&self, pk: &str, skills: Option<&[String]>, prompt: Option<&str>, color: Option<AgentColor>) -> Result<(), Error>;   // each Some replaces; "" clears the prompt
+    pub fn set_agent_effort(&self, pk: &str, effort: Option<Effort>) -> Result<(), Error>;   // None: the harness's own default; sessions started afterwards see it
     pub fn known_identity_name(&self, pubkey: &str) -> Result<Option<String>, Error>;   // agent name, or participant display if known
 }
 
@@ -187,9 +188,15 @@ pub struct Appended { pub inserted: bool, pub projected: bool, pub rejected_reas
 pub enum BlockedKind { Permission, Question, Auth }
 pub enum Relationship { Fork, Subagent, Delegation }
 pub enum AgentColor { Purple, Yellow, Red, Green, Blue, Gray, Orange }                      // the TUI's seven agent colours, in cycle order
+pub enum Effort { Low, Medium, High, Xhigh, Max }                                           // how hard an agent's model thinks; an agent without one runs at its harness's default
 // Not Copy and no ALL: parsing never fails (anything that is not a builtin is Custom).  Serialised as the builtin name or the custom command.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)] pub enum Harness { #[default] Claude, Codex, Opencode, Custom(String) }
 impl Harness { pub const BUILTIN: [Harness; 3]; pub fn as_str(&self) -> &str; pub fn parse(s: &str) -> Harness; pub fn is_builtin(&self) -> bool; }   // FromStr<Err = Infallible>, Display, Serialize/Deserialize as a string
+impl Harness {   // reasoning effort, by capability (ADR 0007)
+    pub fn native_effort(&self, effort: Effort) -> Option<&'static str>;     // the harness CLI's own word for the level: claude and pi all five; codex and grok all but max; others None
+    pub fn pane_effort_args(&self, effort: Effort) -> Option<Vec<String>>;   // claude --effort L; codex -c model_reasoning_effort=L; pi --thinking L; grok --reasoning-effort L; None = this pane cannot apply it
+    pub fn has_builtin_adapter(&self) -> bool;                               // claude and codex: their ACP adapter is inside `axel` and takes the effort in `_meta.axel.effort`
+}
 pub struct Thread { pub id: String, pub title: String, pub intent: String, pub state: ThreadState, pub created_by: String, pub parent_thread_id: Option<String>, pub relationship: Option<Relationship>, pub created_at: i64, pub updated_at: i64, pub done_at: Option<i64> }
 pub struct ThreadWorkspace { pub kind: WorkspaceKind, pub branch: Option<String>, pub worktree_path: Option<PathBuf> }
 pub struct ThreadProject { pub thread_id: String, pub repo_key: Option<String>, pub path_hint: PathBuf, pub workspace: ThreadWorkspace, pub local_project_id: Option<String> /* resolved on this replica by repo_key or path */, pub added_at: i64 }
@@ -205,10 +212,17 @@ pub struct UsageSample { pub session_id: String, pub at: i64, pub input_tokens: 
 pub struct ThreadSummary { pub thread: Thread, pub projects: Vec<ThreadProject>, pub participants: Vec<Participant>, pub sessions_total: i64, pub sessions_live: Vec<Session> /* non-ended */, pub agents: Vec<String>, pub environments: Vec<String /*labels*/>, pub usage: Usage, pub live: Option<Status> /* most urgent: blocked > error > working > done > idle */ }
 #[derive(Default)] pub struct ThreadFilter { pub states: Option<Vec<ThreadState>>, pub agent_pubkey: Option<String>, pub participant: Option<String>, pub repo_key: Option<String>, pub limit: Option<usize> }
 #[derive(Default)] pub struct SessionFilter { pub thread_id: Option<String>, pub agent_pubkey: Option<String>, pub environment_id: Option<String>, pub states: Option<Vec<SessionState>>, pub limit: Option<usize> }
-pub struct Agent { pub pubkey: String, pub name: String, pub harness: Harness, pub model: Option<String>, pub skills: Vec<String>, pub prompt: Option<String>, pub color: Option<AgentColor>, pub runtime_mode: RuntimeMode, pub auth_tag: Option<Vec<String>>, pub created_at: i64, pub last_seen_at: Option<i64>, pub archived_at: Option<i64> }
-#[derive(Default)] pub struct NewAgent { pub pubkey: String, pub name: String, pub harness: Harness, pub model: Option<String>, pub skills: Vec<String>, pub prompt: Option<String>, pub color: Option<AgentColor>, pub runtime_mode: RuntimeMode, pub auth_tag: Option<Vec<String>> }
+pub struct Agent { pub pubkey: String, pub name: String, pub harness: Harness, pub model: Option<String>, pub effort: Option<Effort>, pub skills: Vec<String>, pub prompt: Option<String>, pub color: Option<AgentColor>, pub runtime_mode: RuntimeMode, pub auth_tag: Option<Vec<String>>, pub created_at: i64, pub last_seen_at: Option<i64>, pub archived_at: Option<i64> }
+#[derive(Default)] pub struct NewAgent { pub pubkey: String, pub name: String, pub harness: Harness, pub model: Option<String>, pub effort: Option<Effort>, pub skills: Vec<String>, pub prompt: Option<String>, pub color: Option<AgentColor>, pub runtime_mode: RuntimeMode, pub auth_tag: Option<Vec<String>> }
 // Environment and Project(+repo_key) unchanged.
 ```
+
+An agent's reasoning effort is part of its record, beside its model: the nullable `agents.effort`
+column (schema v10; NULL, or text this build does not know, is the harness's default). Like the
+model it is in no envelope, so it changes no signature and no merge. It reaches a remote host the
+way the model does, in the job's agent profile (`JobAgent.effort`; a host that predates the field
+ignores it, and a job without it, or with anything there that is not a level the host knows, reads
+as no effort).
 
 Authorization in `append`: kind 100 → always (signer becomes owner). Other thread kinds → signer is a participant of `t`, or an agent whose `agents.auth_tag` owner is a participant, or (kinds 20/21/110–112) signer is one of this replica's own agents. Non-thread kinds (notes etc. without `t`) → always. Rejected envelopes are kept with `rejected_reason` and re-tried by `rebuild_projections`.
 
@@ -266,6 +280,23 @@ Inbox screen: list pending requests + recent messages for the owner and all agen
 
 The host prefers a model selector from ACP `configOptions` and sends
 `session/set_config_option`; adapters without one retain `session/set_model`.
+An agent's reasoning effort (`HostConfig::effort`) is applied when the session is created or
+loaded. Axel's own adapters take it in `_meta.axel.effort`: `claude-acp` starts Claude Code with
+`--effort LEVEL`, `codex-acp` adds `model_reasoning_effort` to the thread's config overrides
+(`thread/start` and `thread/resume`). That holds while the harness runs under that adapter
+(`Harness::has_builtin_adapter` and no `AXEL_ACP_CLAUDE` / `AXEL_ACP_CODEX` override naming another
+program); behind an override it is an ACP agent like any other and gets no `_meta.axel.effort`.
+Every other harness is asked through ACP `configOptions`: the select option with category
+`thought_level`, else one whose id or name says effort, reasoning or thinking (never one that says
+summary, and one offering effort levels before one that does not), gets
+`session/set_config_option`, and only with a value it advertises. When the level cannot be applied
+(no such option, value not offered, the request refused, Codex and `max`) the host says so in its
+log and as an item on the thread, and the session goes on. Under Axel's own adapter nothing is sent
+and the session runs at the harness default. Any other harness keeps the level it has, which need
+not be its default: the warning names the selector's `currentValue` ("it stays at high") when it
+reports one, and otherwise says its effort is unchanged. No effort set sends nothing.
+A pane gets `Harness::pane_effort_args` ahead of its other arguments; a pane that cannot take the
+level warns at launch and starts unchanged. `axel agent show` says what is knowable in advance.
 Standard `usage_update.used` is a context gauge, not billable token usage.
 Its cumulative USD cost is recorded once, without adding it again from Axel's
 usage extension or the prompt reply. Other currencies are not treated as USD.
@@ -274,7 +305,7 @@ usage extension or the prompt reply. Other currencies are not treated as USD.
 // Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
 pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
 
-pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String> }
+pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort> }
 pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_identity::Keypair, out: impl std::io::Write + Send) -> anyhow::Result<()>;
 //   - spawns adapter, initialize (clientCapabilities fs read/write = true, terminal = false), session/new {cwd, mcpServers: []} (or session/load when resume_native_id and agent supports loadSession)
 //   - stores native session id via store.update_session(harness_session_id)

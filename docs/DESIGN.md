@@ -36,7 +36,7 @@ aren't decisions yet are in `rfd/`.
 |---|---|
 | **Environment** | A machine running Axel: its filesystem, credentials, DB. Identified by a stable `environment_id`, and by the Rex `host_id` when reachable through Rex. |
 | **Project** | A directory on an environment, usually a git root, optionally with an `AXEL.md`. Projects on different environments that share a `repo_key` (canonical remote URL) are the same repository. |
-| **Agent** | A named identity (Ed25519 keypair, owner attestation) plus a *profile*: harness, model, skills, default prompt, colour. Reusable across threads. Has an inbox. |
+| **Agent** | A named identity (Ed25519 keypair, owner attestation) plus a *profile*: harness, model, reasoning effort, skills, default prompt, colour. Reusable across threads. Has an inbox. |
 | **Harness** | The program that runs the agent: `claude`, `codex`, `opencode`, or a custom command. |
 | **Thread** | **The primitive.** An intent (the initial prompt) and everything done in its name: attached to 0..n projects, realized by many agent *sessions* over time, on one or many environments. States: `open → done → archived`. Live state is derived from its sessions. |
 | **Session** | One agent instance working on a thread: agent + environment + (optional) project + harness process. Owns the Rex block, the harness's own session id (for `--resume`), the transcript, status and token usage. States: `starting → running ⇄ blocked ⇄ idle → ended`. |
@@ -423,7 +423,7 @@ See *The thread model* above for `threads`, `thread_projects`, `sessions`, `stat
 
 ```sql
 environments(id PK, label, rex_host_id, is_local, created_at)
-agents(pubkey PK, name UNIQUE, harness, model, skills_json, prompt, color,
+agents(pubkey PK, name UNIQUE, harness, model, effort NULL, skills_json, prompt, color,
        runtime_mode, auth_tag_json, created_at, last_seen_at, archived_at)
 mentions(message_id, pubkey, PRIMARY KEY(message_id, pubkey))
 message_refs(message_id, ref_id)
@@ -522,6 +522,28 @@ Grouped provider choices are supported. Standard `usage_update.used` and `size`
 are context gauges. A cumulative USD `cost` is added only as it grows, without
 counting it again from the adapter's usage extension or prompt reply. Other
 currencies stay out of the USD total.
+
+**Reasoning effort** is part of an agent's profile, beside its model: `low`, `medium`,
+`high`, `xhigh` or `max` (`axel agent new|edit --effort`), or none for the harness's own
+default. Like the model it lives on the agent's record and reaches a remote host in the
+job's agent profile. It is applied by capability, never by harness name:
+
+- a **pane** gets the harness's own flag ahead of its other arguments
+  (`Harness::pane_effort_args`: Claude Code `--effort`, Codex `-c model_reasoning_effort=`,
+  Pi `--thinking`, Grok `--reasoning-effort`);
+- a managed session under one of **Axel's own adapters** gets it in `_meta.axel.effort` of
+  `session/new` / `session/load`, and the adapter starts the harness at it (Claude Code
+  `--effort`, Codex `model_reasoning_effort` in the thread's config overrides);
+- **any other ACP agent**, a Claude or Codex behind an `AXEL_ACP_CLAUDE` / `AXEL_ACP_CODEX`
+  override included, is set through the effort selector it advertises in `configOptions`
+  (category `thought_level`, else one named for effort, reasoning or thinking, never a
+  summary selector), with `session/set_config_option` and only to a value it offers.
+
+A level that cannot be applied never fails the session. Axel says so: at launch for a pane,
+on the thread and in the log for a managed session, and in `axel agent show` for what is
+knowable in advance. A pane, or a session under Axel's own adapter, then runs at the
+harness's default; an ACP agent Axel could not change keeps the level it already has, which
+the warning names when the agent reports it.
 
 An agent without the live-steering capability queues prompts until its turn
 finishes. Ctrl+S cancels that turn and sends the new prompt. The live-steering

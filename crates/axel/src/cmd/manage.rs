@@ -293,7 +293,7 @@ mod tests {
             let key = Keypair::generate();
             ctx.store.insert_agent(&NewAgent {
                 pubkey: key.public().to_base58(), name: name.into(), harness: Harness::Claude,
-                model: None, skills: vec![], prompt: None, color: None, runtime_mode: RuntimeMode::default(),
+                model: None, effort: None, skills: vec![], prompt: None, color: None, runtime_mode: RuntimeMode::default(),
                 auth_tag: Some(attest(&owner, &key.public(), "").unwrap().to_tag()),
             }).unwrap();
             key

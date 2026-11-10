@@ -6,6 +6,8 @@
 //! content; `writefile:<path>:<text>` asks the client to write; `sleep` waits
 //! until `session/cancel` and returns `cancelled`; `thought` also streams a
 //! thought chunk.  Set `FAKE_AGENT_PERMISSION=0` to skip the permission request.
+//! `FAKE_AGENT_LOAD` makes it take `session/load`; `FAKE_AGENT_EFFORT` makes it
+//! advertise a reasoning-effort selector in its `configOptions`.
 
 use std::io::{BufRead, Write};
 
@@ -33,11 +35,11 @@ fn main() {
                 id,
                 json!({
                     "protocolVersion": 1,
-                    "agentCapabilities": { "loadSession": false, "promptCapabilities": { "image": true, "embeddedContext": false } },
+                    "agentCapabilities": { "loadSession": std::env::var_os("FAKE_AGENT_LOAD").is_some(), "promptCapabilities": { "image": true, "embeddedContext": false } },
                     "agentInfo": { "name": "fake-acp-agent", "version": "0.0.1" }
                 }),
             ),
-            "session/new" => {
+            "session/new" | "session/load" => {
                 let mut result = json!({ "sessionId": "fake-session-1" });
                 let available = json!([{ "modelId": "provider/flash", "name": "Flash" }, { "modelId": "provider/slow", "name": "Slow" }]);
                 match std::env::var("FAKE_AGENT_MODELS").as_deref() {
@@ -54,7 +56,57 @@ fn main() {
                     Ok("legacy") => result["models"] = json!({ "currentModelId": "provider/slow", "availableModels": available }),
                     _ => {}
                 }
+                // An effort selector: by category, or only by what it is called.
+                let levels = json!([{ "value": "low", "name": "Low" }, { "value": "medium", "name": "Medium" }, { "value": "high", "name": "High" }]);
+                let effort = match std::env::var("FAKE_AGENT_EFFORT").as_deref() {
+                    Ok("category" | "refuse") => Some(json!({
+                        "id": "thinking-budget", "name": "Depth", "category": "thought_level", "type": "select", "currentValue": "medium", "options": levels
+                    })),
+                    // A selector that does not say what it is set to.
+                    Ok("no-current") => Some(json!({ "id": "thinking-budget", "name": "Depth", "category": "thought_level", "type": "select", "options": levels })),
+                    Ok("named") => Some(json!({
+                        "id": "depth", "name": "Reasoning effort", "type": "select", "currentValue": "medium",
+                        "options": [{ "group": "levels", "name": "Levels", "options": levels }]
+                    })),
+                    // Groups inside groups, which ACP does not have: `high` is forty groups down.
+                    Ok("nested") => {
+                        let mut deeper = json!({ "value": "high", "name": "High" });
+                        for _ in 0..40 {
+                            deeper = json!({ "group": "deeper", "name": "Deeper", "options": [deeper] });
+                        }
+                        Some(json!({
+                            "id": "thinking-budget", "name": "Depth", "category": "thought_level", "type": "select", "currentValue": "medium",
+                            "options": [{ "group": "levels", "name": "Levels", "options": [{ "value": "low", "name": "Low" }, { "value": "medium", "name": "Medium" }, deeper] }]
+                        }))
+                    }
+                    // Codex-like: named only, listed after a summary selector that also says "reasoning".
+                    Ok("after-summary") => Some(json!({
+                        "id": "reasoning_effort", "name": "Reasoning Effort", "type": "select", "currentValue": "medium", "options": levels
+                    })),
+                    _ => None,
+                };
+                if let Some(effort) = effort {
+                    let mut options = result["configOptions"].as_array().cloned().unwrap_or_default();
+                    // A boolean and an unrelated selector the host must pass over.
+                    options.push(json!({ "id": "thinking", "name": "Show thinking", "type": "boolean", "currentValue": true }));
+                    options.push(json!({ "id": "sandbox", "name": "Sandbox", "type": "select", "currentValue": "on", "options": [{ "value": "on", "name": "On" }] }));
+                    if std::env::var("FAKE_AGENT_EFFORT").as_deref() == Ok("after-summary") {
+                        options.push(json!({
+                            "id": "reasoning_summary", "name": "Reasoning Summary", "type": "select", "currentValue": "auto",
+                            "options": [{ "value": "auto", "name": "Auto" }, { "value": "concise", "name": "Concise" }, { "value": "detailed", "name": "Detailed" }, { "value": "none", "name": "None" }]
+                        }));
+                    }
+                    options.push(effort);
+                    result["configOptions"] = json!(options);
+                }
                 respond(id, result);
+            }
+            "session/set_config_option" if params["configId"] != "model-picker" && std::env::var("FAKE_AGENT_EFFORT").is_ok() => {
+                if std::env::var("FAKE_AGENT_EFFORT").as_deref() == Ok("refuse") {
+                    send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": "effort is locked" } }));
+                } else {
+                    respond(id, json!({ "configOptions": [] }));
+                }
             }
             "session/set_config_option" if std::env::var("FAKE_AGENT_MODELS").as_deref() == Ok("config") => {
                 assert_eq!(params["configId"], "model-picker");

@@ -268,6 +268,11 @@ impl Agent {
         if !mcp.is_empty() {
             thread["config"] = json!({ "mcp_servers": mcp });
         }
+        // The agent's reasoning effort, from the host (`_meta.axel.effort`):
+        // the same override as `-c model_reasoning_effort=LEVEL`.
+        if let Some(effort) = crate::host::meta_effort(params).and_then(|e| axel_store::Harness::Codex.native_effort(e)) {
+            thread["config"]["model_reasoning_effort"] = json!(effort);
+        }
         let started = match &resume {
             Some(id) => {
                 thread["threadId"] = json!(id);

@@ -117,7 +117,7 @@ impl AxelMcp {
 
     #[tool(
         description = "List all registered Axel agents with their name, public key, harness, \
-            model, runtime mode, and unread message count. By default only active (non-archived) \
+            model, reasoning effort, runtime mode, and unread message count. By default only active (non-archived) \
             agents are shown."
     )]
     fn list_agents(
@@ -191,6 +191,68 @@ mod tests {
         let r = mcp.create_agent(Parameters(p)).unwrap();
         assert_eq!(r.is_error, Some(true));
         assert!(r.content[0].as_text().unwrap().text.contains("owner"));
+    }
+
+    /// A store holding `deep` (a model and an effort) and `plain` (neither),
+    /// and a keystore file that does not exist.
+    struct TwoAgents;
+    impl crate::context::AxelContext for TwoAgents {
+        fn scope(&self) -> Result<crate::CallScope, rmcp::ErrorData> {
+            let store = axel_store::Store::open_memory().unwrap();
+            store
+                .insert_agent(&axel_store::NewAgent {
+                    pubkey: "pk-deep".into(),
+                    name: "deep".into(),
+                    model: Some("opus".into()),
+                    effort: Some(axel_store::Effort::High),
+                    ..Default::default()
+                })
+                .unwrap();
+            store
+                .insert_agent(&axel_store::NewAgent { pubkey: "pk-plain".into(), name: "plain".into(), ..Default::default() })
+                .unwrap();
+            let secrets = std::env::temp_dir().join("axel-mcp-test-no-such-dir").join("secrets.json");
+            let keystore = axel_identity::Keystore::open_at(secrets, false).unwrap();
+            Ok(crate::CallScope { store, keystore })
+        }
+    }
+
+    fn json_of(r: &CallToolResult) -> serde_json::Value {
+        assert_ne!(r.is_error, Some(true));
+        serde_json::from_str(&r.content[0].as_text().unwrap().text).unwrap()
+    }
+
+    #[test]
+    fn list_agents_returns_each_agents_effort_beside_its_model() {
+        let mcp = AxelMcp::with_context(std::sync::Arc::new(TwoAgents));
+        let p: tools::list_agents::Params = serde_json::from_str("{}").unwrap();
+        let listed = json_of(&mcp.list_agents(Parameters(p)).unwrap());
+        let agent = |name: &str| listed.as_array().unwrap().iter().find(|a| a["name"] == name).unwrap().clone();
+
+        let deep = agent("deep");
+        assert_eq!(deep["model"], "opus");
+        assert_eq!(deep["effort"], "high");
+        // Unset reads as null, the way an unset model does.
+        let plain = agent("plain");
+        assert_eq!(plain.get("model"), Some(&serde_json::Value::Null));
+        assert_eq!(plain.get("effort"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn get_agent_returns_the_agents_effort_beside_its_model() {
+        let mcp = AxelMcp::with_context(std::sync::Arc::new(TwoAgents));
+        let get = |name: &str| {
+            let p: tools::get_agent::Params = serde_json::from_value(serde_json::json!({ "agent": name })).unwrap();
+            json_of(&mcp.get_agent(Parameters(p)).unwrap())
+        };
+
+        let deep = get("deep");
+        assert_eq!(deep["model"], "opus");
+        assert_eq!(deep["effort"], "high");
+        // Unset reads as null, the way an unset model does.
+        let plain = get("plain");
+        assert_eq!(plain.get("model"), Some(&serde_json::Value::Null));
+        assert_eq!(plain.get("effort"), Some(&serde_json::Value::Null));
     }
 
     #[test]

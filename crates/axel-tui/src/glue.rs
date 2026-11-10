@@ -75,6 +75,7 @@ pub fn create_agent(store: &Store, keystore: &Keystore, spec: &NewAgentSpec) -> 
             name: spec.name.clone(),
             harness: spec.harness.clone(),
             model: spec.model.clone(),
+            effort: None,
             skills: spec.skills.clone(),
             prompt: None,
             color: spec.color,
@@ -861,7 +862,7 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let owner = axel_identity::Keypair::generate();
         let pk = owner.public().to_string();
-        store.insert_agent(&NewAgent {pubkey:pk.clone(),name:"atlas".into(),harness:axel_store::Harness::Codex,model:None,skills:vec![],prompt:None,color:None,runtime_mode:Default::default(),auth_tag:None}).unwrap();
+        store.insert_agent(&NewAgent {pubkey:pk.clone(),name:"atlas".into(),harness:axel_store::Harness::Codex,model:None,effort:None,skills:vec![],prompt:None,color:None,runtime_mode:Default::default(),auth_tag:None}).unwrap();
         let thread=store.create_thread(&owner,"usage","",None).unwrap();
         let session=store.start_session(&owner,&axel_store::NewSession {thread_id:thread.id,agent_pubkey:pk.clone(),environment_id:"local".into(),environment_label:"local".into(),project_repo_key:None,harness:axel_store::Harness::Codex,runtime_mode:Default::default(),resumed_from:None,runtime:SessionRuntime::Managed}).unwrap();
         store.add_usage(&owner,&session.id,&axel_store::UsageDelta {input_tokens:1,cost_usd_est:1.0,..Default::default()},None).unwrap();

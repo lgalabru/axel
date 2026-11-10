@@ -498,3 +498,36 @@ fn when_the_host_goes_away_claude_goes_too() {
     assert!(status.success(), "the adapter exits cleanly: {status}");
 }
 
+fn claude_argv(home: &std::path::Path, launch: usize) -> Vec<String> {
+    let launches: Vec<Value> = claude_log(home).into_iter().filter(|l| l.get("argv").is_some()).collect();
+    serde_json::from_value(launches[launch]["argv"].clone()).unwrap()
+}
+
+#[test]
+fn the_agents_effort_starts_claude_with_the_effort_flag_and_none_adds_no_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(home.path());
+    let _ = agent.call("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!({}));
+    let (_, plain) = agent.call("session/new", json!({ "cwd": cwd.path(), "mcpServers": [] }), |_| json!({}));
+    assert!(plain["result"]["sessionId"].is_string(), "{plain}");
+    assert!(!claude_argv(home.path(), 0).contains(&"--effort".to_string()));
+
+    let (_, set) = agent.call("session/new", json!({ "cwd": cwd.path(), "mcpServers": [], "_meta": { "axel": { "effort": "xhigh" } } }), |_| json!({}));
+    assert!(set["result"]["sessionId"].is_string(), "{set}");
+    let argv = claude_argv(home.path(), 1);
+    let at = argv.iter().position(|a| a == "--effort").expect("--effort");
+    assert_eq!(argv[at + 1], "xhigh");
+
+    // A resumed conversation starts at the effort too.
+    let cwd_path = cwd.path().canonicalize().unwrap();
+    let encoded: String = cwd_path.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let dir = home.path().join(".claude/projects").join(encoded);
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved = "11111111-2222-4333-8444-555555555555";
+    std::fs::write(dir.join(format!("{saved}.jsonl")), json!({ "type": "user", "sessionId": saved, "message": { "role": "user", "content": "hi" } }).to_string()).unwrap();
+    let (_, loaded) = agent.call("session/load", json!({ "sessionId": saved, "cwd": cwd_path, "mcpServers": [], "_meta": { "axel": { "effort": "low" } } }), |_| json!({}));
+    assert!(loaded["result"]["modes"].is_object(), "{loaded}");
+    let argv = claude_argv(home.path(), 2).join(" ");
+    assert!(argv.contains("--effort low") && argv.contains(&format!("--resume {saved}")), "{argv}");
+}

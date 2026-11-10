@@ -304,6 +304,11 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     if let Ok(path) = std::env::var("PATH") {
         spec.env.push(("PATH".into(), path));
     }
+    if runtime == SessionRuntime::Pane {
+        // The agent's reasoning effort, by the harness's own flag (a managed
+        // session's host applies it instead; see `axel session host`).
+        super::effort::pane(&agent.harness, &mut spec, agent.effort, |w| eprintln!("axel: {w}"));
+    }
     if !work_dir.is_dir() {
         bail!("workspace directory does not exist: {}", work_dir.display());
     }

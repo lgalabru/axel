@@ -22,7 +22,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::adapter::adapter_command;
+use crate::adapter::{adapter_command, runs_builtin_adapter};
 use crate::checkpoint;
 use crate::usage::TurnUsage;
 use crate::attach::{self, PromptCaps};
@@ -71,6 +71,9 @@ pub struct HostConfig {
     /// MCP servers the agent gets in this session (ACP `mcpServers`): Axel's
     /// own tools, running as this session's agent.
     pub mcp_servers: Vec<McpStdio>,
+    /// The agent's reasoning effort, applied once the session exists (or, for
+    /// Axel's own adapters, as it is created). `None` sends nothing.
+    pub effort: Option<axel_store::Effort>,
 }
 
 /// A stdio MCP server for `session/new` / `session/load`.
@@ -90,6 +93,102 @@ impl McpStdio {
                 .env(self.env.iter().map(|(k, v)| acp::EnvVariable::new(k.clone(), v.clone())).collect()),
         )
     }
+}
+
+/// The reasoning effort the host asked one of Axel's own adapters for, in
+/// the `_meta.axel.effort` of `session/new` / `session/load` params.
+pub(crate) fn meta_effort(params: &Value) -> Option<axel_store::Effort> {
+    params.pointer("/_meta/axel/effort")?.as_str()?.parse().ok()
+}
+
+/// `meta` with the effort for one of Axel's own adapters, which take it when
+/// the session is created rather than as a config option, and what to tell
+/// the owner when the harness has no such level. `own_adapter` is whether
+/// the session runs under one ([`runs_builtin_adapter`]): any other adapter,
+/// an `AXEL_ACP_CLAUDE` or `AXEL_ACP_CODEX` override included, does not read
+/// this and is asked through its config options instead.
+fn meta_with_effort(
+    harness: &Harness,
+    own_adapter: bool,
+    meta: Option<serde_json::Map<String, Value>>,
+    effort: Option<axel_store::Effort>,
+) -> (Option<serde_json::Map<String, Value>>, Option<String>) {
+    let Some(effort) = effort.filter(|_| own_adapter) else { return (meta, None) };
+    match harness.native_effort(effort) {
+        Some(level) => {
+            let mut meta = meta.unwrap_or_default();
+            let axel = meta.entry("axel").or_insert_with(|| json!({}));
+            if !axel.is_object() {
+                *axel = json!({});
+            }
+            axel["effort"] = json!(level);
+            (Some(meta), None)
+        }
+        None => (meta, Some(format!("could not set effort {effort}: {} has no such level; it runs at its default", harness.label()))),
+    }
+}
+
+/// The select option that sets how hard the model thinks: the one in ACP's
+/// `thought_level` category, else one whose id or name says so. Among those
+/// named ones, a selector of something else about the reasoning (its
+/// summary) is passed over, and one that offers effort levels is preferred.
+fn effort_selector(options: &[Value]) -> Option<&Value> {
+    let selects = || options.iter().filter(|o| o.get("type").and_then(Value::as_str) == Some("select"));
+    let category = |o: &Value| o.get("category").and_then(Value::as_str).map(str::to_owned);
+    let says_effort = |o: &Value, key: &str| {
+        let text = o.get(key).and_then(Value::as_str).unwrap_or("").to_lowercase();
+        ["effort", "reasoning", "thinking", "thought"].iter().any(|word| text.contains(word))
+    };
+    let says_summary = |o: &Value| ["id", "name"].iter().any(|key| o.get(*key).and_then(Value::as_str).unwrap_or("").to_lowercase().contains("summary"));
+    let offers_levels = |o: &Value| {
+        select_values(o.get("options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]))
+            .iter()
+            .any(|(value, name)| axel_store::Effort::ALL.iter().any(|e| same_level(value, *e) || same_level(name, *e)))
+    };
+    selects().find(|o| category(o).as_deref() == Some("thought_level")).or_else(|| {
+        let named = || {
+            selects().filter(|o| {
+                !matches!(category(o).as_deref(), Some("model" | "mode")) && (says_effort(o, "id") || says_effort(o, "name")) && !says_summary(o)
+            })
+        };
+        named().find(|o| offers_levels(o)).or_else(|| named().next())
+    })
+}
+
+/// A select option's `(value, name)` pairs, flat or grouped. ACP groups them
+/// one level deep, and that is as far as this reads: a group inside a group
+/// is passed over, so what an adapter sends cannot make it recurse.
+fn select_values(options: &[Value]) -> Vec<(String, String)> {
+    fn group(entry: &Value) -> Option<&Vec<Value>> {
+        entry.get("options").and_then(Value::as_array)
+    }
+    fn pair(entry: &Value) -> Option<(String, String)> {
+        let value = entry.get("value").and_then(Value::as_str)?;
+        Some((value.to_string(), entry.get("name").and_then(Value::as_str).unwrap_or(value).to_string()))
+    }
+    options
+        .iter()
+        .flat_map(|entry| match group(entry) {
+            Some(members) => members.iter().filter(|member| group(member).is_none()).filter_map(pair).collect(),
+            None => Vec::from_iter(pair(entry)),
+        })
+        .collect()
+}
+
+/// How a warning ends when the host could not change a session's effort:
+/// the level stays what the harness has it at, which the selector's
+/// `currentValue` names when it reports one. That is often not the default.
+fn effort_left_at(selector: Option<&Value>) -> String {
+    match selector.and_then(|s| s.get("currentValue")).and_then(Value::as_str).filter(|current| !current.is_empty()) {
+        Some(current) => format!("it stays at {current}"),
+        None => "its effort is unchanged".to_string(),
+    }
+}
+
+/// Whether an advertised value or name is `effort`: `high`, `High`, `x-high`.
+fn same_level(advertised: &str, effort: axel_store::Effort) -> bool {
+    let plain: String = advertised.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect();
+    plain == effort.as_str()
 }
 
 /// Pick the adapter's model id for `want`, matching like Claude Code's
@@ -679,6 +778,7 @@ impl<W: Write> Host<W> {
             ),
         );
 
+        let session_meta = self.session_meta();
         let sid = match (
             &self.cfg.resume_native_id,
             init.agent_capabilities.load_session,
@@ -690,7 +790,7 @@ impl<W: Write> Host<W> {
                         "session/load",
                         acp::LoadSessionRequest::new(native.clone(), self.cfg.cwd.clone())
                             .mcp_servers(self.cfg.mcp_servers.iter().map(McpStdio::to_acp).collect())
-                            .meta(self.cfg.session_meta.clone()),
+                            .meta(session_meta.clone()),
                     )
                     .await?;
                 let resp: acp::LoadSessionResponse = serde_json::from_value(raw.clone()).context("session/load reply")?;
@@ -706,7 +806,7 @@ impl<W: Write> Host<W> {
                         "session/new",
                         acp::NewSessionRequest::new(self.cfg.cwd.clone())
                             .mcp_servers(self.cfg.mcp_servers.iter().map(McpStdio::to_acp).collect())
-                            .meta(self.cfg.session_meta.clone()),
+                            .meta(session_meta.clone()),
                     )
                     .await?;
                 let resp: acp::NewSessionResponse = serde_json::from_value(raw.clone()).context("session/new reply")?;
@@ -715,7 +815,8 @@ impl<W: Write> Host<W> {
         };
         let (sid, modes, raw) = sid;
         self.apply_native_mode(cx, &sid, modes.as_ref()).await;
-        self.apply_model(cx, &sid, &raw).await;
+        let options = self.apply_model(cx, &sid, &raw).await;
+        self.apply_effort(cx, &sid, options.as_ref().or(raw.get("configOptions"))).await;
         self.line(
             CYAN,
             "●",
@@ -752,8 +853,10 @@ impl<W: Write> Host<W> {
 
     /// Switch to the agent's model, when it has one.  The adapter picks its
     /// own default right after `session/new`, so this has to come after.
-    async fn apply_model(&mut self, cx: &ConnectionTo<Agent>, sid: &acp::SessionId, session_reply: &Value) {
-        let Some(want) = self.cfg.model.clone().filter(|m| !m.trim().is_empty()) else { return };
+    /// Returns the config options the harness answered with, when it did:
+    /// what a model offers (its effort levels, say) can change with the model.
+    async fn apply_model(&mut self, cx: &ConnectionTo<Agent>, sid: &acp::SessionId, session_reply: &Value) -> Option<Value> {
+        let want = self.cfg.model.clone().filter(|m| !m.trim().is_empty())?;
         let selector = session_reply.get("configOptions").and_then(Value::as_array).and_then(|options| {
             options.iter().find(|o| o.get("type").and_then(Value::as_str) == Some("select")
                 && (o.get("category").and_then(Value::as_str) == Some("model")
@@ -772,14 +875,17 @@ impl<W: Write> Host<W> {
         let id = resolve_model(&want, &available).unwrap_or_else(|| want.clone());
         if id == current {
             self.line(CYAN, "●", &format!("model {id}"));
-            return;
+            return None;
         }
         let (method, params) = match selector {
             Some(option) => ("session/set_config_option", json!({ "sessionId": sid.to_string(), "configId": option["id"], "value": id })),
             None => ("session/set_model", json!({ "sessionId": sid.to_string(), "modelId": id })),
         };
         match self.raw_request(cx, method, params).await {
-            Ok(_) => self.line(CYAN, "●", &format!("model {id}")),
+            Ok(reply) => {
+                self.line(CYAN, "●", &format!("model {id}"));
+                reply.get("configOptions").filter(|o| o.as_array().is_some_and(|a| !a.is_empty())).cloned()
+            }
             Err(e) => {
                 let listed: Vec<&str> = available.iter().filter_map(|m| m.get("modelId")?.as_str()).collect();
                 let msg = format!(
@@ -787,11 +893,63 @@ impl<W: Write> Host<W> {
                     if current.is_empty() { "its default" } else { current },
                     if listed.is_empty() { String::new() } else { format!(" · available: {}", listed.join(", ")) }
                 );
-                self.line(YELLOW, "!", &msg);
-                if let Err(e) = self.push(ItemKind::Error, Some(ItemStatus::Failed), None, json!({ "message": msg })) {
-                    self.line(RED, "✖", &format!("store: {e}"));
-                }
+                self.warn(&msg);
+                None
             }
+        }
+    }
+
+    /// A problem the owner should see that does not stop the session: in
+    /// the host's log and as an item on the thread.
+    fn warn(&mut self, msg: &str) {
+        self.line(YELLOW, "!", msg);
+        if let Err(e) = self.push(ItemKind::Error, Some(ItemStatus::Failed), None, json!({ "message": msg })) {
+            self.line(RED, "✖", &format!("store: {e}"));
+        }
+    }
+
+    /// `_meta` for `session/new` / `session/load`. Axel's own adapters take
+    /// the agent's effort here and start the harness with it; a level the
+    /// harness does not have is left out and reported.
+    fn session_meta(&mut self) -> Option<serde_json::Map<String, Value>> {
+        let own_adapter = runs_builtin_adapter(&self.cfg.harness);
+        let (meta, warning) = meta_with_effort(&self.cfg.harness, own_adapter, self.cfg.session_meta.clone(), self.cfg.effort);
+        if let Some(warning) = warning {
+            self.warn(&warning);
+        }
+        meta
+    }
+
+    /// Put a harness that does not run under Axel's own adapter at the
+    /// agent's effort, through the effort selector in its ACP
+    /// `configOptions`, and only with a value it advertises. Anything else
+    /// is said, and the session keeps the level the harness has it at (the
+    /// selector's `currentValue`, named when reported), not its default.
+    async fn apply_effort(&mut self, cx: &ConnectionTo<Agent>, sid: &acp::SessionId, options: Option<&Value>) {
+        let Some(effort) = self.cfg.effort else { return };
+        if runs_builtin_adapter(&self.cfg.harness) {
+            return;
+        }
+        let harness = self.cfg.harness.label().to_string();
+        let options = options.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        let Some(selector) = effort_selector(options) else {
+            self.warn(&format!("could not set effort {effort}: {harness} offers no effort option; {}", effort_left_at(None)));
+            return;
+        };
+        let offered = select_values(selector.get("options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]));
+        let Some((value, _)) = offered.iter().find(|(value, name)| same_level(value, effort) || same_level(name, effort)) else {
+            let listed: Vec<&str> = offered.iter().map(|(v, _)| v.as_str()).collect();
+            self.warn(&format!("could not set effort {effort}: {harness} offers {}; {}", listed.join(", "), effort_left_at(Some(selector))));
+            return;
+        };
+        if selector.get("currentValue").and_then(Value::as_str) == Some(value) {
+            self.line(CYAN, "●", &format!("effort {value}"));
+            return;
+        }
+        let params = json!({ "sessionId": sid.to_string(), "configId": selector["id"], "value": value });
+        match self.raw_request(cx, "session/set_config_option", params).await {
+            Ok(_) => self.line(CYAN, "●", &format!("effort {value}")),
+            Err(e) => self.warn(&format!("could not set effort {effort} on {harness} ({e}); {}", effort_left_at(Some(selector)))),
         }
     }
 
@@ -2496,6 +2654,67 @@ mod tests {
         assert_eq!(head("one\ntwo", 10), "one…");
         assert_eq!(head("short", 10), "short");
         assert_eq!(head("abcdefghij", 3), "abc…");
+    }
+
+    #[test]
+    fn axels_own_adapters_get_the_effort_in_the_session_meta() {
+        use axel_store::Effort;
+        let base = json!({ "systemPrompt": { "append": "You are atlas." }, "claudeCode": { "options": {} } }).as_object().cloned();
+        let (meta, warning) = meta_with_effort(&Harness::Claude, true, base.clone(), Some(Effort::Max));
+        let meta = Value::Object(meta.unwrap());
+        assert_eq!(meta["axel"]["effort"], "max");
+        assert_eq!(meta["systemPrompt"]["append"], "You are atlas.", "the rest of the meta stays");
+        assert_eq!(warning, None);
+        let (meta, _) = meta_with_effort(&Harness::Codex, true, None, Some(Effort::Xhigh));
+        assert_eq!(Value::Object(meta.unwrap()), json!({ "axel": { "effort": "xhigh" } }));
+
+        // Codex stops at xhigh: nothing is sent, and the owner is told.
+        let (meta, warning) = meta_with_effort(&Harness::Codex, true, base.clone(), Some(Effort::Max));
+        assert_eq!(meta, base);
+        assert!(warning.unwrap().contains("could not set effort max: Codex has no such level"));
+
+        // No effort, or a harness asked through its config options: the meta is untouched.
+        assert_eq!(meta_with_effort(&Harness::Claude, true, base.clone(), None), (base.clone(), None));
+        assert_eq!(meta_with_effort(&Harness::Claude, true, None, None), (None, None));
+        assert_eq!(meta_with_effort(&Harness::Goose, false, None, Some(Effort::High)), (None, None));
+        // So is that of a Claude or Codex put behind another adapter, even at a level it has no word for.
+        assert_eq!(meta_with_effort(&Harness::Claude, false, base.clone(), Some(Effort::High)), (base.clone(), None));
+        assert_eq!(meta_with_effort(&Harness::Codex, false, None, Some(Effort::Max)), (None, None));
+    }
+
+    #[test]
+    fn the_effort_selector_is_found_by_category_then_by_what_it_is_called() {
+        let model = json!({ "id": "model", "name": "Model (reasoning models first)", "category": "model", "type": "select" });
+        let toggle = json!({ "id": "thinking", "name": "Thinking", "type": "boolean" });
+        let named = json!({ "id": "depth", "name": "Reasoning Effort", "type": "select" });
+        let by_category = json!({ "id": "budget", "name": "Budget", "category": "thought_level", "type": "select" });
+        assert_eq!(effort_selector(&[model.clone(), toggle.clone(), named.clone(), by_category.clone()]).unwrap()["id"], "budget");
+        assert_eq!(effort_selector(&[model.clone(), toggle.clone(), named]).unwrap()["id"], "depth");
+        assert!(effort_selector(&[model.clone(), toggle.clone()]).is_none(), "a model picker or a switch is not an effort selector");
+        // Something else about the reasoning, listed first, is not the effort selector.
+        let levels = json!([{ "value": "low", "name": "Low" }, { "value": "high", "name": "High" }]);
+        let summary = json!({ "id": "reasoning_summary", "name": "Reasoning Summary", "type": "select", "options": [{ "value": "auto", "name": "Auto" }, { "value": "none", "name": "None" }] });
+        let display = json!({ "id": "thinking_display", "name": "Thinking", "type": "select", "options": [{ "value": "shown", "name": "Shown" }] });
+        let effort = json!({ "id": "reasoning_effort", "name": "Reasoning Effort", "type": "select", "options": levels });
+        assert_eq!(effort_selector(&[summary.clone(), display.clone(), effort]).unwrap()["id"], "reasoning_effort");
+        assert!(effort_selector(&[model, toggle, summary.clone()]).is_none(), "a summary selector alone is no effort option");
+        // With no levels anywhere, the first plausible one is kept, so the warning can list what it offers.
+        assert_eq!(effort_selector(&[summary, display]).unwrap()["id"], "thinking_display");
+        assert!(same_level("X-High", axel_store::Effort::Xhigh) && !same_level("highest", axel_store::Effort::High));
+    }
+
+    #[test]
+    fn a_selects_values_are_read_flat_or_one_group_down_and_no_deeper() {
+        // Far deeper than a stack could follow: `max` under 100,000 groups.
+        let mut deep = json!({ "value": "max", "name": "Max" });
+        for _ in 0..100_000 {
+            deep = Value::Object(serde_json::Map::from_iter([("options".to_string(), Value::Array(vec![deep]))]));
+        }
+        let options = vec![json!({ "value": "low", "name": "Low" }), json!({ "group": "more", "name": "More", "options": [{ "value": "high" }] }), deep];
+        let pair = |value: &str, name: &str| (value.to_string(), name.to_string());
+        assert_eq!(select_values(&options), [pair("low", "Low"), pair("high", "high")]);
+        // Dropping a value recurses as deep as it nests, so this one is not dropped.
+        std::mem::forget(options);
     }
 
     #[test]

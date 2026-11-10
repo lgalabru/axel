@@ -19,6 +19,13 @@ pub fn adapter_command(harness: &Harness) -> Vec<String> {
     default_command(harness)
 }
 
+/// Whether `harness` runs under the adapter inside `axel`: it has one, and
+/// no `AXEL_ACP_<HARNESS>` override puts another program in its place. Only
+/// then does the adapter understand what Axel adds to the protocol for it.
+pub(crate) fn runs_builtin_adapter(harness: &Harness) -> bool {
+    harness.has_builtin_adapter() && adapter_command(harness) == default_command(harness)
+}
+
 /// `AXEL_ACP_<HARNESS>`.
 pub fn env_var_name(harness: &Harness) -> String {
     let name: String = harness
@@ -161,6 +168,14 @@ mod tests {
         );
         unsafe { std::env::remove_var("AXEL_ACP_ZZ_OVERRIDE_TEST") };
         assert_eq!(adapter_command(&h), vec!["zz-override-test"]);
+    }
+
+    #[test]
+    fn a_harness_with_no_adapter_inside_axel_never_runs_a_builtin_one() {
+        assert!(!runs_builtin_adapter(&Harness::Goose), "goose has no adapter inside axel");
+        assert!(!runs_builtin_adapter(&Harness::Custom("zz-builtin-test".into())));
+        // Claude and Codex themselves are checked in tests/host_adapter_override.rs,
+        // which sets their variables in a process of its own.
     }
 
     #[test]

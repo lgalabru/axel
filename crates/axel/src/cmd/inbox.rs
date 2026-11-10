@@ -378,6 +378,7 @@ mod tests {
             name: name.into(),
             harness: axel_store::Harness::Claude,
             model: None,
+            effort: None,
             skills: vec![],
             prompt: None,
             color: None,

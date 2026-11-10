@@ -3,6 +3,7 @@
 mod agent;
 mod convert;
 mod diff;
+mod effort;
 mod gc;
 mod doctor;
 mod hook;

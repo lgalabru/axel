@@ -203,7 +203,7 @@ impl Store {
 // agents
 // ---------------------------------------------------------------------------
 
-const AGENT_COLS: &str = "pubkey, name, harness, model, skills_json, prompt, color, runtime_mode, auth_tag_json, created_at, last_seen_at, archived_at";
+const AGENT_COLS: &str = "pubkey, name, harness, model, effort, skills_json, prompt, color, runtime_mode, auth_tag_json, created_at, last_seen_at, archived_at";
 
 fn row_agent(r: &Row<'_>) -> rusqlite::Result<Agent> {
     let skills_json: String = r.get("skills_json")?;
@@ -216,9 +216,12 @@ fn row_agent(r: &Row<'_>) -> rusqlite::Result<Agent> {
         name: r.get("name")?,
         harness: Harness::parse(&r.get::<_, String>("harness")?),
         model: r.get("model")?,
+        // Unknown text (an older or newer build's value) reads as "no effort" / "no colour" / the default mode.
+        effort: r
+            .get::<_, Option<String>>("effort")?
+            .and_then(|e| e.parse().ok()),
         skills: serde_json::from_str(&skills_json).map_err(json_err)?,
         prompt: r.get("prompt")?,
-        // Unknown text (an older or newer build's value) reads as "no colour" / the default mode.
         color: r
             .get::<_, Option<String>>("color")?
             .and_then(|c| c.parse().ok()),
@@ -245,13 +248,14 @@ impl Store {
         let created_at = now();
         self.conn
             .execute(
-                "INSERT INTO agents (pubkey, name, harness, model, skills_json, prompt, color, runtime_mode, auth_tag_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO agents (pubkey, name, harness, model, effort, skills_json, prompt, color, runtime_mode, auth_tag_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     a.pubkey,
                     a.name,
                     a.harness.as_str(),
                     a.model,
+                    a.effort.map(|e| e.as_str()),
                     skills_json,
                     a.prompt,
                     a.color.map(|c| c.as_str()),
@@ -268,6 +272,7 @@ impl Store {
             name: a.name.clone(),
             harness: a.harness.clone(),
             model: a.model.clone(),
+            effort: a.effort,
             skills: a.skills.clone(),
             prompt: a.prompt.clone(),
             color: a.color,
@@ -343,6 +348,19 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE agents SET harness = ?2, model = ?3 WHERE pubkey = ?1",
             params![pk, harness.as_str(), model],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("agent {pk}")));
+        }
+        Ok(())
+    }
+
+    /// Change how hard an agent's model thinks (`None`: the harness's
+    /// default); applies to sessions started afterwards.
+    pub fn set_agent_effort(&self, pk: &str, effort: Option<crate::Effort>) -> Result<(), Error> {
+        let n = self.conn.execute(
+            "UPDATE agents SET effort = ?2 WHERE pubkey = ?1",
+            params![pk, effort.map(|e| e.as_str())],
         )?;
         if n == 0 {
             return Err(Error::NotFound(format!("agent {pk}")));
