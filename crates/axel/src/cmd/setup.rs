@@ -144,9 +144,15 @@ pub fn run() -> Result<Next> {
     let all = Harness::BUILTIN;
     for h in &all {
         let Some(found) = which(h.program()) else { continue };
-        let managed = adapter(h).as_deref().and_then(which).is_some();
-        let how = if managed { "· managed" } else { "· in a pane (no ACP adapter)" };
-        check(true, h.label(), format!("{}  {}", tilde(&found), dim(how)));
+        let adapter = adapter(h);
+        let managed = adapter.as_deref().and_then(which).is_some();
+        let how = match &adapter {
+            _ if managed => "· managed".to_string(),
+            // Its adapter is a separate install (Pi's, Amp's): name it.
+            Some(a) if a != h.program() => format!("· in a pane until you install its ACP adapter, {a}"),
+            _ => "· in a pane (no ACP adapter)".to_string(),
+        };
+        check(true, h.label(), format!("{}  {}", tilde(&found), dim(&how)));
         installed.push(h);
     }
     if installed.is_empty() {
@@ -229,6 +235,12 @@ pub fn run() -> Result<Next> {
                 .interact()?;
             installed[i].clone()
         };
+        // Axel drives the harness's own CLI with its own login: without one,
+        // the agent can't start (Pi, say, refuses every session).
+        eprintln!(
+            "  {}",
+            dim(&format!("{} has to be logged in once: {}.", harness.label(), harness.login()))
+        );
 
         let skills = pick_skills(&ctx, &theme)?;
 
