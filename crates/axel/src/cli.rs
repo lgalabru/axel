@@ -1,4 +1,4 @@
-use axel_store::{AgentColor, RuntimeMode};
+use axel_store::{AgentColor, Effort, RuntimeMode};
 use clap::{Parser, Subcommand, ValueEnum};
 
 /// Axel: agent orchestration, designed for Rex.
@@ -185,6 +185,10 @@ pub enum AgentCommand {
         harness: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// How hard its model thinks, where the harness has such a setting
+        /// (default: the harness's own).
+        #[arg(long, value_enum, value_name = "LEVEL")]
+        effort: Option<EffortArg>,
         /// Comma-separated skill names, or `*`.
         #[arg(long, default_value = "*")]
         skills: String,
@@ -201,8 +205,9 @@ pub enum AgentCommand {
         #[command(flatten)]
         policy: PolicyArgs,
     },
-    /// Change anything about an agent: its name, harness, model, skills,
-    /// prompt, colour, permissions, budget, runtime mode or default host.
+    /// Change anything about an agent: its name, harness, model, reasoning
+    /// effort, skills, prompt, colour, permissions, budget, runtime mode or
+    /// default host.
     Edit {
         name: String,
         /// Switch it to this harness, and optionally model: `codex`, `claude/fable`.
@@ -211,6 +216,9 @@ pub enum AgentCommand {
         /// Switch its model only (`default` for the harness's own).
         #[arg(long)]
         model: Option<String>,
+        /// Change how hard its model thinks (`default` for the harness's own).
+        #[arg(long, value_enum, value_name = "LEVEL")]
+        effort: Option<EffortArg>,
         /// Rename it. Its key, policy and history stay; sessions already
         /// running keep the old name until they restart.
         #[arg(long = "name", value_name = "NEW_NAME")]
@@ -478,6 +486,30 @@ impl From<RuntimeModeArg> for RuntimeMode {
             RuntimeModeArg::Edits => RuntimeMode::Edits,
             RuntimeModeArg::Supervised => RuntimeMode::Supervised,
             RuntimeModeArg::Plan => RuntimeMode::Plan,
+        }
+    }
+}
+
+/// `--effort`: an [`Effort`] level, or `default` for none (the harness's own).
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum EffortArg {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Default,
+}
+
+impl From<EffortArg> for Option<Effort> {
+    fn from(e: EffortArg) -> Self {
+        match e {
+            EffortArg::Low => Some(Effort::Low),
+            EffortArg::Medium => Some(Effort::Medium),
+            EffortArg::High => Some(Effort::High),
+            EffortArg::Xhigh => Some(Effort::Xhigh),
+            EffortArg::Max => Some(Effort::Max),
+            EffortArg::Default => None,
         }
     }
 }

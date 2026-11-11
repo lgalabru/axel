@@ -32,6 +32,9 @@ pub struct AgentDetails {
     /// Model override, if configured.
     #[schemars(description = "Model override")]
     pub model: Option<String>,
+    /// Reasoning effort, if configured: low, medium, high, xhigh, or max.
+    #[schemars(description = "Reasoning effort; null means the harness's default")]
+    pub effort: Option<String>,
     /// Enabled skill names.
     #[schemars(description = "Enabled skill names")]
     pub skills: Vec<String>,
@@ -119,6 +122,7 @@ pub fn run(params: Params, scope: &CallScope) -> Result<CallToolResult, rmcp::Er
         pubkey: agent.pubkey,
         harness: agent.harness.to_string(),
         model: agent.model,
+        effort: agent.effort.map(|e| e.to_string()),
         skills: agent.skills,
         prompt: agent.prompt,
         color: agent.color.map(|c| c.to_string()),

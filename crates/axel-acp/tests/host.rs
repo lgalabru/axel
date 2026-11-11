@@ -89,6 +89,7 @@ fn fixture(mode: RuntimeMode, harness: Harness, initial_prompt: Option<&str>) ->
         resume_native_id: None,
         initial_from: None,
         reply_with: None,
+        effort: None,
         mcp_servers: Vec::new(),
         session_meta: None,
         model: None,
@@ -831,6 +832,7 @@ fn each_turn_starts_with_what_the_agent_missed_and_notes_wait_for_it() {
             name: "nova".into(),
             harness: Harness::Claude,
             model: None,
+            effort: None,
             skills: vec![],
             prompt: None,
             color: None,
@@ -1304,4 +1306,127 @@ fn multiple_choice_questions_validate_and_deliver_the_complete_set() {
     assert!(said.iter().any(|t|t.contains(encoded)),"the adapter must receive every selected option: {said:?}");
     send_ok(&f.cfg.socket_path,Command::Stop);
     host.join().unwrap().unwrap();
+}
+
+// --- reasoning effort ---------------------------------------------------------
+
+/// The `session/set_config_option` requests the host sent, from its frame log.
+fn config_options_set(f: &Fixture) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(&f.cfg.log_path)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["dir"] == "out" && v["frame"]["method"] == "session/set_config_option")
+        .map(|v| v["frame"]["params"].clone())
+        .collect()
+}
+
+/// Host a session of the fake agent to idle and stop it.
+fn host_until_idle(f: &Fixture) {
+    let host = spawn_host(f);
+    wait_until("session idle", Duration::from_secs(10), || f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle);
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+}
+
+fn errors(f: &Fixture) -> Vec<String> {
+    f.store.items(&f.session_id, 0, 1000).unwrap().iter().filter(|i| i.kind == ItemKind::Error).map(|i| i.content["message"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+#[test]
+fn a_harness_with_an_effort_selector_is_set_to_the_agents_effort_on_new_and_load() {
+    for (advertised, resume, config_id) in [("category", false, "thinking-budget"), ("category", true, "thinking-budget"), ("named", false, "depth")] {
+        let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+        f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), advertised.into()));
+        f.cfg.effort = Some(axel_store::Effort::High);
+        if resume {
+            f.cfg.env.push(("FAKE_AGENT_LOAD".into(), "1".into()));
+            f.cfg.resume_native_id = Some("saved-session".into());
+        }
+        host_until_idle(&f);
+        let sid = if resume { "saved-session" } else { "fake-session-1" };
+        assert_eq!(config_options_set(&f), [serde_json::json!({ "sessionId": sid, "configId": config_id, "value": "high" })], "{advertised} resume={resume}");
+        assert!(errors(&f).is_empty(), "{:?}", errors(&f));
+        assert!(f.pane.text().contains("effort high"), "{}", f.pane.text());
+    }
+}
+
+#[test]
+fn a_summary_selector_listed_first_is_not_taken_for_the_effort_selector() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), "after-summary".into()));
+    f.cfg.effort = Some(axel_store::Effort::High);
+    host_until_idle(&f);
+    assert_eq!(config_options_set(&f), [serde_json::json!({ "sessionId": "fake-session-1", "configId": "reasoning_effort", "value": "high" })]);
+    assert!(errors(&f).is_empty(), "{:?}", errors(&f));
+}
+
+#[test]
+fn the_model_and_the_effort_are_each_set_on_their_own_selector() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.env.push(("FAKE_AGENT_MODELS".into(), "config".into()));
+    f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), "category".into()));
+    f.cfg.model = Some("Flash".into());
+    f.cfg.effort = Some(axel_store::Effort::Low);
+    host_until_idle(&f);
+    let set: Vec<(String, String)> = config_options_set(&f).iter().map(|p| (p["configId"].as_str().unwrap().to_string(), p["value"].as_str().unwrap().to_string())).collect();
+    assert_eq!(set, [("model-picker".to_string(), "provider/flash".to_string()), ("thinking-budget".to_string(), "low".to_string())]);
+    assert!(errors(&f).is_empty(), "{:?}", errors(&f));
+}
+
+#[test]
+fn an_effort_the_harness_cannot_take_warns_and_the_session_goes_on() {
+    // (what the agent advertises, the effort wanted, requests sent, what the warning says, the level it reports the session left at)
+    // The fake's selector reports `currentValue` medium, which is not asked of it here.
+    for (advertised, effort, sent, says, left) in [
+        (Some("category"), axel_store::Effort::Max, 0, "offers low, medium, high", "; it stays at medium"),
+        (Some("no-current"), axel_store::Effort::Max, 0, "offers low, medium, high", "; its effort is unchanged"),
+        (None, axel_store::Effort::High, 0, "offers no effort option", "; its effort is unchanged"),
+        (Some("refuse"), axel_store::Effort::High, 1, "effort is locked", "; it stays at medium"),
+    ] {
+        let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+        if let Some(a) = advertised {
+            f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), a.into()));
+        }
+        f.cfg.effort = Some(effort);
+        // Reaching idle is the session going on.
+        host_until_idle(&f);
+        assert_eq!(config_options_set(&f).len(), sent, "{advertised:?}");
+        let warnings = errors(&f);
+        assert_eq!(warnings.len(), 1, "{advertised:?}: {warnings:?}");
+        assert!(warnings[0].contains(&format!("effort {effort}")) && warnings[0].contains(says), "{advertised:?}: {warnings:?}");
+        // Axel changed nothing, so the level is whatever the harness has, not its default.
+        assert!(warnings[0].ends_with(left) && !warnings[0].contains("default"), "{advertised:?}: {warnings:?}");
+        assert!(f.pane.text().contains(says), "{}", f.pane.text());
+    }
+}
+
+#[test]
+fn levels_nested_deeper_than_acp_groups_them_are_not_read_and_the_rest_still_are() {
+    // The fake lists low and medium in one group, as ACP groups a select's
+    // options, and high forty groups further down.
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), "nested".into()));
+    f.cfg.effort = Some(axel_store::Effort::Low);
+    host_until_idle(&f);
+    assert_eq!(config_options_set(&f), [serde_json::json!({ "sessionId": "fake-session-1", "configId": "thinking-budget", "value": "low" })]);
+    assert!(errors(&f).is_empty(), "{:?}", errors(&f));
+
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), "nested".into()));
+    f.cfg.effort = Some(axel_store::Effort::High);
+    host_until_idle(&f);
+    assert!(config_options_set(&f).is_empty(), "{:?}", config_options_set(&f));
+    let warnings = errors(&f);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].ends_with("offers low, medium; it stays at medium"), "{warnings:?}");
+}
+
+#[test]
+fn an_agent_without_an_effort_sets_no_option_and_is_told_nothing() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.env.push(("FAKE_AGENT_EFFORT".into(), "category".into()));
+    host_until_idle(&f);
+    assert!(config_options_set(&f).is_empty());
+    assert!(errors(&f).is_empty());
 }

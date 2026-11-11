@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use axel_identity::{Keypair, attest};
-use axel_store::{Agent, AgentColor, AgentPolicy, Harness, NewAgent, Reach, RuntimeMode, SpendLimit};
+use axel_store::{Agent, AgentColor, AgentPolicy, Effort, Harness, NewAgent, Reach, RuntimeMode, SpendLimit};
 
 use super::Ctx;
 use super::policy::reach_label;
@@ -11,7 +11,7 @@ use crate::cli::{AgentCommand, PolicyArgs, ReachArg};
 pub fn run(cmd: AgentCommand) -> Result<()> {
     let ctx = Ctx::open()?;
     match cmd {
-        AgentCommand::New { name, runs, harness, model, skills, prompt, color, runtime_mode, host, policy } => {
+        AgentCommand::New { name, runs, harness, model, effort, skills, prompt, color, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't create agents; ask the owner to run this");
             }
@@ -23,12 +23,17 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             let agent = create(&ctx, &name, harness, model, parse_skills(&skills), prompt, color.map(AgentColor::from), runtime_mode.into())?;
             ctx.store.set_agent_policy(&agent.pubkey, &p)?;
             ctx.store.set_agent_host(&agent.pubkey, host_id.as_deref())?;
+            let effort: Option<Effort> = effort.and_then(Into::into);
+            if effort.is_some() {
+                ctx.store.set_agent_effort(&agent.pubkey, effort)?;
+            }
             println!("{}  {}  {}", agent.name, runs_label(&agent.harness, agent.model.as_deref()), agent.pubkey);
             print_policy(&ctx, &p);
+            print_effort(&agent.harness, effort);
             print_host(&ctx, &agent.pubkey)?;
             Ok(())
         }
-        AgentCommand::Edit { name, runs, model, name_to, skills, prompt, color, runtime_mode, host, policy } => {
+        AgentCommand::Edit { name, runs, model, effort, name_to, skills, prompt, color, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't edit agents; ask the owner to run this");
             }
@@ -61,12 +66,16 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
                 };
                 ctx.store.set_agent_harness(&a.pubkey, &harness, model.as_deref())?;
             }
+            if let Some(effort) = effort {
+                ctx.store.set_agent_effort(&a.pubkey, effort.into())?;
+            }
             if let Some(h) = &host {
                 ctx.store.set_agent_host(&a.pubkey, host_choice(&ctx, h)?.as_deref())?;
             }
             let a = ctx.store.agent_by_pubkey(&a.pubkey)?.context("agent vanished")?;
             println!("{}  {}  mode {}", a.name, runs_label(&a.harness, a.model.as_deref()), a.runtime_mode);
             print_policy(&ctx, &p);
+            print_effort(&a.harness, a.effort);
             print_host(&ctx, &a.pubkey)?;
             Ok(())
         }
@@ -80,11 +89,12 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
                     let p = ctx.store.agent_policy(&a.pubkey)?;
                     let host = ctx.store.agent_host(&a.pubkey)?.map(|h| format!("@{}", h.label)).unwrap_or_default();
                     println!(
-                        "{:<16} {:<6} {:<9} {:<10} {:<10} {:>3} unread  reach {:<18} {}",
+                        "{:<16} {:<6} {:<9} {:<10} {:<6} {:<10} {:>3} unread  reach {:<18} {}",
                         a.name,
                         host,
                         a.harness,
                         a.model.as_deref().unwrap_or("-"),
+                        a.effort.map_or("-", Effort::as_str),
                         a.runtime_mode,
                         unread,
                         reach_label(&ctx, &p.reach),
@@ -101,6 +111,7 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             println!("key in keystore: {}", if has_key { "yes" } else { "MISSING" });
             let p = ctx.store.agent_policy(&a.pubkey)?;
             print_policy(&ctx, &p);
+            print_effort(&a.harness, a.effort);
             print_host(&ctx, &a.pubkey)?;
             let spent = ctx.store.agent_spend_since(&a.pubkey, axel_store::local_day_start())?;
             println!("spent today: ${spent:.2} (estimated; managed sessions don't report usage yet)");
@@ -155,6 +166,7 @@ pub fn create(
         name: name.to_string(),
         harness,
         model,
+        effort: None,
         skills,
         prompt,
         color,
@@ -258,6 +270,17 @@ fn print_policy(ctx: &Ctx, p: &AgentPolicy) {
     };
     println!("  reach   {}", reach_label(ctx, &p.reach));
     println!("  budget  {spend} · summon depth ≤ {}", p.budget.max_depth);
+}
+
+/// The effort when the agent has one, and a warning where its harness
+/// cannot be started at it.
+fn print_effort(harness: &Harness, effort: Option<Effort>) {
+    if let Some(effort) = effort {
+        println!("  effort  {effort}");
+        if let Some(warning) = super::effort::warning(harness, effort) {
+            println!("  warning: {warning}");
+        }
+    }
 }
 
 fn parse_skills(s: &str) -> Vec<String> {

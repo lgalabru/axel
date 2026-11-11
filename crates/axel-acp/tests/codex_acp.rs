@@ -265,3 +265,24 @@ fn load_resumes_the_thread_and_replays_it() {
         .collect();
     assert_eq!(replayed, ["user_message_chunk", "agent_message_chunk", "tool_call:List /w", "tool_call_update"], "{replayed:?}");
 }
+
+#[test]
+fn the_agents_effort_is_a_config_override_on_new_and_resumed_threads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = Agent::start(dir.path());
+    init(&mut agent);
+    let server = json!({ "name": "axel", "command": "/bin/axel", "args": ["mcp"], "env": [] });
+    agent.call("session/new", json!({ "cwd": dir.path(), "mcpServers": [] }), |_| json!({}));
+    agent.call("session/new", json!({ "cwd": dir.path(), "mcpServers": [server], "_meta": { "axel": { "effort": "xhigh" } } }), |_| json!({}));
+    agent.call(
+        "session/load",
+        json!({ "sessionId": "01a19a8d-0000-7000-8000-000000000001", "cwd": dir.path(), "mcpServers": [], "_meta": { "axel": { "effort": "low" } } }),
+        |_| json!({}),
+    );
+    let log = codex_log(dir.path());
+    let starts = logged(&log, "thread/start");
+    assert!(starts[0].get("config").is_none_or(Value::is_null), "no effort, no override: {}", starts[0]);
+    assert_eq!(starts[1]["config"]["model_reasoning_effort"], "xhigh");
+    assert_eq!(starts[1]["config"]["mcp_servers"]["axel"]["command"], "/bin/axel", "the MCP override stays");
+    assert_eq!(logged(&log, "thread/resume")[0]["config"], json!({ "model_reasoning_effort": "low" }));
+}

@@ -183,6 +183,9 @@ fn host(session_id: &str) -> Result<()> {
         model: agent.model.clone(),
         // Axel's own tools (send, set_status, read_inbox), acting as this agent.
         mcp_servers,
+        // The agent's reasoning effort; the host applies it per harness and
+        // warns where it cannot.
+        effort: agent.effort,
     };
     std::fs::create_dir_all(cfg.socket_path.parent().unwrap())?;
     std::fs::create_dir_all(cfg.log_path.parent().unwrap())?;

@@ -322,6 +322,10 @@ impl Agent {
             args.extend(["--max-thinking-tokens".into(), n.to_string()]);
         }
         args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
+        // The agent's reasoning effort, from the host (`_meta.axel.effort`).
+        if let Some(effort) = crate::host::meta_effort(params).and_then(|e| axel_store::Harness::Claude.native_effort(e)) {
+            args.extend(["--effort".into(), effort.into()]);
+        }
         if let Some(r) = &resume {
             args.extend(["--resume".into(), r.clone()]);
         }

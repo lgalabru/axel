@@ -22,9 +22,9 @@ more than ten patches ahead, or at least one minor or major version ahead.
 
 | | |
 |---|---|
-| `axel agent new NAME [HARNESS[/MODEL]] [--skills a,b\|*] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. `terra codex`, `opus claude/opus`, `gus goose`. |
-| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--name NEW] [--skills a,b\|*] [--prompt P] [--color C] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change anything about it: harness, model, name, skills, prompt, colour, permissions, budget, mode or default host. A rename keeps its key and history; running sessions keep the old name until they restart. |
-| `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. |
+| `axel agent new NAME [HARNESS[/MODEL]] [--skills a,b\|*] [--effort LEVEL] [--color C] [--runtime-mode M] [--host H]` | Create an agent: key, attestation, profile. `terra codex`, `opus claude/opus`, `gus goose`. |
+| `axel agent edit NAME [HARNESS[/MODEL]] [--model M] [--name NEW] [--skills a,b\|*] [--effort LEVEL\|default] [--prompt P] [--color C] [--allow A] [--disallow A] [--reach nobody\|anyone] [--daily-usd N\|unlimited] [--max-depth N] [--runtime-mode M] [--host H\|local]` | Change anything about it: harness, model, name, skills, reasoning effort, prompt, colour, permissions, budget, mode or default host. A rename keeps its key and history; running sessions keep the old name until they restart. `--effort` takes `low`, `medium`, `high`, `xhigh` or `max`; `default` goes back to the harness's own. |
+| `axel agent ls` · `show NAME` · `archive NAME` | List, inspect, retire. `ls` and `show` include the effort when one is set, and `show` warns where the harness cannot take it. |
 
 ## Skills
 

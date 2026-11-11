@@ -50,7 +50,7 @@ pub use policy::{
 };
 pub use schema::SCHEMA_VERSION;
 pub use types::{
-    Agent, AgentColor, Appended, BlockedKind, ConversationItem, Environment, Harness, ItemKind, parse_harness_model,
+    Agent, AgentColor, Appended, BlockedKind, ConversationItem, Effort, Environment, Harness, ItemKind, parse_harness_model,
     ItemStatus, NewAgent, NewItem, NewSession, Participant, ParticipantRole, Project, Relationship,
     RuntimeMode, Session, SessionFilter, SessionRuntime, SessionState, SessionUpdate, Status,
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,

@@ -50,6 +50,7 @@ speaking ACP runs as a managed session too.
 | `HARNESS[/MODEL]` | What it runs; `claude` by default. `--harness` and `--model` say the same as flags. |
 | `--skills` | Skills to install for it, comma-separated, or `*` for all of them. |
 | `--prompt` | A standing prompt added to every session. |
+| `--effort` | How hard its model thinks: `low`, `medium`, `high`, `xhigh` or `max`. See [Reasoning effort](#reasoning-effort). |
 | `--color` | How it shows up in the dashboard and in `@mentions`. |
 | `--runtime-mode` | How much it may do alone; see [Permissions and budgets](/docs/policies). |
 | `--host` | Where it runs unless told otherwise; see [Remote hosts](/docs/remote-hosts). |
@@ -57,7 +58,8 @@ speaking ACP runs as a managed session too.
 Change any of it later with `axel agent edit terra …`: `axel agent edit terra goose` moves
 terra to Goose, `axel agent edit opus --model fable` changes only the model,
 `axel agent edit terra --name sol` renames it (its key, policy and history stay; sessions
-already running keep the old name until they restart), and `--skills`, `--prompt` and
+already running keep the old name until they restart), `--effort high` sets how hard it
+thinks (`--effort default` goes back to the harness's own), and `--skills`, `--prompt` and
 `--color` replace those. `axel agent archive terra` retires an agent and keeps its key and
 history.
 
@@ -84,6 +86,44 @@ turn and sends your new prompt. Harnesses can also opt into live steering with
 `agentCapabilities._meta.axel.steer: true` and the `_axel/steer` extension described
 in the [design document](https://github.com/lgalabru/axel/blob/main/docs/DESIGN.md#managed-runtime-acp-and-the-thread-view).
 This is capability-based and works for custom harnesses as well as the built-ins.
+
+## Reasoning effort
+
+```bash
+axel agent new opus claude/opus --effort xhigh
+axel agent edit terra --effort high
+axel agent edit terra --effort default     # back to the harness's own
+axel agent show terra                      # "effort  high", when one is set
+```
+
+The levels are `low`, `medium`, `high`, `xhigh` and `max`; anything else is refused when you
+type it. An agent without one launches exactly as before: Axel sends no flag and no option, and
+the harness uses its default. With one, every new session and every `axel thread resume` starts
+at that level:
+
+| Runtime | How the effort is applied |
+| --- | --- |
+| Managed Claude | Claude Code starts with `--effort LEVEL` |
+| Managed Codex | `model_reasoning_effort` in the thread's config overrides, as `-c model_reasoning_effort=LEVEL` would; Codex stops at `xhigh` |
+| Other managed harnesses (OpenCode, Goose, Grok, custom ACP commands…) | The effort option the harness advertises in its ACP `configOptions` (category `thought_level`, or one named for effort, reasoning or thinking), set with `session/set_config_option` when it offers that level |
+| Claude pane | `--effort LEVEL` |
+| Codex pane | `-c model_reasoning_effort=LEVEL` (not `max`) |
+| Pi pane | `--thinking LEVEL` |
+| Grok pane | `--reasoning-effort LEVEL` (not `max`) |
+| Other panes | No flag to pass |
+
+When a runtime cannot apply the level (a pane with no flag, Codex and `max`, a managed harness
+that offers no effort option or not that level, or one that refuses the change) Axel says so:
+at launch, on the thread for managed sessions, and in `axel agent show` for what it can tell in
+advance. The session still starts. A pane, or managed Claude or Codex on Axel's built-in
+adapter, is sent nothing and runs at the harness's default. Any other managed harness keeps the
+level it already has, which need not be its default; the warning names that level when the
+harness reports it.
+
+The effort is part of the agent's profile, kept on its record beside the model; the agent's
+key and attestation don't change, and a rename keeps it. `axel agent ls` lists it next to the
+model. A [remote host](/docs/remote-hosts) gets it with each job, so changing or clearing it
+locally applies to the next session started there too.
 
 ## Why keys
 

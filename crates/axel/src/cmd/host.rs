@@ -196,10 +196,19 @@ pub struct JobAgent {
     pub name: String,
     pub harness: axel_store::Harness,
     pub model: Option<String>,
+    /// Its reasoning effort.  Absent from a build that predates it, and
+    /// anything that is not a level this build knows, whatever its JSON
+    /// type, both read as none: a job is never refused over it.
+    #[serde(default, deserialize_with = "known_effort")]
+    pub effort: Option<axel_store::Effort>,
     pub skills: Vec<String>,
     pub prompt: Option<String>,
     pub color: Option<axel_store::AgentColor>,
     pub auth_tag: Option<Vec<String>>,
+}
+
+fn known_effort<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<axel_store::Effort>, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_str().and_then(|level| level.parse().ok()))
 }
 
 impl JobAgent {
@@ -209,6 +218,7 @@ impl JobAgent {
             name: a.name.clone(),
             harness: a.harness.clone(),
             model: a.model.clone(),
+            effort: a.effort,
             skills: a.skills.clone(),
             prompt: a.prompt.clone(),
             color: a.color,
@@ -223,6 +233,7 @@ impl JobAgent {
                 name: self.name.clone(),
                 harness: self.harness.clone(),
                 model: self.model.clone(),
+                effort: self.effort,
                 skills: self.skills.clone(),
                 prompt: self.prompt.clone(),
                 color: self.color,
@@ -1312,6 +1323,20 @@ fn job_worktree(thread_id: &str, agent: &str) -> PathBuf {
     paths::home().join("worktrees").join(format!("{}-{agent}", &thread_id[..12.min(thread_id.len())]))
 }
 
+/// Record a job's agent, its peers, and its effort and policy on this host.
+fn record_job_agent(ctx: &Ctx, job: &Job) -> Result<()> {
+    // The agent as this host knows it: no key; it always runs on autopilot
+    // here, since nobody is around to answer prompts (the guard still runs).
+    // Its effort and policy come along, and the agents it may reach, so `@name` works.
+    job.agent.insert_if_missing(ctx, axel_store::RuntimeMode::Autopilot)?;
+    for p in &job.peers {
+        p.insert_if_missing(ctx, axel_store::RuntimeMode::Autopilot)?;
+    }
+    ctx.store.set_agent_effort(&job.agent.pubkey, job.agent.effort)?;
+    ctx.store.set_agent_policy(&job.agent.pubkey, &axel_store::AgentPolicy { reach: job.reach.clone(), budget: job.budget })?;
+    Ok(())
+}
+
 /// Run a job on this host: learn the agent, hold its delegation, check out
 /// its branch, and start a managed session in the `axel` Rex session.
 fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
@@ -1325,15 +1350,7 @@ fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
         bail!("the delegation is from another agent");
     }
     ctx.store.put_delegation(&job.job_key, &job.delegation, job.agent.auth_tag.as_deref())?;
-
-    // The agent as this host knows it: no key; it always runs on autopilot
-    // here, since nobody is around to answer prompts (the guard still runs).
-    // Its policy comes along, and the agents it may reach, so `@name` works.
-    job.agent.insert_if_missing(ctx, axel_store::RuntimeMode::Autopilot)?;
-    for p in &job.peers {
-        p.insert_if_missing(ctx, axel_store::RuntimeMode::Autopilot)?;
-    }
-    ctx.store.set_agent_policy(&job.agent.pubkey, &axel_store::AgentPolicy { reach: job.reach.clone(), budget: job.budget })?;
+    record_job_agent(ctx, job)?;
 
     let work_dir = match &job.workspace {
         Some(ws) => {
@@ -1559,6 +1576,133 @@ mod tests {
         let again = checkout_returned_in(root, "mini", "axel/fix-orion", trees.path()).unwrap();
         assert_eq!(std::fs::canonicalize(again).unwrap(), std::fs::canonicalize(&wt).unwrap());
         assert_eq!(std::fs::read_to_string(wt.join("wip.rs")).unwrap(), "// edited here");
+    }
+
+    #[test]
+    fn an_agents_effort_travels_to_the_host_in_the_job_like_its_model() {
+        use axel_store::{Effort, Harness};
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = Ctx { store: axel_store::Store::open_memory().unwrap(), keystore: axel_identity::Keystore::open_at(temp.path().join("keys.json"), false).unwrap(), rex: None };
+        let atlas = ctx
+            .store
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-atlas".into(), name: "atlas".into(), harness: Harness::Codex, model: Some("gpt-5.5".into()), effort: Some(Effort::Xhigh), ..Default::default() })
+            .unwrap();
+
+        // From here: the job's agent profile carries both.
+        let wire = serde_json::to_value(JobAgent::of(&atlas)).unwrap();
+        assert_eq!((&wire["model"], &wire["effort"]), (&serde_json::json!("gpt-5.5"), &serde_json::json!("xhigh")));
+
+        // On a host that has not met the agent: its record there has both, which is what its session reads.
+        let host = Ctx { store: axel_store::Store::open_memory().unwrap(), keystore: axel_identity::Keystore::open_at(temp.path().join("host-keys.json"), false).unwrap(), rex: None };
+        let arrived: JobAgent = serde_json::from_value(wire.clone()).unwrap();
+        arrived.insert_if_missing(&host, axel_store::RuntimeMode::Autopilot).unwrap();
+        let there = host.store.agent_by_pubkey("pk-atlas").unwrap().unwrap();
+        assert_eq!((there.model.as_deref(), there.effort), (Some("gpt-5.5"), Some(Effort::Xhigh)));
+
+        // A job from a build without the field is an agent with no effort.
+        let mut older = wire.clone();
+        older.as_object_mut().unwrap().remove("effort");
+        assert_eq!(serde_json::from_value::<JobAgent>(older).unwrap().effort, None);
+        // A level this build does not know is no effort either, not a refused job.
+        let mut newer = wire.clone();
+        newer["effort"] = serde_json::json!("ludicrous");
+        assert_eq!(serde_json::from_value::<JobAgent>(newer).unwrap().effort, None);
+        // Nor is the job refused when the effort is not a string at all.
+        for not_a_level in [serde_json::json!(3), serde_json::json!(true), serde_json::json!(["high"]), serde_json::json!({ "level": "high" })] {
+            let mut odd = wire.clone();
+            odd["effort"] = not_a_level.clone();
+            let agent = serde_json::from_str::<JobAgent>(&odd.to_string()).unwrap_or_else(|e| panic!("effort {not_a_level}: {e}"));
+            assert_eq!((agent.effort, agent.model.as_deref()), (None, Some("gpt-5.5")), "effort {not_a_level}");
+        }
+        // And a field this build does not know is passed over, which is what a host
+        // that predates `effort` does with it.
+        let mut unknown = wire;
+        unknown["a_later_field"] = serde_json::json!({ "x": 1 });
+        assert_eq!(serde_json::from_value::<JobAgent>(unknown).unwrap().name, "atlas");
+    }
+
+    #[test]
+    fn a_job_sets_effort_for_an_agent_the_host_already_knows() {
+        use axel_store::{Effort, Harness};
+        let temp = tempfile::tempdir().unwrap();
+        let host = Ctx { store: axel_store::Store::open_memory().unwrap(), keystore: axel_identity::Keystore::open_at(temp.path().join("host-keys.json"), false).unwrap(), rex: None };
+        host.store
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-atlas".into(), name: "atlas".into(), harness: Harness::Codex, model: Some("older-model".into()), effort: None, ..Default::default() })
+            .unwrap();
+        let peer_before = host
+            .store
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-orion".into(), name: "orion".into(), harness: Harness::Claude, model: Some("peer-model".into()), effort: Some(Effort::Low), ..Default::default() })
+            .unwrap();
+
+        let laptop = axel_store::Store::open_memory().unwrap();
+        let local_atlas = laptop
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-atlas".into(), name: "atlas".into(), harness: Harness::Codex, model: Some("newer-model".into()), effort: Some(Effort::High), ..Default::default() })
+            .unwrap();
+        let local_orion = laptop
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-orion".into(), name: "orion".into(), harness: Harness::Claude, model: Some("other-peer-model".into()), effort: Some(Effort::Max), ..Default::default() })
+            .unwrap();
+        let job: Job = serde_json::from_value(
+            serde_json::to_value(Job {
+                thread_id: "t1".into(),
+                title: "fix it".into(),
+                agent: JobAgent::of(&local_atlas),
+                job_key: "jk".into(),
+                delegation: vec![],
+                prompt: "fix it".into(),
+                from: None,
+                workspace: None,
+                attachments: vec![],
+                resume: None,
+                reach: axel_store::Reach::default(),
+                budget: axel_store::Budget::default(),
+                peers: vec![JobAgent::of(&local_orion)],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        record_job_agent(&host, &job).unwrap();
+        let there = host.store.agent_by_pubkey("pk-atlas").unwrap().unwrap();
+        assert_eq!((there.model.as_deref(), there.effort), (Some("older-model"), Some(Effort::High)));
+        assert_eq!(host.store.agent_by_pubkey("pk-orion").unwrap().unwrap(), peer_before);
+    }
+
+    #[test]
+    fn a_job_with_no_effort_clears_it_for_an_agent_the_host_already_knows() {
+        use axel_store::{Effort, Harness};
+        let temp = tempfile::tempdir().unwrap();
+        let host = Ctx { store: axel_store::Store::open_memory().unwrap(), keystore: axel_identity::Keystore::open_at(temp.path().join("host-keys.json"), false).unwrap(), rex: None };
+        host.store
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-atlas".into(), name: "atlas".into(), harness: Harness::Codex, model: Some("older-model".into()), effort: Some(Effort::High), ..Default::default() })
+            .unwrap();
+
+        let laptop = axel_store::Store::open_memory().unwrap();
+        let local_atlas = laptop
+            .insert_agent(&axel_store::NewAgent { pubkey: "pk-atlas".into(), name: "atlas".into(), harness: Harness::Codex, model: Some("newer-model".into()), effort: None, ..Default::default() })
+            .unwrap();
+        let job: Job = serde_json::from_value(
+            serde_json::to_value(Job {
+                thread_id: "t1".into(),
+                title: "fix it".into(),
+                agent: JobAgent::of(&local_atlas),
+                job_key: "jk".into(),
+                delegation: vec![],
+                prompt: "fix it".into(),
+                from: None,
+                workspace: None,
+                attachments: vec![],
+                resume: None,
+                reach: axel_store::Reach::default(),
+                budget: axel_store::Budget::default(),
+                peers: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        record_job_agent(&host, &job).unwrap();
+        let there = host.store.agent_by_pubkey("pk-atlas").unwrap().unwrap();
+        assert_eq!((there.model.as_deref(), there.effort), (Some("older-model"), None));
     }
 
     #[test]

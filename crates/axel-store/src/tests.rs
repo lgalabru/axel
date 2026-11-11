@@ -20,6 +20,7 @@ fn agent_spec(name: &str, kp: &Keypair, owner: Option<&Keypair>) -> NewAgent {
         name: name.to_string(),
         harness: Harness::Claude,
         model: Some("sonnet".to_string()),
+        effort: None,
         skills: vec!["*".to_string()],
         prompt: None,
         color: Some(AgentColor::Gray),
@@ -2592,4 +2593,140 @@ fn native_usage_replaces_estimates_without_mutating_history_or_double_counting()
     // Invalid replacement rolls back the complete previous snapshot.
     assert!(s.replace_native_usage(&session.id,&[record.clone(),record]).is_err());
     assert_eq!(s.usage(&session.id).unwrap().unwrap().cost_usd_est,0.25);
+}
+
+// --- reasoning effort ---------------------------------------------------------
+
+#[test]
+fn an_agents_effort_is_kept_on_its_record_and_none_means_the_harness_default() {
+    let s = store();
+    let owner = Keypair::generate();
+    let (atlas, nova) = (Keypair::generate(), Keypair::generate());
+
+    // Without one, as every agent was before the column existed.
+    let plain = s.insert_agent(&agent_spec("atlas", &atlas, Some(&owner))).unwrap();
+    assert_eq!(plain.effort, None);
+    assert_eq!(s.agent_by_name("atlas").unwrap().unwrap().effort, None);
+
+    // With one, from creation.
+    let mut spec = agent_spec("nova", &nova, Some(&owner));
+    spec.effort = Some(Effort::Xhigh);
+    assert_eq!(s.insert_agent(&spec).unwrap().effort, Some(Effort::Xhigh));
+    assert_eq!(s.agent_by_pubkey(&pk(&nova)).unwrap().unwrap().effort, Some(Effort::Xhigh));
+    let listed: Vec<(String, Option<Effort>)> = s.list_agents().unwrap().into_iter().map(|a| (a.name, a.effort)).collect();
+    assert!(listed.contains(&("nova".into(), Some(Effort::Xhigh))) && listed.contains(&("atlas".into(), None)), "{listed:?}");
+
+    // Set, changed and cleared afterwards; the rest of the record stays.
+    s.set_agent_effort(&pk(&atlas), Some(Effort::Low)).unwrap();
+    let a = s.agent_by_name("atlas").unwrap().unwrap();
+    assert_eq!(a.effort, Some(Effort::Low));
+    assert_eq!(Agent { effort: None, ..a }, plain, "only the effort changed");
+    s.set_agent_effort(&pk(&atlas), Some(Effort::Max)).unwrap();
+    assert_eq!(s.agent_by_name("atlas").unwrap().unwrap().effort, Some(Effort::Max));
+    s.set_agent_effort(&pk(&atlas), None).unwrap();
+    assert_eq!(s.agent_by_name("atlas").unwrap().unwrap(), plain);
+    // A rename or a new model leaves it alone.
+    s.rename_agent(&pk(&nova), "vega").unwrap();
+    s.set_agent_harness(&pk(&nova), &Harness::Codex, Some("gpt-5.5")).unwrap();
+    assert_eq!(s.agent_by_name("vega").unwrap().unwrap().effort, Some(Effort::Xhigh));
+
+    assert!(matches!(s.set_agent_effort("nobody", Some(Effort::High)), Err(Error::NotFound(_))));
+}
+
+/// The schema the last release without an effort produced.
+const SCHEMA_BEFORE_EFFORT: i64 = 9;
+
+#[test]
+fn a_database_from_before_effort_upgrades_with_its_agents_at_the_harness_default() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    schema::migrate_to(&mut conn, SCHEMA_BEFORE_EFFORT).unwrap();
+    assert!(conn.execute("SELECT effort FROM agents", []).is_err(), "no effort column yet");
+    // An agent as that build wrote it.
+    conn.execute(
+        "INSERT INTO agents (pubkey, name, harness, model, skills_json, prompt, color, runtime_mode, auth_tag_json, created_at, last_seen_at)
+         VALUES ('pk-atlas', 'atlas', 'codex', 'gpt-5.5', '[\"*\"]', 'be brief', 'blue', 'edits', '[\"auth\",\"o\",\"\",\"s\"]', 1700000000, 1700000500)",
+        [],
+    )
+    .unwrap();
+
+    // Same path Store::open takes, twice: the second run changes nothing.
+    schema::migrate(&mut conn).unwrap();
+    schema::migrate(&mut conn).unwrap();
+    assert_eq!(schema::current_version(&conn).unwrap(), SCHEMA_VERSION);
+
+    let s = Store::from_connection(conn);
+    let a = s.agent_by_name("atlas").unwrap().unwrap();
+    assert_eq!(
+        a,
+        Agent {
+            pubkey: "pk-atlas".into(),
+            name: "atlas".into(),
+            harness: Harness::Codex,
+            model: Some("gpt-5.5".into()),
+            effort: None,
+            skills: vec!["*".into()],
+            prompt: Some("be brief".into()),
+            color: Some(AgentColor::Blue),
+            runtime_mode: RuntimeMode::Edits,
+            auth_tag: Some(vec!["auth".into(), "o".into(), "".into(), "s".into()]),
+            created_at: 1_700_000_000,
+            last_seen_at: Some(1_700_000_500),
+            archived_at: None,
+        },
+        "the row is as it was, with no effort"
+    );
+    s.set_agent_effort("pk-atlas", Some(Effort::High)).unwrap();
+    assert_eq!(s.agent_by_name("atlas").unwrap().unwrap().effort, Some(Effort::High));
+
+    // A level this build does not know (a newer build's) reads as none, not as an error.
+    s.connection().execute("UPDATE agents SET effort = 'ludicrous'", []).unwrap();
+    assert_eq!(s.agent_by_name("atlas").unwrap().unwrap().effort, None);
+    assert_eq!(s.list_agents().unwrap().len(), 1);
+}
+
+#[test]
+fn a_database_that_already_has_the_effort_column_migrates_cleanly() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    schema::migrate_to(&mut conn, SCHEMA_BEFORE_EFFORT).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE agents ADD COLUMN effort TEXT;
+         INSERT INTO agents (pubkey, name, harness, effort, created_at) VALUES ('pk-nova', 'nova', 'claude', 'max', 1700000000);",
+    )
+    .unwrap();
+    schema::migrate(&mut conn).unwrap();
+    assert_eq!(schema::current_version(&conn).unwrap(), SCHEMA_VERSION);
+    let s = Store::from_connection(conn);
+    assert_eq!(s.agent_by_name("nova").unwrap().unwrap().effort, Some(Effort::Max));
+}
+
+#[test]
+fn only_claude_and_codex_have_their_adapter_inside_axel() {
+    assert!(Harness::Claude.has_builtin_adapter());
+    assert!(Harness::Codex.has_builtin_adapter());
+    for h in Harness::BUILTIN.into_iter().filter(|h| !matches!(h, Harness::Claude | Harness::Codex)) {
+        assert!(!h.has_builtin_adapter(), "{h}");
+        assert!(h.acp_command().is_some(), "{h} speaks ACP through a command of its own");
+    }
+    // A custom command named like a builtin is still its own ACP agent.
+    assert!(!Harness::Custom("claude-code-acp".into()).has_builtin_adapter());
+    assert!(!Harness::Custom("maki acp".into()).has_builtin_adapter());
+}
+
+#[test]
+fn each_harness_says_how_its_pane_takes_a_reasoning_effort() {
+    let args = |h: Harness, e: Effort| h.pane_effort_args(e).map(|a| a.join(" "));
+    assert_eq!(args(Harness::Claude, Effort::Max).as_deref(), Some("--effort max"));
+    assert_eq!(args(Harness::Claude, Effort::Low).as_deref(), Some("--effort low"));
+    assert_eq!(args(Harness::Codex, Effort::Xhigh).as_deref(), Some("-c model_reasoning_effort=xhigh"));
+    assert_eq!(args(Harness::Codex, Effort::Max), None, "codex stops at xhigh");
+    assert_eq!(args(Harness::Pi, Effort::Medium).as_deref(), Some("--thinking medium"));
+    assert_eq!(args(Harness::Grok, Effort::High).as_deref(), Some("--reasoning-effort high"));
+    assert_eq!(args(Harness::Grok, Effort::Xhigh).as_deref(), Some("--reasoning-effort xhigh"));
+    assert_eq!(args(Harness::Grok, Effort::Max), None, "grok stops at xhigh");
+    for h in [Harness::Opencode, Harness::Goose, Harness::Cursor, Harness::Kimi, Harness::Amp, Harness::Custom("maki acp".into())] {
+        assert_eq!(args(h, Effort::High), None);
+    }
+    assert_eq!("xhigh".parse::<Effort>().unwrap(), Effort::Xhigh);
+    assert!("ultra".parse::<Effort>().is_err());
+    assert_eq!(Effort::ALL.iter().map(|e| e.to_string()).collect::<Vec<_>>(), ["low", "medium", "high", "xhigh", "max"]);
 }

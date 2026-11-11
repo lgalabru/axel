@@ -433,6 +433,12 @@ const MIGRATIONS: &[&str] = &[
         SUM(cost_usd_est) AS cost_usd_est, MAX(at) AS updated_at
       FROM effective_usage_log GROUP BY session_id;
     "#,
+    // v10: an agent's reasoning effort, beside its model.  NULL (every agent
+    // already here) is the harness's own default.  Local-only, like the rest
+    // of the agent's profile.  The column is added by `post_migrate`.
+    r#"
+    -- agents.effort: see post_migrate.
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.
@@ -507,6 +513,9 @@ fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
     }
     if version == 8 {
         add_column_if_missing(tx, "turns", "changes_json", "TEXT")?;
+    }
+    if version == 10 {
+        add_column_if_missing(tx, "agents", "effort", "TEXT")?;
     }
     if version == 2 {
         add_column_if_missing(tx, "sessions", "runtime", "TEXT NOT NULL DEFAULT 'pane'")?;
