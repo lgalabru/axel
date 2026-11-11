@@ -56,6 +56,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
         let mut last = Instant::now();
         // Keep the pane as tall as the composer wants (see `PaneFit`).
         let mut pane = PaneFit::default();
+        let mut watch = StateWatch::new(thread_state(&deps, thread_id));
         loop {
             while let Ok(hint) = updates.try_recv() { v.update_hint = hint; }
             let size = terminal.size()?;
@@ -107,6 +108,11 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                     v.set_data(d);
                     ask_new(&v);
                 }
+                // Settled (or archived, deleted) elsewhere, e.g. from the
+                // dashboard: the thread's window goes, as when you leave it.
+                if watch.closed(thread_state(&deps, thread_id)) {
+                    return Ok(());
+                }
                 last = Instant::now();
             }
         }
@@ -115,6 +121,31 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+fn thread_state(deps: &Deps, thread_id: &str) -> Option<axel_store::ThreadState> {
+    deps.store.get_thread(thread_id).ok().flatten().map(|t| t.state)
+}
+
+/// Whether the thread was closed while the composer is up: it was open and
+/// is now settled, archived or deleted.  A thread opened when already settled
+/// stays up, so you can still read and reopen it.
+struct StateWatch {
+    was_open: bool,
+}
+
+impl StateWatch {
+    fn new(state: Option<axel_store::ThreadState>) -> Self {
+        Self { was_open: state == Some(axel_store::ThreadState::Open) }
+    }
+
+    fn closed(&mut self, state: Option<axel_store::ThreadState>) -> bool {
+        let Some(state) = state else { return false };
+        let open = state == axel_store::ThreadState::Open;
+        let closed = self.was_open && !open;
+        self.was_open = open;
+        closed
+    }
 }
 
 /// Questions waiting for you that `asked` hasn't seen, oldest first.
@@ -309,6 +340,27 @@ pub fn render(frame: &mut Frame, v: &ThreadView) {
         && hint > 0
     {
         frame.render_widget(Paragraph::new(Line::styled(text.clone(), crate::theme::accent())), Rect::new(full.x + 1, full.bottom() - 1, full.width.saturating_sub(1), 1));
+    }
+}
+
+#[cfg(test)]
+mod state_watch_tests {
+    use super::StateWatch;
+    use axel_store::ThreadState::*;
+
+    #[test]
+    fn settling_an_open_thread_closes_it_but_an_already_settled_one_stays() {
+        let mut w = StateWatch::new(Some(Open));
+        assert!(!w.closed(Some(Open)));
+        assert!(!w.closed(None), "a failed read changes nothing");
+        assert!(w.closed(Some(Done)));
+        for s in [Archived, Deleted] {
+            assert!(StateWatch::new(Some(Open)).closed(Some(s)));
+        }
+        let mut settled = StateWatch::new(Some(Done));
+        assert!(!settled.closed(Some(Done)), "opened to read a settled thread");
+        assert!(!settled.closed(Some(Open)));
+        assert!(settled.closed(Some(Done)), "reopened, then settled again");
     }
 }
 
