@@ -362,6 +362,19 @@ impl Harness {
             Harness::Custom(_) => "",
         }
     }
+
+    /// How to log it in once, in one line: an agent can't start until it is.
+    pub fn login(&self) -> String {
+        match self {
+            Harness::Claude => "run `claude`, then `/login`".into(),
+            Harness::Codex => "run `codex login`".into(),
+            Harness::Opencode => "run `opencode auth login`".into(),
+            Harness::Goose => "run `goose configure`".into(),
+            Harness::Cursor => "run `cursor-agent login`".into(),
+            Harness::Pi => "run `pi auth login <provider>` (anthropic, openai, …), or set an API key such as ANTHROPIC_API_KEY".into(),
+            other => format!("run `{}` once and log in", other.program()),
+        }
+    }
 }
 
 /// An agent's harness and, optionally, its model: `claude`, `claude/opus`,

@@ -662,6 +662,11 @@ impl<W: Write> Host<W> {
             Ok(None) => {}
             Err(e) => {
                 self.line(RED, "✖", &format!("setup failed: {e:#}"));
+                // On the thread too: otherwise the agent just shows as done.
+                let msg = setup_failure_message(&self.cfg.harness, &format!("{e:#}"));
+                if let Err(err) = self.push(ItemKind::Error, Some(ItemStatus::Failed), None, json!({ "message": msg })) {
+                    self.line(RED, "✖", &format!("store: {err}"));
+                }
                 return format!("setup failed: {e:#}");
             }
         }
@@ -2612,6 +2617,19 @@ fn usage_delta(u: &TurnUsage) -> axel_store::UsageDelta {
     }
 }
 
+/// What the thread says when the agent couldn't start.  ACP's "auth
+/// required" (a harness never logged in) gets the way to log it in; anything
+/// else its first line, the full error staying in the session log.
+fn setup_failure_message(harness: &Harness, err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("authentication required") || lower.contains("auth_required") || lower.contains("not logged in") {
+        return format!("{} isn't logged in, so the agent couldn't start. To log in, {}; then send your message again.", harness.label(), harness.login());
+    }
+    let first = err.lines().next().unwrap_or(err).trim();
+    let first: String = if first.chars().count() > 300 { format!("{}…", first.chars().take(300).collect::<String>()) } else { first.to_string() };
+    format!("{} couldn't start: {first}", harness.label())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2735,6 +2753,16 @@ mod tests {
         assert_eq!(input_summary(&json!({"command": ["ls", "-la"]})), "ls -la");
         assert_eq!(input_summary(&json!({"file_path": "/a/b.rs"})), "/a/b.rs");
         assert_eq!(input_summary(&json!({})), "");
+    }
+
+    #[test]
+    fn a_harness_that_is_not_logged_in_says_how_to_log_in() {
+        let err = "session/new: Authentication required: Configure an API key or log in with an OAuth provider.: {\n  \"authMethods\": []\n}";
+        let msg = super::setup_failure_message(&Harness::Pi, err);
+        assert!(msg.starts_with("Pi isn't logged in"), "{msg}");
+        assert!(msg.contains("pi auth login"), "{msg}");
+        let other = super::setup_failure_message(&Harness::Goose, "initialize: connection closed\nmore detail");
+        assert_eq!(other, "Goose couldn't start: initialize: connection closed");
     }
 }
 
