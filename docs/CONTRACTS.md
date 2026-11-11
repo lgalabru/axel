@@ -219,10 +219,11 @@ pub struct Agent { pub pubkey: String, pub name: String, pub harness: Harness, p
 
 An agent's reasoning effort is part of its record, beside its model: the nullable `agents.effort`
 column (schema v10; NULL, or text this build does not know, is the harness's default). Like the
-model it is in no envelope, so it changes no signature and no merge. It reaches a remote host the
-way the model does, in the job's agent profile (`JobAgent.effort`; a host that predates the field
-ignores it, and a job without it, or with anything there that is not a level the host knows, reads
-as no effort).
+model it is in no envelope, so it changes no signature and no merge. It reaches a remote host in
+the job's agent profile (`JobAgent.effort`), and starting a job sets the agent's effort there to
+what the job carries (`None` clears it), even when the host already knows the agent (a host that
+predates the field ignores it, and a job without it, or with anything there that is not a level
+the host knows, reads as no effort).
 
 Authorization in `append`: kind 100 → always (signer becomes owner). Other thread kinds → signer is a participant of `t`, or an agent whose `agents.auth_tag` owner is a participant, or (kinds 20/21/110–112) signer is one of this replica's own agents. Non-thread kinds (notes etc. without `t`) → always. Rejected envelopes are kept with `rejected_reason` and re-tried by `rebuild_projections`.
 

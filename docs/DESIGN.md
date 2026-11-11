@@ -525,8 +525,9 @@ currencies stay out of the USD total.
 
 **Reasoning effort** is part of an agent's profile, beside its model: `low`, `medium`,
 `high`, `xhigh` or `max` (`axel agent new|edit --effort`), or none for the harness's own
-default. Like the model it lives on the agent's record and reaches a remote host in the
-job's agent profile. It is applied by capability, never by harness name:
+default. It lives on the agent's record and travels in each remote job's agent profile,
+updating (or clearing) the host's record for that agent before the session starts. It is
+applied by capability, never by harness name:
 
 - a **pane** gets the harness's own flag ahead of its other arguments
   (`Harness::pane_effort_args`: Claude Code `--effort`, Codex `-c model_reasoning_effort=`,
