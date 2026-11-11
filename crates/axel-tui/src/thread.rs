@@ -246,7 +246,8 @@ pub struct ThreadView {
     /// Composer-only pane (the timeline streams in the pane above): Tab skips
     /// the timeline and pending approvals are answered from the composer.
     pub compose_only: bool,
-    /// Background update advice, independent of draft and send status.
+    /// A newer Axel worth updating to (its version), from the background
+    /// check; shown in the footer, independent of draft and send status.
     pub update_hint: Option<String>,
 }
 

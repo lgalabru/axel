@@ -50,6 +50,10 @@ pub fn danger() -> Style {
 pub fn ok() -> Style {
     Style::default().fg(OK)
 }
+/// A call to action, as a pill: light green on dark green (the update notice).
+pub fn pill() -> Style {
+    Style::default().fg(Color::Rgb(142, 222, 142)).bg(Color::Rgb(36, 82, 44))
+}
 pub fn selected() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::REVERSED)
 }

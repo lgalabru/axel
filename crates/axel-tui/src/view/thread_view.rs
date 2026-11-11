@@ -719,6 +719,14 @@ pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
     composer_text_rows(v, area.width, max) as u16 + chips + 2
 }
 
+/// `run [ axel update ] to get 0.3.139`, the command a pill; only the pill
+/// when that's all there's room for.
+fn update_line(version: &str, room: usize) -> Line<'static> {
+    let pill = Span::styled(" axel update ", theme::pill());
+    let full = Line::from(vec![Span::styled("run ", theme::dim()), pill.clone(), Span::styled(format!(" to get {version}"), theme::dim())]);
+    if full.width() <= room { full } else { Line::from(pill) }
+}
+
 /// `→ atlas · ⏵⏵ autopilot on (shift+tab to cycle)`: who the composer's text
 /// would reach, then the mode of the session it talks to.
 fn mode_spans(v: &ThreadView) -> Vec<Span<'static>> {
@@ -898,6 +906,8 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
                 let style = if st.starts_with("error") { theme::danger() } else { theme::accent() };
                 Line::from(Span::styled(ellipsize(st, room), style))
             }
+            // A newer Axel, in place of the key help: the command as a pill.
+            None if let Some(version) = &v.update_hint => update_line(version, room),
             None => {
                 let mut items = v.help();
                 let mut line = help_line(&items);
@@ -912,9 +922,10 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     let mut left = vec![Span::raw("  ")];
     left.extend(mode_spans(v));
     let mut right = fit(&left);
-    let full = match &v.status {
-        Some(st) => st.chars().count(),
-        None => help_line(&v.help()).width(),
+    let full = match (&v.status, &v.update_hint) {
+        (Some(st), _) => st.chars().count(),
+        (None, Some(version)) => update_line(version, usize::MAX).width(),
+        (None, None) => help_line(&v.help()).width(),
     };
     // Tight: drop the "(shift+tab to cycle)" hint and the host, keep who and the mode.
     if right.width() < full

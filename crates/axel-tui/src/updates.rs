@@ -71,7 +71,7 @@ fn cached_latest(path: &Path, now: u64, fetch: impl FnOnce() -> Option<String>) 
 }
 
 fn hint(installed: &str, latest: &str) -> Option<String> {
-    Version::parse(latest)?.worth_suggesting(Version::parse(installed)?).then(|| format!("Axel {} available · axel update", latest.trim_start_matches('v')))
+    Version::parse(latest)?.worth_suggesting(Version::parse(installed)?).then(|| latest.trim_start_matches('v').to_string())
 }
 
 fn spawn(check: impl Fn() -> Option<String> + Send + 'static) -> Receiver<Option<String>> {
