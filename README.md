@@ -145,3 +145,18 @@ The design lives in [`docs/DESIGN.md`](docs/DESIGN.md), the wire formats in
 ## License
 
 [Apache-2.0](LICENSE)
+
+## Harnesses
+
+An agent runs on a harness: a coding agent's own CLI, which Axel drives over ACP. Install the
+CLI (and its ACP adapter, for Pi and Amp), log it in once, then name it when you create the
+agent, optionally with a model after a `/`. `axel setup` lists the harnesses it finds.
+
+```sh
+axel agent new atlas claude/opus          # Claude Code, on Opus
+axel agent new nova codex/gpt-5.5         # Codex
+axel agent new vega pi                    # Pi: npm i -g @earendil-works/pi-coding-agent pi-acp,
+                                          #     then pi auth login anthropic (or an API key)
+axel agent new lyra opencode              # OpenCode, Goose, Cursor, Amp… work the same way
+axel agent edit vega cursor               # move an agent to another harness; key and history stay
+```

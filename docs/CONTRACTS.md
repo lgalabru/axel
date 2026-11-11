@@ -191,7 +191,7 @@ pub enum AgentColor { Purple, Yellow, Red, Green, Blue, Gray, Orange }          
 pub enum Effort { Low, Medium, High, Xhigh, Max }                                           // how hard an agent's model thinks; an agent without one runs at its harness's default
 // Not Copy and no ALL: parsing never fails (anything that is not a builtin is Custom).  Serialised as the builtin name or the custom command.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)] pub enum Harness { #[default] Claude, Codex, Opencode, Custom(String) }
-impl Harness { pub const BUILTIN: [Harness; 3]; pub fn as_str(&self) -> &str; pub fn parse(s: &str) -> Harness; pub fn is_builtin(&self) -> bool; }   // FromStr<Err = Infallible>, Display, Serialize/Deserialize as a string
+impl Harness { pub const BUILTIN: [Harness; 3]; pub fn as_str(&self) -> &str; pub fn parse(s: &str) -> Harness; pub fn is_builtin(&self) -> bool; pub fn install(&self) -> &str; pub fn login(&self) -> String /* one-line hint shown when it isn't logged in */; }   // FromStr<Err = Infallible>, Display, Serialize/Deserialize as a string
 impl Harness {   // reasoning effort, by capability (ADR 0007)
     pub fn native_effort(&self, effort: Effort) -> Option<&'static str>;     // the harness CLI's own word for the level: claude and pi all five; codex and grok all but max; others None
     pub fn pane_effort_args(&self, effort: Effort) -> Option<Vec<String>>;   // claude --effort L; codex -c model_reasoning_effort=L; pi --thinking L; grok --reasoning-effort L; None = this pane cannot apply it
