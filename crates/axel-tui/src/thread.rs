@@ -683,7 +683,7 @@ impl ThreadView {
                 self.clamp_queue_sel();
                 return ThreadAction::None;
             }
-            KeyCode::Char(' ') if shift => {
+            KeyCode::Char(' ') if shift && self.focus == Focus::Timeline => {
                 self.fold_all();
                 return ThreadAction::None;
             }
@@ -1484,6 +1484,15 @@ mod tests {
         v.handle_key(key(KeyCode::Char(' ')));
         assert_eq!(v.composer.text(), "hi ");
         assert!(v.is_expanded("th1"), "unchanged");
+    }
+
+    #[test]
+    fn shift_space_in_the_composer_types_a_space() {
+        let mut v = ThreadView::new("T1", data());
+        type_str(&mut v, "I");
+        v.handle_key(shift_space()); // Shift still held from the capital
+        type_str(&mut v, "a");
+        assert_eq!(v.composer.text(), "I a");
     }
 
     #[test]
