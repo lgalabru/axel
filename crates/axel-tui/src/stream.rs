@@ -25,12 +25,23 @@ use crate::view::thread_view::row_lines;
 const TICK: Duration = Duration::from_millis(250);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
-/// Forward text typed in the read-only stream to its composer.
-pub type RedirectInputFn<'a> = dyn Fn(&str) -> Result<()> + 'a;
+/// What the read-only stream passes on: typing for its composer, or one of
+/// the composer's pane shortcuts, so they work with the message pane focused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamInput {
+    Text(String),
+    /// Ctrl+D: the thread controls.
+    Controls,
+    /// Ctrl+T: a terminal at the thread's directory.
+    Terminal,
+}
+
+/// Forward input from the read-only stream (see [`StreamInput`]).
+pub type RedirectInputFn<'a> = dyn Fn(StreamInput) -> Result<()> + 'a;
 
 /// Follow `thread_id` until the process is killed (the pane closes with its window).
 pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, redirect_input: Option<&RedirectInputFn<'_>>) -> Result<()> {
-    let _input = redirect_input.map(|_| StreamInput::new()).transpose()?;
+    let _input = redirect_input.map(|_| RawInput::new()).transpose()?;
     let mut out = std::io::stdout();
     let data = glue::load_thread(store, owner_pk, thread_id, now_secs())?;
     let mut view = ThreadView::new(thread_id, data);
@@ -106,23 +117,28 @@ pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, re
                 if !event::poll(wait)? {
                     break;
                 }
-                let ev = event::read()?;
-                if matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release && k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)) {
-                    return Ok(());
-                }
-                let mut text = typed_text(ev).unwrap_or_default();
-                // Include input already queued behind the first character.
-                while event::poll(Duration::ZERO)? {
+                let mut text = String::new();
+                // The first event, then any input already queued behind it.
+                let mut first = true;
+                while first || event::poll(Duration::ZERO)? {
+                    first = false;
                     let ev = event::read()?;
-                    if matches!(&ev, Event::Key(k) if k.kind != KeyEventKind::Release && k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)) {
+                    if is_ctrl(&ev, 'c') {
                         return Ok(());
                     }
-                    if let Some(more) = typed_text(ev) {
-                        text.push_str(&more);
+                    match shortcut(&ev) {
+                        Some(sc) => {
+                            // Text typed before the shortcut goes first.
+                            if !text.is_empty() {
+                                redirect(StreamInput::Text(std::mem::take(&mut text)))?;
+                            }
+                            redirect(sc)?;
+                        }
+                        None => text.extend(typed_text(ev)),
                     }
                 }
                 if !text.is_empty() {
-                    redirect(&text)?;
+                    redirect(StreamInput::Text(text))?;
                 }
             }
         } else {
@@ -136,9 +152,9 @@ pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, re
 }
 
 /// Read text immediately without echo, leaving scrollback and selection alone.
-struct StreamInput;
+struct RawInput;
 
-impl StreamInput {
+impl RawInput {
     fn new() -> Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         let guard = Self;
@@ -147,10 +163,25 @@ impl StreamInput {
     }
 }
 
-impl Drop for StreamInput {
+impl Drop for RawInput {
     fn drop(&mut self) {
         let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste, crossterm::cursor::Show);
         let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+fn is_ctrl(ev: &Event, c: char) -> bool {
+    matches!(ev, Event::Key(k) if k.kind != KeyEventKind::Release && k.code == KeyCode::Char(c) && k.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// The composer's pane shortcuts, honoured here too: ^D controls, ^T terminal.
+fn shortcut(ev: &Event) -> Option<StreamInput> {
+    if is_ctrl(ev, 'd') {
+        Some(StreamInput::Controls)
+    } else if is_ctrl(ev, 't') {
+        Some(StreamInput::Terminal)
+    } else {
+        None
     }
 }
 
@@ -189,6 +220,15 @@ mod input_tests {
         let mut released = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
         released.kind = KeyEventKind::Release;
         assert_eq!(typed_text(Event::Key(released)), None);
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_t_are_the_composer_shortcuts() {
+        let ctrl = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        assert_eq!(shortcut(&ctrl('d')), Some(StreamInput::Controls));
+        assert_eq!(shortcut(&ctrl('t')), Some(StreamInput::Terminal));
+        assert_eq!(shortcut(&ctrl('x')), None);
+        assert_eq!(shortcut(&Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))), None, "a plain d is text");
     }
 }
 

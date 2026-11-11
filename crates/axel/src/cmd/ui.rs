@@ -503,8 +503,22 @@ fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
 
 fn stream_with_input(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let owner_pk = ctx.owner()?.public().to_string();
-    let redirect = |text: &str| -> Result<()> {
+    let redirect = |input: axel_tui::StreamInput| -> Result<()> {
         let rex = ctx.rex.as_ref().context("not inside Rex")?;
+        let text = match input {
+            axel_tui::StreamInput::Text(text) => text,
+            axel_tui::StreamInput::Controls => {
+                open_controls(rex, thread_id);
+                return Ok(());
+            }
+            axel_tui::StreamInput::Terminal => {
+                // A failure here mustn't end the stream.
+                if let Err(e) = open_thread_terminal(ctx, thread_id) {
+                    eprintln!("axel: {e:#}");
+                }
+                return Ok(());
+            }
+        };
         let view = rex.view()?;
         let composer = composer_below(&view, &rex.env().block).context("no composer below this message pane")?;
         // Paste into the owner's composer, never into an agent's terminal.
