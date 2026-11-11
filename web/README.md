@@ -4,6 +4,13 @@ The Axel website, one Next.js app: the landing page at `/` (`src/app/(home)`) an
 documentation at `/docs` (`src/app/(docs)`, Fumadocs, pages in `content/docs/*.mdx`).
 Each half has its own root layout and stylesheet, so their styles never mix.
 
+The landing page is built from `src/components/home/`: the page shell with the
+hero and the product video (`site.tsx`) and a grid of feature tiles (`bento.tsx`).
+The tiles are Stageshow stages; the kit is
+vendored in `src/stageshow/kit` (see `src/stageshow/README.md`). Scroll parallax
+uses Motion. The repository's star count in the navigation is read on the server,
+at most once an hour.
+
 ```bash
 pnpm install
 pnpm dev         # http://localhost:3000 and http://localhost:3000/docs

@@ -1,0 +1,334 @@
+/* The features grid. Rounded tiles on a gap; the gap is half the tile padding.
+   Everything nests under .vb. */
+
+.vb {
+  --pad: 32px;
+  --gap: 16px;
+  --tile: #f5f5f7;
+  --ink: #0b0b0c;
+  --ink-2: #6e6e73;
+  --pink: #f745c6;
+  --green: #22a565;
+  container-type: inline-size;
+
+  & .vb-grid {
+    display: grid;
+    gap: var(--gap);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 470px 320px 320px 440px 400px 460px;
+    grid-template-areas: 'threads' 'cost' 'harnesses' 'agents' 'hosts' 'guard';
+  }
+
+  @container (min-width: 620px) {
+    & .vb-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-rows: 440px 320px 420px 440px;
+      grid-template-areas: 'threads threads' 'cost harnesses' 'agents agents' 'hosts guard';
+    }
+  }
+
+  @container (min-width: 940px) {
+    & .vb-grid {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-rows: 440px 420px 440px;
+      grid-template-areas:
+        'threads threads threads threads cost cost'
+        'harnesses harnesses agents agents agents agents'
+        'hosts hosts hosts guard guard guard';
+    }
+  }
+
+  @container (max-width: 619px) {
+    --pad: 24px;
+  }
+
+  /* ---- The tile: one frame for all six ---- */
+
+  & .vb-tile {
+    position: relative;
+    overflow: hidden;
+    border-radius: 36px;
+    background: var(--tile);
+  }
+
+  & .vb-tile--threads {
+    grid-area: threads;
+  }
+  & .vb-tile--cost {
+    grid-area: cost;
+  }
+  & .vb-tile--harnesses {
+    grid-area: harnesses;
+  }
+  & .vb-tile--agents {
+    grid-area: agents;
+  }
+  & .vb-tile--hosts {
+    grid-area: hosts;
+  }
+  & .vb-tile--guard {
+    grid-area: guard;
+  }
+
+  /* The one tile in the axolotl's spectrum */
+  & .vb-tile[data-dark] {
+    background: linear-gradient(140deg, #fe711f 0%, #f745c6 45%, #a64dff 78%, #2293fd 100%);
+    color: #fff;
+  }
+
+  /* Run-in copy: the bold lead and its gray continuation at one size */
+  & .vb-copy {
+    position: relative;
+    z-index: 1;
+    max-width: 440px;
+    padding: var(--pad) var(--pad) 0;
+    color: var(--ink-2);
+    font-size: 19px;
+    line-height: 26px;
+    letter-spacing: -0.015em;
+    text-wrap: pretty;
+
+    & b {
+      color: var(--ink);
+      font-weight: 600;
+    }
+  }
+
+  & .vb-tile--threads .vb-copy,
+  & .vb-tile--agents .vb-copy {
+    max-width: 520px;
+  }
+
+  /* ---- Pictures: pinned to the tile's bottom, cropped by the tile ---- */
+
+  & .vb-picture {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+  }
+
+  & .vb-stage .ss-stage {
+    --ss-success: var(--green);
+    --ss-accent: var(--pink);
+    --ss-accent-text: #c2189a;
+    --ss-accent-soft: rgba(247, 69, 198, 0.12);
+    --ss-radius-pill: 999px;
+    overflow: hidden;
+    background: transparent;
+  }
+
+  /* One white panel on the copy's gutter, rounded like everything else */
+  & .vb-panel {
+    position: absolute;
+    left: var(--pad);
+    right: var(--pad);
+    bottom: var(--pad);
+    padding: 8px;
+    border-radius: 24px;
+    background: #fff;
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.03),
+      0 12px 30px -14px rgba(20, 20, 30, 0.18);
+
+    & .vb-name {
+      display: inline-block;
+      padding-right: 2px;
+      font-size: 16px;
+      font-weight: 500;
+      line-height: 1.35;
+    }
+
+    & .vb-name--quiet {
+      color: #8a8a8e;
+      font-weight: 400;
+    }
+
+    & .ss-row + .ss-row {
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.06);
+    }
+  }
+
+  & .vb-panel--large {
+    padding: 12px;
+    border-radius: 28px;
+
+    & .vb-name {
+      font-size: 19px;
+    }
+
+    & .ss-badge {
+      zoom: 1.3;
+    }
+  }
+
+  & .vb-quiet {
+    color: #8a8a8e;
+    font-weight: 400;
+  }
+
+  /* An agent's colour: terra is tangerine, opus is sky */
+  & .vb-dot {
+    display: block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #fe711f;
+
+    &[data-agent='opus'] {
+      background: #2293fd;
+    }
+  }
+
+  & .vb-life {
+    display: flex;
+    gap: 8px;
+    padding: 12px 8px 6px;
+    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.06);
+
+    & span {
+      display: inline-flex;
+      align-items: center;
+      height: 32px;
+      padding: 0 14px;
+      border-radius: 999px;
+      background: #f5f5f7;
+      color: #8a8a8e;
+      font-size: 14px;
+      font-weight: 500;
+      transition:
+        background-color 320ms ease,
+        color 320ms ease;
+    }
+
+    & span[data-active] {
+      background: #0b0b0c;
+      color: #fff;
+    }
+  }
+
+  & .vb-skills {
+    display: flex;
+    gap: 6px;
+    margin-top: 6px;
+
+    & span {
+      display: inline-flex;
+      align-items: center;
+      height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      background: #f5f5f7;
+      color: #55555a;
+      font-size: 13px;
+    }
+  }
+
+  & .vb-model {
+    color: #8a8a8e;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 13px;
+  }
+
+  & .vb-glyph {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #ececef;
+    color: #55555a;
+
+    &[data-on] {
+      background: var(--pink);
+      color: #fff;
+    }
+  }
+
+  & .vb-copy code {
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: #e9e9ec;
+    color: var(--ink);
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 0.85em;
+  }
+
+  /* ---- Speed: type on the one dark tile ---- */
+
+  & .vb-stat {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    height: 100%;
+    padding: var(--pad);
+  }
+
+  & .vb-stat-lead {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 19px;
+    letter-spacing: -0.015em;
+  }
+
+  & .vb-stat-number {
+    margin: 10px 0 14px;
+    color: #fff;
+    font-size: clamp(76px, 9.4cqw, 112px);
+    font-weight: 650;
+    line-height: 0.95;
+    letter-spacing: -0.05em;
+    white-space: nowrap;
+  }
+
+  & .vb-stat-unit {
+    font-size: 0.5em;
+    letter-spacing: -0.02em;
+  }
+
+  & .vb-stat-label {
+    max-width: 240px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 17px;
+    line-height: 1.4;
+  }
+
+  /* ---- Statements: a row of quiet labels in the tile's foot ---- */
+
+  & .vb-foot {
+    position: absolute;
+    left: var(--pad);
+    right: var(--pad);
+    bottom: var(--pad);
+    display: flex;
+    gap: 8px;
+
+    & span {
+      display: inline-flex;
+      align-items: center;
+      height: 40px;
+      padding: 0 16px;
+      border-radius: 999px;
+      background: #fff;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.04);
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+  }
+
+  & .vb-foot--wrap {
+    flex-wrap: wrap;
+  }
+
+  /* A phone column: the hero panel at the size of the other tiles' panels */
+  @container (max-width: 619px) {
+    & .vb-panel--large {
+      padding: 8px;
+
+      & .ss-badge {
+        zoom: 1.1;
+      }
+    }
+  }
+}

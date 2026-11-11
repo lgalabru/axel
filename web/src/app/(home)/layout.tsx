@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/next";
-import { Header } from "@/components/header";
-import { DESCRIPTION, DOCS, REPO, SITE, TITLE } from "@/lib/site";
+import { DESCRIPTION, SITE, TITLE } from "@/lib/site";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -19,34 +18,6 @@ export const metadata: Metadata = {
   twitter: { card: "summary_large_image", title: TITLE, description: DESCRIPTION, images: ["/og.png"] },
 };
 
-function Footer() {
-  return (
-    <footer className="relative z-10 border-t border-line bg-ink">
-      <div className="mx-auto max-w-5xl px-6 py-8">
-        <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
-          <p className="text-sm text-dim">&copy; 2026 Axel</p>
-          <div className="flex items-center gap-6">
-            <a
-              href={REPO}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-dim transition-colors hover:text-fg"
-            >
-              GitHub
-            </a>
-            <a
-              href={DOCS}
-              className="text-sm text-dim transition-colors hover:text-fg"
-            >
-              Docs
-            </a>
-          </div>
-        </div>
-      </div>
-    </footer>
-  );
-}
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -55,7 +26,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <meta name="theme-color" content="#09080d" />
+        <meta name="theme-color" content="#ffffff" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link
           rel="preconnect"
@@ -67,10 +38,8 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="min-h-screen flex flex-col bg-ink">
-        <Header />
-        <main className="flex-1">{children}</main>
-        <Footer />
+      <body>
+        {children}
         <Analytics />
       </body>
     </html>
