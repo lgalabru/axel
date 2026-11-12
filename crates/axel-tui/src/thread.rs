@@ -249,6 +249,8 @@ pub struct ThreadView {
     /// A newer Axel worth updating to (its version), from the background
     /// check; shown in the footer, independent of draft and send status.
     pub update_hint: Option<String>,
+    /// Agent suggestions for the `@name` being typed in the composer.
+    pub mention: crate::mention::MentionMenu,
 }
 
 impl ThreadView {
@@ -277,6 +279,7 @@ impl ThreadView {
             editing: None,
             compose_only: false,
             update_hint: None,
+            mention: crate::mention::MentionMenu::default(),
         };
         v.cursor = v.rows().len().saturating_sub(1);
         v
@@ -623,6 +626,14 @@ impl ThreadView {
             self.composer.clear();
             return ThreadAction::None;
         }
+        // An `@name` being typed: its suggestions take ↑↓, Tab, Enter and Esc.
+        if self.focus == Focus::Composer {
+            let names = self.mention_names();
+            if self.mention.handle_key(key, &mut self.composer, &names) {
+                self.hist_pos = None;
+                return ThreadAction::None;
+            }
+        }
         // Keys shared by both focuses.
         match key.code {
             // In the composer ↑/↓ move between its lines, and past the first or
@@ -726,6 +737,25 @@ impl ThreadView {
     /// The session the composer talks to (and Shift+Tab switches the mode of).
     pub fn mode_session(&self) -> Option<&crate::model::LiveSession> {
         reply_target(&self.data)
+    }
+
+    /// Agents an `@name` can name: the thread's, then every other local agent.
+    pub fn mention_names(&self) -> Vec<crate::mention::Name> {
+        let mut out: Vec<crate::mention::Name> = self.data.agents.iter().map(|(n, c, _)| (n.clone(), *c)).collect();
+        for (n, c) in &self.data.known_agents {
+            if !out.iter().any(|(o, _)| o.eq_ignore_ascii_case(n)) {
+                out.push((n.clone(), *c));
+            }
+        }
+        out
+    }
+
+    /// Agents suggested for the `@name` at the composer's cursor.
+    pub fn mention_options(&self) -> Vec<crate::mention::Name> {
+        if self.focus != Focus::Composer {
+            return Vec::new();
+        }
+        self.mention.options(&self.composer, &self.mention_names())
     }
 
     /// Who the composer's text would reach (see [`target_label`]).
@@ -1200,6 +1230,7 @@ impl ThreadView {
 
     pub fn help(&self) -> Vec<(&'static str, &'static str)> {
         match self.focus {
+            Focus::Composer if !self.mention_options().is_empty() => vec![("↑↓", "pick"), ("Tab", "mention"), ("Esc", "dismiss")],
             Focus::Composer => {
                 let queued = !self.queued().is_empty();
                 if self.editing.is_some() {
@@ -1631,6 +1662,24 @@ mod tests {
         assert!(v.composer.is_empty(), "not typed");
         assert_eq!(v.handle_compose_key(key(KeyCode::Char('l'))), ThreadAction::None, "a plain l is text");
         assert_eq!(v.composer.text(), "l");
+    }
+
+    #[test]
+    fn the_composer_suggests_agents_for_an_at_and_enter_completes_it() {
+        let mut d = data();
+        d.known_agents = vec![("Nova".into(), None)];
+        let mut v = ThreadView::new("T1", d);
+        type_str(&mut v, "ask @");
+        let shown: Vec<String> = v.mention_options().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(shown, ["Atlas", "Nova"], "the thread's agents, then the others");
+        type_str(&mut v, "n");
+        assert_eq!(v.handle_key(key(KeyCode::Enter)), ThreadAction::None, "Enter takes the suggestion, it doesn't send");
+        assert_eq!(v.composer.text(), "ask @Nova ");
+        assert!(v.mention_options().is_empty());
+        type_str(&mut v, "@");
+        assert_eq!(v.handle_key(key(KeyCode::Esc)), ThreadAction::None);
+        assert_eq!(v.focus, Focus::Composer, "Esc hides the list and stays in the composer");
+        assert!(v.mention_options().is_empty());
     }
 
     #[test]

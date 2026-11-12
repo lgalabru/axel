@@ -21,6 +21,7 @@ pub mod inbox;
 pub mod input;
 pub mod launcher;
 pub mod manage;
+pub mod mention;
 pub mod model;
 pub mod picker;
 pub mod theme;

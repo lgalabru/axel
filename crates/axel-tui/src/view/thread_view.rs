@@ -351,7 +351,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                     let to = it.relay_to.clone().unwrap_or_default();
                     lines.push(Line::from(vec![Span::styled("→ ", dim), Span::styled(to.to_lowercase(), dim.bold())]));
                     let gutter = Span::styled(RELAY_GUTTER, dim);
-                    for l in user_lines(Vec::new(), t.trim(), width.saturating_sub(RELAY_GUTTER.len()), dim, &mention_names(&v.data)) {
+                    for l in user_lines(Vec::new(), t.trim(), width.saturating_sub(RELAY_GUTTER.len()), dim, &v.mention_names()) {
                         let mut spans = vec![gutter.clone()];
                         spans.extend(l.spans);
                         lines.push(Line::from(spans));
@@ -360,7 +360,7 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
                 }
                 (ItemKind::UserMessage, ItemBody::Text(t)) => {
                     let prefix = if speaker_header(it, base, width).is_some() { Vec::new() } else { you_prefix(base, true) };
-                    let mut lines = user_lines(prefix, t.trim(), width, base, &mention_names(&v.data));
+                    let mut lines = user_lines(prefix, t.trim(), width, base, &v.mention_names());
                     match speaker_header(it, base, width) {
                         // Another participant: header line, text below.
                         Some(_) => {
@@ -716,7 +716,12 @@ pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
     // size it draws agree. In the full view, a short screen keeps two.
     let max = if v.compose_only || area.height >= 20 { MAX_INPUT_ROWS } else { 2 };
     let chips = u16::from(!v.attachments.is_empty());
-    composer_text_rows(v, area.width, max) as u16 + chips + 2
+    composer_text_rows(v, area.width, max) as u16 + menu_rows(v) + chips + 2
+}
+
+/// Rows the `@name` suggestions take under the composer's text.
+fn menu_rows(v: &ThreadView) -> u16 {
+    v.mention_options().len().min(crate::mention::MAX_ROWS) as u16
 }
 
 /// `run [ axel update ] to get 0.3.139`, the command a pill; only the pill
@@ -785,16 +790,6 @@ pub(crate) fn mention_styles(chars: &[char], agents: &[(String, Option<axel_stor
     styles
 }
 
-/// Agents an `@name` can name: the thread's, then every other local agent.
-fn mention_names(d: &crate::model::ThreadData) -> Vec<(String, Option<axel_store::AgentColor>)> {
-    let mut out: Vec<(String, Option<axel_store::AgentColor>)> = d.agents.iter().map(|(n, c, _)| (n.clone(), *c)).collect();
-    for (n, c) in &d.known_agents {
-        if !out.iter().any(|(o, _)| o.eq_ignore_ascii_case(n)) {
-            out.push((n.clone(), *c));
-        }
-    }
-    out
-}
 
 /// Group runs of equally styled characters into spans.
 pub(crate) fn styled_run(chars: &[char], styles: &[Style]) -> Vec<Span<'static>> {
@@ -826,12 +821,15 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     // hasn't settled yet) still shows the input: the rule goes first, then
     // the footer.
     let chips_h = u16::from(!v.attachments.is_empty()).min(area.height - 1);
-    let spare = area.height - 1 - chips_h;
+    // The suggestions for an `@name` sit right under the text, like a shell's completions.
+    let menu_h = menu_rows(v).min(area.height - 1 - chips_h);
+    let spare = area.height - 1 - chips_h - menu_h;
     let (has_footer, has_bottom) = (spare >= 1, spare >= 2);
     let chrome = u16::from(has_footer) + u16::from(has_bottom);
-    let text_rows = (area.height - chips_h - chrome).max(1) as usize;
+    let text_rows = (area.height - chips_h - menu_h - chrome).max(1) as usize;
     let text_area = Rect::new(area.x, area.y, area.width, text_rows as u16);
-    let chips_row = Rect::new(area.x, area.y + text_rows as u16, area.width, chips_h);
+    let menu_area = Rect::new(area.x, area.y + text_rows as u16, area.width, menu_h);
+    let chips_row = Rect::new(area.x, menu_area.y + menu_h, area.width, chips_h);
     let bottom = Rect::new(area.x, chips_row.y + chips_h, area.width, 1);
     let footer = Rect::new(area.x, bottom.y + u16::from(has_bottom), area.width, 1);
     if has_bottom {
@@ -863,7 +861,7 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
     } else {
         // Rows broken at line breaks and the width, keeping the cursor row visible.
         let chars: Vec<char> = v.composer.text().chars().collect();
-        let styles = mention_styles(&chars, &mention_names(&v.data));
+        let styles = mention_styles(&chars, &v.mention_names());
         let (rows, (cursor_row, cursor_col)) = input_rows(&chars, body_w, v.composer.cursor());
         // The composer pane grows to fit its text: while it catches up with a
         // new line, keep the top in place rather than scrolling the first line
@@ -885,6 +883,9 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
             let cy = (cursor_row - first_row) as u16;
             frame.set_cursor_position(Position::new(text_area.x + cx, text_area.y + cy));
         }
+    }
+    if menu_h > 0 {
+        frame.render_widget(Paragraph::new(v.mention.lines(&v.composer, &v.mention_names(), indent, width)), menu_area);
     }
     if chips_h > 0 {
         let selected = chips_focused.then_some(v.attach_sel);
