@@ -470,6 +470,24 @@ fn row_sample(r: &Row<'_>) -> rusqlite::Result<UsageSample> {
     })
 }
 
+/// A thread's usage: the rows of `effective_usage_log` that name the thread,
+/// summed per session and then across its sessions.  Filtering before the
+/// `GROUP BY` lets SQLite search both halves of the view by thread; asking
+/// `effective_usage` instead builds that whole view on every call.  For a
+/// session whose rows all name its own thread, which is what `add_usage`
+/// writes, both count the same rows; a session with rows naming several
+/// threads is counted here row by row, and there under one of them.
+pub(crate) const THREAD_USAGE_SQL: &str = "SELECT '' AS session_id,
+                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
+                    COALESCE(SUM(turns), 0), COALESCE(SUM(cost_usd_est), 0.0), COALESCE(MAX(updated_at), 0)
+             FROM (
+                 SELECT SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                        SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,
+                        SUM(turns) AS turns, SUM(cost_usd_est) AS cost_usd_est, MAX(at) AS updated_at
+                 FROM effective_usage_log WHERE thread_id = ?1 GROUP BY session_id
+             )";
+
 impl Store {
     /// Live status of one session.
     pub fn status(&self, session_id: &str) -> Result<Option<Status>, Error> {
@@ -517,11 +535,7 @@ impl Store {
     /// Usage summed over every session of a thread (`session_id = ""`).
     pub fn thread_usage(&self, thread_id: &str) -> Result<Usage, Error> {
         Ok(self.conn.query_row(
-            "SELECT '' AS session_id,
-                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
-                    COALESCE(SUM(turns), 0), COALESCE(SUM(cost_usd_est), 0.0), COALESCE(MAX(updated_at), 0)
-             FROM effective_usage WHERE thread_id = ?1",
+            THREAD_USAGE_SQL,
             [thread_id],
             |r| {
                 Ok(Usage {

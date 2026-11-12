@@ -2595,6 +2595,157 @@ fn native_usage_replaces_estimates_without_mutating_history_or_double_counting()
     assert_eq!(s.usage(&session.id).unwrap().unwrap().cost_usd_est,0.25);
 }
 
+#[test]
+fn a_threads_usage_is_summed_without_reading_other_threads_rows() {
+    let s = store();
+    let owner = Keypair::generate();
+    let empty = s.create_thread(&owner, "empty", "", None).unwrap();
+    let mut expected = std::collections::HashMap::new();
+    expected.insert(empty.id.clone(), Usage::default());
+
+    for k in 0..12i64 {
+        let t = s.create_thread(&owner, &format!("t-{k}"), "", None).unwrap();
+        let signed = s.start_session(&owner, &new_session(&t.id, &owner, "mac")).unwrap();
+        let reconciled = s.start_session(&owner, &new_session(&t.id, &owner, "studio")).unwrap();
+
+        s.add_usage(
+            &owner,
+            &signed.id,
+            &UsageDelta {
+                input_tokens: 100 + k,
+                output_tokens: 10,
+                cache_read_tokens: 5,
+                cache_write_tokens: 2,
+                turns: 1,
+                cost_usd_est: 0.5,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let u_signed = s
+            .add_usage(
+                &owner,
+                &signed.id,
+                &UsageDelta {
+                    input_tokens: 200,
+                    output_tokens: 20,
+                    cache_write_tokens: 3,
+                    turns: 2,
+                    cost_usd_est: 0.25,
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        // Signed estimate on `reconciled` contributes turns, while native readings override token/cost totals.
+        s.add_usage(
+            &owner,
+            &reconciled.id,
+            &UsageDelta {
+                input_tokens: 9_999,
+                output_tokens: 9_999,
+                turns: 4,
+                cost_usd_est: 50.0,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let native_at = u_signed.updated_at + 10 + k;
+        s.replace_native_usage(
+            &reconciled.id,
+            &[
+                NativeUsage {
+                    id: "c1".into(),
+                    at: native_at - 5,
+                    delta: UsageDelta {
+                        input_tokens: 40,
+                        output_tokens: 6,
+                        cache_read_tokens: 50,
+                        cache_write_tokens: 10,
+                        cost_usd_est: 0.125,
+                        ..Default::default()
+                    },
+                },
+                NativeUsage {
+                    id: "c2".into(),
+                    at: native_at,
+                    delta: UsageDelta {
+                        input_tokens: 60,
+                        output_tokens: 4,
+                        cache_read_tokens: 25,
+                        cost_usd_est: 0.375,
+                        ..Default::default()
+                    },
+                },
+            ],
+        )
+        .unwrap();
+
+        expected.insert(
+            t.id,
+            Usage {
+                session_id: String::new(),
+                input_tokens: 400 + k,
+                output_tokens: 40,
+                cache_read_tokens: 80,
+                cache_write_tokens: 15,
+                turns: 7,
+                cost_usd_est: 1.25,
+                updated_at: native_at,
+            },
+        );
+    }
+
+    let summaries = s.thread_summaries(ThreadFilter::default()).unwrap();
+    assert_eq!(summaries.len(), expected.len());
+    for summary in &summaries {
+        let want = &expected[&summary.thread.id];
+        assert_eq!(&summary.usage, want, "thread {}", summary.thread.id);
+        assert_eq!(&s.thread_usage(&summary.thread.id).unwrap(), want);
+    }
+
+    // Usage that belongs to other threads must add no work to one thread's
+    // lookup.  SQLite counts the rows a statement steps over in full table
+    // scans and the VM steps it runs, which says so without naming an index
+    // or timing anything.
+    let probe = summaries.iter().find(|x| x.thread.id != empty.id).unwrap().thread.id.clone();
+    let work = |thread_id: &str| {
+        let mut st = s.conn.prepare(reads::THREAD_USAGE_SQL).unwrap();
+        let input: i64 = st.query_row([thread_id], |r| r.get(1)).unwrap();
+        (input, st.get_status(rusqlite::StatementStatus::FullscanStep), st.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    let (input_before, scanned_before, steps_before) = work(&probe);
+
+    for k in 0..40i64 {
+        let t = s.create_thread(&owner, &format!("other-{k}"), "", None).unwrap();
+        let signed = s.start_session(&owner, &new_session(&t.id, &owner, "mac")).unwrap();
+        for _ in 0..6 {
+            s.add_usage(&owner, &signed.id, &UsageDelta { input_tokens: 1_000, turns: 1, cost_usd_est: 0.5, ..Default::default() }, None).unwrap();
+        }
+        let reconciled = s.start_session(&owner, &new_session(&t.id, &owner, "studio")).unwrap();
+        let native: Vec<NativeUsage> = (0..4i64)
+            .map(|n| NativeUsage { id: format!("c{n}"), at: 1_000 + n, delta: UsageDelta { input_tokens: 1_000, cost_usd_est: 0.5, ..Default::default() } })
+            .collect();
+        s.replace_native_usage(&reconciled.id, &native).unwrap();
+    }
+
+    let (input_after, scanned_after, steps_after) = work(&probe);
+    assert_eq!(input_after, input_before);
+    assert_eq!(&s.thread_usage(&probe).unwrap(), &expected[&probe]);
+    assert!(
+        scanned_after <= scanned_before,
+        "240 log rows and 160 native rows of other threads were scanned: {scanned_before} rows before, {scanned_after} after"
+    );
+    // The same rows are read both times; twice the steps leaves room for a deeper index.
+    assert!(
+        steps_after <= steps_before * 2,
+        "the lookup did more work as other threads' usage grew: {steps_before} VM steps before, {steps_after} after"
+    );
+}
+
 // --- reasoning effort ---------------------------------------------------------
 
 #[test]
