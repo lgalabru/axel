@@ -32,6 +32,11 @@ fn class(c: char) -> Class {
     }
 }
 
+/// What an `@name` mention is made of.
+pub fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
 /// Steps kept for undo.
 const UNDO_DEPTH: usize = 200;
 
@@ -138,6 +143,44 @@ impl TextInput {
             // A word typed is one undo step.
             self.last = None;
         }
+    }
+
+    /// The `@name` being typed at the cursor: the index of its `@` and the
+    /// characters between it and the cursor. An `@` counts at the start of
+    /// the text or after a character that can't be part of a name (so
+    /// `me@host` isn't one).
+    pub fn mention_at_cursor(&self) -> Option<(usize, String)> {
+        let mut i = self.cursor;
+        while i > 0 && is_name_char(self.chars[i - 1]) {
+            i -= 1;
+        }
+        let at = i.checked_sub(1)?;
+        if self.chars[at] != '@' || (at > 0 && is_name_char(self.chars[at - 1])) {
+            return None;
+        }
+        Some((at, self.chars[at + 1..self.cursor].iter().collect()))
+    }
+
+    /// Replace the `@…` starting at `at` (the whole name, also what follows
+    /// the cursor) with `@name` and a space: one undoable step.
+    pub fn complete_mention(&mut self, at: usize, name: &str) {
+        if self.chars.get(at) != Some(&'@') {
+            return;
+        }
+        self.save(Edit::Other);
+        let mut end = at + 1;
+        while end < self.chars.len() && is_name_char(self.chars[end]) {
+            end += 1;
+        }
+        let mut with: Vec<char> = std::iter::once('@').chain(name.chars()).collect();
+        let spaced = self.chars.get(end).is_some_and(|c| c.is_whitespace());
+        if !spaced {
+            with.push(' ');
+        }
+        let n = with.len();
+        self.chars.splice(at..end, with);
+        self.cursor = at + n + usize::from(spaced);
+        self.last = None;
     }
 
     /// A line break (Shift+Enter in the composer).

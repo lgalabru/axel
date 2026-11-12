@@ -618,6 +618,31 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_grows_to_show_agent_suggestions_under_the_text() {
+        let mut d = fixtures::data();
+        for it in &mut d.items {
+            if it.status == Some(crate::model::ItemStatus::Pending) {
+                it.status = Some(crate::model::ItemStatus::Allowed);
+            }
+        }
+        d.known_agents = vec![("Nova".into(), None), ("Orion".into(), None)];
+        let mut v = ThreadView::new("T1", d);
+        v.compose_only = true;
+        v.composer.paste("ask ");
+        let plain = desired_height(&v, 60);
+        v.composer.insert_char('@');
+        let h = desired_height(&v, 60);
+        assert_eq!(h, plain + 3, "a row per agent");
+        let mut term = Terminal::new(TestBackend::new(60, h)).unwrap();
+        term.draw(|f| render(f, &v)).unwrap();
+        let shown = text(&term);
+        let rows: Vec<&str> = shown.lines().collect();
+        assert!(rows[0].contains("› ask @"), "{shown}");
+        assert!(rows[1].contains("›  @Atlas") && rows[2].contains("@Nova") && rows[3].contains("@Orion"), "{shown}");
+        assert!(shown.contains("pick"), "the footer says how to use the list: {shown}");
+    }
+
+    #[test]
     fn the_pane_it_asks_for_shows_every_line_of_the_message() {
         let mut v = ThreadView::new("T1", fixtures::data());
         v.compose_only = true;

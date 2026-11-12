@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::attach::parse_dropped_paths;
 use crate::input::TextInput;
+use crate::mention::MentionMenu;
 use crate::model::{AgentColor, AgentRow, Harness, NewAgentSpec, ProjectRow, RuntimeMode};
 use crate::util::{display_path, expand_tilde, fuzzy_score, slugify};
 
@@ -224,6 +225,8 @@ pub struct Launcher {
     pub title_focus: TitleFocus,
     /// Selected chip while `title_focus == Attachments`.
     pub attach_sel: usize,
+    /// Agent suggestions for the `@name` being typed in the prompt.
+    pub mention: MentionMenu,
 
     // step 2
     pub projects: Vec<ProjectRow>,
@@ -264,6 +267,7 @@ impl Launcher {
             attachments: Vec::new(),
             title_focus: TitleFocus::Text,
             attach_sel: 0,
+            mention: MentionMenu::default(),
             projects: Vec::new(),
             filter: TextInput::new(),
             where_sel: 0,
@@ -533,6 +537,14 @@ impl Launcher {
         self.agents.iter().map(|a| (a.name.clone(), a.color)).collect()
     }
 
+    /// Agents suggested for the `@name` at the prompt's cursor.
+    pub fn mention_options(&self) -> Vec<crate::mention::Name> {
+        if self.step != Step::Title || self.title_focus != TitleFocus::Text {
+            return Vec::new();
+        }
+        self.mention.options(&self.title, &self.mention_names())
+    }
+
     /// Who Enter launches: the agent named by a leading `@name`, else the
     /// one used most recently, else the first.
     pub fn default_agent_index(&self) -> Option<usize> {
@@ -622,6 +634,12 @@ impl Launcher {
                 }
                 _ => {}
             }
+            return Action::None;
+        }
+        // An `@name` being typed: its suggestions take ↑↓, Tab, Enter and Esc.
+        let names = self.mention_names();
+        if self.mention.handle_key(key, &mut self.title, &names) {
+            self.error = None;
             return Action::None;
         }
         match key.code {
@@ -1025,6 +1043,9 @@ impl Launcher {
     pub fn help(&self) -> Vec<(&'static str, &'static str)> {
         match self.step {
             Step::Title => match self.title_focus {
+                TitleFocus::Text if !self.mention_options().is_empty() => {
+                    vec![("↑↓", "pick"), ("Tab", "mention"), ("Esc", "dismiss")]
+                }
                 TitleFocus::Attachments => vec![("←→", "select"), ("⌫", "remove"), ("Esc", "back")],
                 TitleFocus::Text if !self.attachments.is_empty() => {
                     vec![("Enter", "launch"), ("Tab", "attachments"), ("↓", "threads"), ("Esc", "close")]
@@ -1151,6 +1172,27 @@ mod tests {
         l.agents[1].last_seen_at = Some(100);
         type_str(&mut l, "x");
         assert!(matches!(enter(&mut l), Action::Launch(p) if p.agent_pubkey == "PK_NOVA"), "the agent used last");
+    }
+
+    #[test]
+    fn typing_an_at_suggests_agents_and_enter_completes_instead_of_launching() {
+        let mut l = launcher();
+        type_str(&mut l, "@n");
+        let shown: Vec<String> = l.mention_options().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(shown, ["nova"]);
+        assert_eq!(l.help()[0], ("↑↓", "pick"));
+        assert_eq!(enter(&mut l), Action::None, "Enter takes the suggestion");
+        assert_eq!(l.title.text(), "@nova ");
+        assert!(l.mention_options().is_empty());
+        type_str(&mut l, "fix it");
+        assert!(matches!(enter(&mut l), Action::Launch(p) if p.agent_pubkey == "PK_NOVA" && p.title == "fix it"));
+
+        let mut l = launcher();
+        type_str(&mut l, "@");
+        assert_eq!(l.handle_key(key(KeyCode::Down)), Action::None, "↓ picks, it doesn't leave for the threads");
+        assert_eq!(l.handle_key(key(KeyCode::Tab)), Action::None);
+        assert_eq!((l.step, l.title.text().as_str()), (Step::Title, "@nova "), "Tab takes the suggestion, not the form");
+        assert_eq!(l.handle_key(key(KeyCode::Down)), Action::FocusThreads, "with no list ↓ is the prompt's again");
     }
 
     #[test]

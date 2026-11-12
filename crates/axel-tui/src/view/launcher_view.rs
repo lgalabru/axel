@@ -164,7 +164,12 @@ fn prompt_input(frame: &mut Frame, area: Rect, l: &Launcher) {
 pub fn prompt_pane_rows(l: &Launcher, width: u16) -> u16 {
     let field = width.saturating_sub(PAD * 2);
     let text = prompt_rows(l, field).min(super::thread_view::MAX_INPUT_ROWS as u16);
-    1 + text + u16::from(!l.attachments.is_empty())
+    1 + text + menu_rows(l) + u16::from(!l.attachments.is_empty())
+}
+
+/// Rows the `@name` suggestions take under the prompt.
+fn menu_rows(l: &Launcher) -> u16 {
+    l.mention_options().len().min(crate::mention::MAX_ROWS) as u16
 }
 
 /// Rows the prompt's text takes in a field `width` wide.
@@ -185,7 +190,14 @@ fn render_prompt(frame: &mut Frame, l: &Launcher, full: Rect) {
     let needed = prompt_rows(l, area.width);
     let gap = u16::from(area.height >= 3 && (l.pane_grows || area.height > needed + chip_row));
     let rows = needed.min(area.height.saturating_sub(gap + chip_row).max(1));
-    let [_, input, chips] = Layout::vertical([Constraint::Length(gap), Constraint::Length(rows), Constraint::Min(0)]).areas(area);
+    // The suggestions for an `@name` sit right under the text, like a shell's completions.
+    let menu_h = menu_rows(l).min(area.height.saturating_sub(gap + rows + chip_row));
+    let [_, input, menu, chips] =
+        Layout::vertical([Constraint::Length(gap), Constraint::Length(rows), Constraint::Length(menu_h), Constraint::Min(0)]).areas(area);
+    if menu_h > 0 {
+        let lines = l.mention.lines(&l.title, &l.mention_names(), 2, menu.width as usize);
+        frame.render_widget(Paragraph::new(lines), menu);
+    }
     let right = match (&l.error, l.quick_target()) {
         (Some(e), _) => Line::from(Span::styled(e.clone(), theme::danger())),
         (None, Some((agent, place))) => Line::from(vec![
