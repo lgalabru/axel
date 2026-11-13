@@ -1179,9 +1179,12 @@ mod tests {
     }
 
     #[test]
-    fn typing_an_at_suggests_agents_and_enter_completes_instead_of_launching() {
+    fn tab_opens_agent_suggestions_and_enter_completes_instead_of_launching() {
         let mut l = launcher();
         type_str(&mut l, "@n");
+        assert!(l.mention_options().is_empty());
+        assert_eq!(l.handle_key(key(KeyCode::Tab)), Action::None);
+        assert_eq!((l.step, l.title.text().as_str()), (Step::Title, "@n"));
         let shown: Vec<String> = l.mention_options().into_iter().map(|(n, _)| n).collect();
         assert_eq!(shown, ["nova"]);
         assert_eq!(l.help()[0], ("↑↓", "pick"));
@@ -1193,6 +1196,7 @@ mod tests {
 
         let mut l = launcher();
         type_str(&mut l, "@");
+        assert_eq!(l.handle_key(key(KeyCode::Tab)), Action::None);
         assert_eq!(l.handle_key(key(KeyCode::Down)), Action::None, "↓ picks, it doesn't leave for the threads");
         assert_eq!(l.handle_key(key(KeyCode::Tab)), Action::None);
         assert_eq!((l.step, l.title.text().as_str()), (Step::Title, "@nova "), "Tab takes the suggestion, not the form");
