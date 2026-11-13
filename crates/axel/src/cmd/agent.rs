@@ -4,14 +4,14 @@ use anyhow::{Context, Result, bail};
 use axel_identity::{Keypair, attest};
 use axel_store::{Agent, AgentColor, AgentPolicy, Effort, Harness, NewAgent, Reach, RuntimeMode, SpendLimit};
 
-use super::Ctx;
+use super::{Ctx, claude_profile::ClaudeProfile};
 use super::policy::reach_label;
 use crate::cli::{AgentCommand, PolicyArgs, ReachArg};
 
 pub fn run(cmd: AgentCommand) -> Result<()> {
     let ctx = Ctx::open()?;
     match cmd {
-        AgentCommand::New { name, runs, harness, model, effort, skills, prompt, color, runtime_mode, host, policy } => {
+        AgentCommand::New { name, runs, harness, model, claude_config_dir, effort, skills, prompt, color, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't create agents; ask the owner to run this");
             }
@@ -20,6 +20,10 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             apply_policy(&ctx, &name, &mut p, &policy)?;
             let host_id = host.as_deref().map(|h| host_choice(&ctx, h)).transpose()?.flatten();
             let (harness, model) = harness_and_model(runs.as_deref().or(harness.as_deref()), model)?;
+            let profile = claude_config_dir.as_deref().map(|dir| ClaudeProfile::parse(dir, &harness)).transpose()?;
+            if profile.is_some() && host_id.is_some() {
+                bail!("agents with a Claude config directory run locally");
+            }
             let agent = create(&ctx, &name, harness, model, parse_skills(&skills), prompt, color.map(AgentColor::from), runtime_mode.into())?;
             ctx.store.set_agent_policy(&agent.pubkey, &p)?;
             ctx.store.set_agent_host(&agent.pubkey, host_id.as_deref())?;
@@ -27,17 +31,35 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
             if effort.is_some() {
                 ctx.store.set_agent_effort(&agent.pubkey, effort)?;
             }
+            if let Some(profile) = profile {
+                profile.save(&agent.pubkey)?;
+            }
             println!("{}  {}  {}", agent.name, runs_label(&agent.harness, agent.model.as_deref()), agent.pubkey);
             print_policy(&ctx, &p);
             print_effort(&agent.harness, effort);
             print_host(&ctx, &agent.pubkey)?;
             Ok(())
         }
-        AgentCommand::Edit { name, runs, model, effort, name_to, skills, prompt, color, runtime_mode, host, policy } => {
+        AgentCommand::Edit { name, runs, model, claude_config_dir, inherit_claude_config, effort, name_to, skills, prompt, color, runtime_mode, host, policy } => {
             if super::policy::caller_agent().is_some() {
                 bail!("agents can't edit agents; ask the owner to run this");
             }
             let a = ctx.store.agent_by_name(&name)?.with_context(|| format!("no agent named {name:?}"))?;
+            let harness_change = runs.as_deref().map(|spec| harness_and_model(Some(spec), model.clone())).transpose()?;
+            let harness = harness_change.as_ref().map_or(&a.harness, |(harness, _)| harness);
+            let new_profile = claude_config_dir.as_deref().map(|dir| ClaudeProfile::parse(dir, harness)).transpose()?;
+            let current_profile = ClaudeProfile::load(&a.pubkey)?;
+            let selected_profile = new_profile.as_ref().or(current_profile.as_ref()).filter(|_| !inherit_claude_config);
+            let host_id = host.as_deref().map(|h| host_choice(&ctx, h)).transpose()?;
+            if selected_profile.is_some() && *harness != Harness::Claude {
+                bail!("use --inherit-claude-config when switching to a different harness");
+            }
+            if selected_profile.is_some() && match &host_id {
+                Some(host) => host.is_some(),
+                None => ctx.store.agent_host(&a.pubkey)?.is_some(),
+            } {
+                bail!("agents with a Claude config directory run locally");
+            }
             let mut p = ctx.store.agent_policy(&a.pubkey)?;
             apply_policy(&ctx, &a.name, &mut p, &policy)?;
             ctx.store.set_agent_policy(&a.pubkey, &p)?;
@@ -59,18 +81,20 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
                 ctx.store.set_agent_runtime_mode(&a.pubkey, m.into())?;
             }
             if runs.is_some() || model.is_some() {
-                let (harness, model) = match runs.as_deref() {
-                    Some(spec) => harness_and_model(Some(spec), model)?,
-                    // A new model, same harness.
-                    None => (a.harness.clone(), model.filter(|m| m != "default")),
-                };
+                let (harness, model) = harness_change
+                    .unwrap_or_else(|| (a.harness.clone(), model.filter(|m| m != "default")));
                 ctx.store.set_agent_harness(&a.pubkey, &harness, model.as_deref())?;
             }
             if let Some(effort) = effort {
                 ctx.store.set_agent_effort(&a.pubkey, effort.into())?;
             }
-            if let Some(h) = &host {
-                ctx.store.set_agent_host(&a.pubkey, host_choice(&ctx, h)?.as_deref())?;
+            if let Some(host_id) = host_id {
+                ctx.store.set_agent_host(&a.pubkey, host_id.as_deref())?;
+            }
+            if let Some(profile) = new_profile {
+                profile.save(&a.pubkey)?;
+            } else if inherit_claude_config {
+                ClaudeProfile::clear(&a.pubkey)?;
             }
             let a = ctx.store.agent_by_pubkey(&a.pubkey)?.context("agent vanished")?;
             println!("{}  {}  mode {}", a.name, runs_label(&a.harness, a.model.as_deref()), a.runtime_mode);
@@ -107,6 +131,9 @@ pub fn run(cmd: AgentCommand) -> Result<()> {
         AgentCommand::Show { name } => {
             let a = ctx.store.agent_by_name(&name)?.with_context(|| format!("no agent named {name:?}"))?;
             println!("{}", serde_json::to_string_pretty(&a)?);
+            if let Some(profile) = ClaudeProfile::load(&a.pubkey)? {
+                println!("Claude config directory: {}", profile.label());
+            }
             let has_key = ctx.keystore.agent(&a.pubkey.parse()?)?.is_some();
             println!("key in keystore: {}", if has_key { "yes" } else { "MISSING" });
             let p = ctx.store.agent_policy(&a.pubkey)?;

@@ -185,6 +185,9 @@ pub enum AgentCommand {
         harness: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Claude Code config directory, or `default` for its standard login. Local only.
+        #[arg(long, value_name = "DIR|default")]
+        claude_config_dir: Option<String>,
         /// How hard its model thinks, where the harness has such a setting
         /// (default: the harness's own).
         #[arg(long, value_enum, value_name = "LEVEL")]
@@ -216,6 +219,12 @@ pub enum AgentCommand {
         /// Switch its model only (`default` for the harness's own).
         #[arg(long)]
         model: Option<String>,
+        /// Claude Code config directory, or `default` for its standard login. Local only.
+        #[arg(long, value_name = "DIR|default")]
+        claude_config_dir: Option<String>,
+        /// Remove the agent's explicit Claude Code config directory selection.
+        #[arg(long, conflicts_with = "claude_config_dir")]
+        inherit_claude_config: bool,
         /// Change how hard its model thinks (`default` for the harness's own).
         #[arg(long, value_enum, value_name = "LEVEL")]
         effort: Option<EffortArg>,

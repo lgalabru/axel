@@ -63,6 +63,24 @@ thinks (`--effort default` goes back to the harness's own), and `--skills`, `--p
 `--color` replace those. `axel agent archive terra` retires an agent and keeps its key and
 history.
 
+### Claude Code accounts
+
+Use `--claude-config-dir DIR` with `axel agent new` or `axel agent edit` to bind a
+Claude agent to an existing, absolute Claude Code configuration directory.
+Each directory can hold its own login, settings and session history. Sign in
+to that directory with Claude Code before starting the agent.
+
+```bash
+CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude auth login
+axel agent new atlas claude/opus --claude-config-dir "$HOME/.claude-work" --effort medium
+axel agent edit nova --claude-config-dir default
+```
+
+`default` explicitly selects Claude Code's standard account. To remove an
+explicit selection, use `axel agent edit NAME --inherit-claude-config`.
+`axel agent show NAME` displays the selection. Explicitly bound agents run on
+this machine and use their selected login for new sessions.
+
 ### Custom ACP harnesses
 
 Pass the entire ACP command as the harness and set the model separately:

@@ -127,6 +127,26 @@ fn the_owner_sets_shows_and_clears_an_effort_on_the_agents_record() {
 }
 
 #[test]
+fn claude_account_selection_survives_renaming_and_can_be_cleared() {
+    let f = Fixture::new();
+    let profile = f.dir.path().join("Claude profile");
+    std::fs::create_dir(&profile).unwrap();
+    let profile = profile.to_str().unwrap();
+    f.ok(&["agent", "new", "orbit-1-opus-medium", "claude/opus", "--claude-config-dir", profile]);
+    f.ok(&["agent", "edit", "orbit-1-opus-medium", "--name", "orbit-1-opus-high"]);
+    let shown = f.ok(&["agent", "show", "orbit-1-opus-high"]);
+    assert!(shown.contains(&format!("Claude config directory: {profile}")));
+    assert!(shown.contains("owner attestation: valid"));
+    f.ok(&["agent", "edit", "orbit-1-opus-high", "--claude-config-dir", "default"]);
+    assert!(f.ok(&["agent", "show", "orbit-1-opus-high"]).contains("Claude config directory: default"));
+    f.ok(&["agent", "edit", "orbit-1-opus-high", "codex", "--inherit-claude-config"]);
+    assert!(!f.ok(&["agent", "show", "orbit-1-opus-high"]).contains("Claude config directory:"));
+    let result = f.command(&["agent", "new", "bad", "codex", "--claude-config-dir", profile], None);
+    assert!(!result.status.success());
+    assert!(!f.ok(&["agent", "ls"]).contains("bad"));
+}
+
+#[test]
 fn an_unknown_level_is_refused_when_the_command_is_parsed() {
     let f = Fixture::new();
     for args in [vec!["agent", "edit", "alice", "--effort", "ultra"], vec!["agent", "new", "zed", "--effort", "HIGH!"]] {

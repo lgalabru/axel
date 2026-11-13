@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use axel_acp::HostConfig;
 use axel_store::{SessionFilter, SessionRuntime, SessionState};
 
-use super::Ctx;
+use super::{Ctx, claude_profile::ClaudeProfile};
 use crate::cli::SessionCommand;
 use crate::paths;
 
@@ -159,6 +159,9 @@ fn host(session_id: &str) -> Result<()> {
     for k in ["REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_CLIENT", "REX_BIN_DIR", "REX_HOME", "REX_RUNTIME_DIR"] {
         // SAFETY: single-threaded here, before the tokio runtime starts.
         unsafe { std::env::remove_var(k) };
+    }
+    if let Some(profile) = ClaudeProfile::load(&agent.pubkey)? {
+        profile.configure_host()?;
     }
     let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k == "PATH" || k == "HOME" || k.starts_with("ANTHROPIC_") || k.starts_with("OPENAI_") || k.starts_with("CODEX_") || k.starts_with("AXEL_")).collect();
     env.push(("AXEL_THREAD".into(), thread.id.clone()));

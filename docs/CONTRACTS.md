@@ -217,6 +217,13 @@ pub struct Agent { pub pubkey: String, pub name: String, pub harness: Harness, p
 // Environment and Project(+repo_key) unchanged.
 ```
 
+Claude Code agents can select a machine-local configuration directory with
+`agent new --claude-config-dir DIR` or `agent edit --claude-config-dir DIR`.
+An explicit `default` selects Claude Code's ordinary login and settings.
+`agent edit --inherit-claude-config` removes the selection. Axel keys this
+setting by agent public key so renames preserve it. It applies to both pane
+and managed launches. Agents with an explicit selection run locally.
+
 An agent's reasoning effort is part of its record, beside its model: the nullable `agents.effort`
 column (schema v10; NULL, or text this build does not know, is the harness's default). Like the
 model it is in no envelope, so it changes no signature and no merge. It reaches a remote host in

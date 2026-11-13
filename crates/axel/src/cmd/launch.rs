@@ -8,7 +8,7 @@ use axel_config::{AgentProfile, Harness, HarnessKind, WorkspaceConfig, drivers, 
 use axel_store::{NewSession, RuntimeMode, SessionRuntime, SessionState, SessionUpdate, StatusReport, StatusState, ThreadWorkspace, WorkspaceKind};
 use axel_tui::LaunchRequest;
 
-use super::{Ctx, convert};
+use super::{Ctx, claude_profile::ClaudeProfile, convert};
 use crate::paths;
 
 pub enum Launched {
@@ -140,6 +140,8 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         .store
         .agent_by_pubkey(&req.agent_pubkey)?
         .with_context(|| format!("agent {} not found", req.agent_pubkey))?;
+    let claude_profile = ClaudeProfile::load(&agent.pubkey)?;
+    let claude_state = claude_profile.as_ref().map(ClaudeProfile::state_path).transpose()?;
     // The agent's key, or (on a remote host) this host's key under the
     // agent's delegation for the thread.
     let agent_kp = ctx
@@ -214,6 +216,20 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         install_skills(driver.as_ref(), &work_dir, &profile.skills, config.as_ref(), &paths::global_skills_dir())?;
     }
 
+    // Picking the project in the launcher is the trust decision, and picking
+    // autopilot is the permissions decision: pre-answer Claude Code's two startup
+    // dialogs (both default to "No, exit"). This mirrors t3code, which runs Claude
+    // through the Agent SDK with bypassPermissions and never shows them.
+    if profile.harness.kind == HarnessKind::Claude {
+        let path = claude_state.map_or_else(default_claude_state_path, Ok)?;
+        if let Err(e) = prepare_claude_config(&path, &work_dir, runtime_mode == RuntimeMode::Autopilot) {
+            if claude_profile.is_some() {
+                return Err(e).with_context(|| format!("preparing Claude Code config at {}", path.display()));
+            }
+            eprintln!("axel: could not prepare Claude Code config for {}: {e}", work_dir.display());
+        }
+    }
+
     // 5. Session, signed by the agent itself.
     let runtime = pick_runtime(&agent.harness, opts.runtime);
     let session = ctx.store.start_session(
@@ -241,14 +257,6 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         None if req.thread_id.is_some() => format!("{}\n\n(You are joining an existing thread. Read the inbox with `axel inbox` for context.)", thread.intent),
         None => thread.intent.clone(),
     };
-    // Picking the project in the launcher is the trust decision, and picking
-    // autopilot is the permissions decision: pre-answer Claude Code's two startup
-    // dialogs (both default to "No, exit"). This mirrors t3code, which runs Claude
-    // through the Agent SDK with bypassPermissions and never shows them.
-    if profile.harness.kind == HarnessKind::Claude
-        && let Err(e) = prepare_claude_config(&work_dir, runtime_mode == RuntimeMode::Autopilot) {
-            eprintln!("axel: could not prepare Claude Code config for {}: {e}", work_dir.display());
-        }
     let mut spec = cfg_launch::build(&profile, if resume.is_some() { None } else { Some(&prompt) });
     if let Some(hs) = &resume {
         match profile.harness.kind {
@@ -308,6 +316,10 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
         // The agent's reasoning effort, by the harness's own flag (a managed
         // session's host applies it instead; see `axel session host`).
         super::effort::pane(&agent.harness, &mut spec, agent.effort, |w| eprintln!("axel: {w}"));
+        if let Some(profile) = &claude_profile {
+            spec.env.retain(|(key, _)| !profile.overrides(key));
+            profile.wrap(&mut spec.program, &mut spec.args)?;
+        }
     }
     if !work_dir.is_dir() {
         bail!("workspace directory does not exist: {}", work_dir.display());
@@ -436,20 +448,24 @@ fn prepare_workspace(project: &Path, kind: WorkspaceKind, branch: Option<&str>, 
     }
 }
 
-/// Pre-answer Claude Code's startup dialogs in `~/.claude.json`: folder trust
+pub fn default_claude_state_path() -> Result<PathBuf> {
+    Ok(dirs::home_dir().context("no home dir")?.join(".claude.json"))
+}
+
+/// Pre-answer Claude Code's startup dialogs in its state file: folder trust
 /// (`projects.<dir>.hasTrustDialogAccepted`) and, when the agent runs in
 /// autopilot, the bypass-permissions acknowledgement
 /// (`bypassPermissionsModeAccepted`, a one-time global flag the CLI itself sets
 /// when a user accepts). Merges into the existing file and writes atomically;
 /// other fields are kept.
-pub fn prepare_claude_config(dir: &Path, autopilot: bool) -> Result<()> {
-    let path = dirs::home_dir().context("no home dir")?.join(".claude.json");
-    let mut root: serde_json::Value = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
+pub fn prepare_claude_config(path: &Path, dir: &Path, autopilot: bool) -> Result<()> {
+    let mut root: serde_json::Value = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e.into()),
     };
     if !root.is_object() {
-        root = serde_json::json!({});
+        bail!("Claude Code state must be a JSON object");
     }
     let mut changed = false;
     let key = dir.to_string_lossy().into_owned();
@@ -474,9 +490,9 @@ pub fn prepare_claude_config(dir: &Path, autopilot: bool) -> Result<()> {
     if !changed {
         return Ok(());
     }
-    let tmp = path.with_extension("json.axel-tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&root)?)?;
-    std::fs::rename(&tmp, &path)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().context("missing Claude state directory")?)?;
+    serde_json::to_writer_pretty(tmp.as_file_mut(), &root)?;
+    tmp.persist(path)?;
     Ok(())
 }
 

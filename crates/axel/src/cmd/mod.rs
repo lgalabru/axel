@@ -1,6 +1,7 @@
 //! Command dispatch and shared context.
 
 mod agent;
+mod claude_profile;
 mod convert;
 mod diff;
 mod effort;
