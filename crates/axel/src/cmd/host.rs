@@ -832,6 +832,9 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         .keystore
         .agent(&agent.pubkey.parse()?)?
         .with_context(|| format!("{}'s key isn't on this machine, so it can't delegate", agent.name))?;
+    if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
+        bail!("{} has a machine-local Claude config directory and must run locally", agent.name);
+    }
     let attachments = pack_files(files)?;
 
     // The thread, in full (the host may have none of it).
@@ -946,6 +949,9 @@ pub fn move_session(ctx: &Ctx, session_id: &str, to: &str) -> Result<(String, St
         (Some(h), Placement::Host(d)) if h.id == d.id => bail!("{} already runs on {}", agent.name, h.label),
         (Some(h), Placement::Host(d)) => bail!("{} runs on {}; bring it here first (`--to local`), then send it to {}", agent.name, h.label, d.label),
         (None, Placement::Host(dest)) => {
+            if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
+                bail!("{} has a machine-local Claude config directory and must run locally", agent.name);
+            }
             stop_local(ctx, &s);
             ctx.store.end_session(&ctx.owner()?, &s.id, Some(&format!("moved to {}", dest.label)))?;
             let transcript = wait_for_transcript(&native, s.transcript_path.as_deref())?;

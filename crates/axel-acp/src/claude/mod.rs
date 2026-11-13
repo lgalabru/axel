@@ -206,8 +206,8 @@ impl Agent {
             }
             "authenticate" => Err(RpcError::invalid("Method not implemented.")),
             "session/new" => {
-                let home = dirs_home();
-                if home.join(".claude.json.backup").exists() && !home.join(".claude.json").exists() {
+                let state_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(dirs_home);
+                if state_dir.join(".claude.json.backup").exists() && !state_dir.join(".claude.json").exists() {
                     return Err(RpcError::auth_required());
                 }
                 let resume = params.pointer("/_meta/claudeCode/options/resume").and_then(Value::as_str).map(String::from);
