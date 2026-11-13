@@ -87,9 +87,22 @@ fn claude_executable_env() -> Option<(String, String)> {
     {
         return Some(("CLAUDE_CODE_EXECUTABLE".into(), v));
     }
-    let exe = super::launch::which("claude")?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = claude_executable(super::launch::which("claude")?);
     Some(("CLAUDE_CODE_EXECUTABLE".into(), exe.to_string_lossy().into_owned()))
+}
+
+/// The path to start Claude Code from, given where `claude` was found on
+/// `PATH`.  An npm install links `claude` to a JavaScript entry point, which
+/// the adapter runs with node, so that link is resolved.  Any other link is
+/// kept as found: a version manager's shim (mise) links to the manager's own
+/// binary, which only acts as claude under the shim's name, so resolving it
+/// would start the manager instead.
+fn claude_executable(found: PathBuf) -> PathBuf {
+    let is_js = |p: &Path| matches!(p.extension().and_then(|e| e.to_str()), Some("js" | "mjs" | "cjs"));
+    match std::fs::canonicalize(&found) {
+        Ok(real) if is_js(&real) => real,
+        _ => std::path::absolute(&found).unwrap_or(found),
+    }
 }
 
 fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -194,4 +207,50 @@ fn host(session_id: &str) -> Result<()> {
     let local = tokio::task::LocalSet::new();
     let store = ctx.store;
     local.block_on(&rt, axel_acp::run_host(cfg, store, signer, std::io::stdout()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    /// `bin/claude` in a fresh directory, linked to `target` (created empty).
+    fn linked(target: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let real = root.join(target);
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "").unwrap();
+        let link = root.join("bin").join("claude");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&real, &link).unwrap();
+        (dir, link, real)
+    }
+
+    #[test]
+    fn a_link_to_a_javascript_entry_point_is_resolved() {
+        let (_dir, link, real) = linked("lib/node_modules/claude-code/cli.js");
+        assert_eq!(claude_executable(link), real);
+    }
+
+    #[test]
+    fn a_version_manager_shim_keeps_its_own_name() {
+        let (_dir, link, _real) = linked("usr/bin/mise");
+        assert_eq!(claude_executable(link.clone()), link);
+    }
+
+    #[test]
+    fn a_link_to_a_versioned_binary_is_kept() {
+        let (_dir, link, _real) = linked("share/claude/versions/2.1.322");
+        assert_eq!(claude_executable(link.clone()), link);
+    }
+
+    #[test]
+    fn a_plain_file_is_returned_as_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().canonicalize().unwrap().join("claude");
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(claude_executable(exe.clone()), exe);
+    }
 }
