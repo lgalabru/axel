@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pane_grows_to_show_agent_suggestions_under_the_text() {
+    fn the_pane_only_grows_for_agent_suggestions_after_tab() {
         let mut d = fixtures::data();
         for it in &mut d.items {
             if it.status == Some(crate::model::ItemStatus::Pending) {
@@ -651,7 +651,11 @@ mod tests {
         v.compose_only = true;
         v.composer.paste("ask ");
         let plain = desired_height(&v, 60);
-        v.composer.insert_char('@');
+        v.handle_compose_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE));
+        assert_eq!(desired_height(&v, 60), plain, "typing @ keeps the pane height stable");
+        assert!(v.mention_options().is_empty());
+        v.handle_compose_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(v.composer.text(), "ask @", "the first Tab opens the list without completing");
         let h = desired_height(&v, 60);
         assert_eq!(h, plain + 3, "a row per agent");
         let mut term = Terminal::new(TestBackend::new(60, h)).unwrap();
@@ -661,6 +665,8 @@ mod tests {
         assert!(rows[0].contains("› ask @"), "{shown}");
         assert!(rows[1].contains("›  @Atlas") && rows[2].contains("@Nova") && rows[3].contains("@Orion"), "{shown}");
         assert!(shown.contains("pick"), "the footer says how to use the list: {shown}");
+        v.handle_compose_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(desired_height(&v, 60), plain, "Esc dismisses the list");
     }
 
     #[test]

@@ -1665,11 +1665,15 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_suggests_agents_for_an_at_and_enter_completes_it() {
+    fn tab_opens_composer_agent_suggestions_and_enter_completes_it() {
         let mut d = data();
         d.known_agents = vec![("Nova".into(), None)];
         let mut v = ThreadView::new("T1", d);
         type_str(&mut v, "ask @");
+        assert!(v.mention_options().is_empty());
+        assert_eq!(v.handle_key(key(KeyCode::Tab)), ThreadAction::None);
+        assert_eq!(v.focus, Focus::Composer);
+        assert_eq!(v.composer.text(), "ask @");
         let shown: Vec<String> = v.mention_options().into_iter().map(|(n, _)| n).collect();
         assert_eq!(shown, ["Atlas", "Nova"], "the thread's agents, then the others");
         type_str(&mut v, "n");
@@ -1677,6 +1681,8 @@ mod tests {
         assert_eq!(v.composer.text(), "ask @Nova ");
         assert!(v.mention_options().is_empty());
         type_str(&mut v, "@");
+        assert!(v.mention_options().is_empty());
+        v.handle_key(key(KeyCode::Tab));
         assert_eq!(v.handle_key(key(KeyCode::Esc)), ThreadAction::None);
         assert_eq!(v.focus, Focus::Composer, "Esc hides the list and stays in the composer");
         assert!(v.mention_options().is_empty());
