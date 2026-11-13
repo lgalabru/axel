@@ -15,6 +15,11 @@ use crate::util::{display_path, ellipsize, relative_time};
 /// Horizontal padding inside the pane.
 const PAD: u16 = 2;
 
+/// Text columns in the launcher's prompt, excluding padding and `› `.
+pub(crate) fn prompt_width(pane_width: u16) -> usize {
+    usize::from(pane_width.saturating_sub(PAD * 2 + 2)).max(1)
+}
+
 pub fn render(frame: &mut Frame, l: &Launcher, now: i64) {
     let full = frame.area();
     frame.render_widget(Clear, full);

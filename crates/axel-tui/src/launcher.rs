@@ -220,6 +220,8 @@ pub struct Launcher {
 
     // step 1
     pub title: TextInput,
+    /// Text columns available after the pane padding and prompt glyph.
+    pub(crate) prompt_width: usize,
     /// Files dropped onto the prompt field.
     pub attachments: Vec<PathBuf>,
     pub title_focus: TitleFocus,
@@ -264,6 +266,7 @@ impl Launcher {
             harnesses: if harnesses.is_empty() { vec![Harness::default().to_string()] } else { harnesses },
             spawn: None,
             title: TextInput::new(),
+            prompt_width: usize::MAX,
             attachments: Vec::new(),
             title_focus: TitleFocus::Text,
             attach_sel: 0,
@@ -655,12 +658,13 @@ impl Launcher {
             KeyCode::Enter => return self.quick_launch(),
             KeyCode::Tab => self.title_next(),
             KeyCode::Esc => return Action::Back,
-            // ↑/↓ move between the prompt's lines; ↓ on the last goes to the recent threads.
+            // ↑/↓ follow the displayed rows, including soft wraps; ↓ on the
+            // last row goes to the recent threads.
             KeyCode::Up if !key.modifiers.contains(KeyModifiers::SUPER) => {
-                self.title.line_up();
+                self.title.screen_line(self.prompt_width, true);
             }
             KeyCode::Down if !key.modifiers.contains(KeyModifiers::SUPER) => {
-                if !self.title.line_down() {
+                if !self.title.screen_line(self.prompt_width, false) {
                     return Action::FocusThreads;
                 }
             }

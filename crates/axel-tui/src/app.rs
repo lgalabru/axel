@@ -567,6 +567,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &s
     let mut app = App::new(deps, owner_pk, initial);
     loop {
         let size = terminal.size()?;
+        app.launcher.prompt_width = view::launcher_view::prompt_width(size.width);
         if let Some(thread) = app.thread.as_mut() {
             thread.set_composer_width(size.width);
         }

@@ -190,6 +190,62 @@ mod tests {
     }
 
     #[test]
+    fn launcher_arrows_follow_wrapped_rows_and_scroll_back_to_the_end() {
+        use crate::launcher::Action;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // Ten text columns, plus the pane padding and prompt glyph.
+        for tail in ["", "end"] {
+            let mut l = launcher();
+            l.prompt_width = super::launcher_view::prompt_width(16);
+            let draft = format!("{}{tail}", "0123456789".repeat(12));
+            l.handle_paste(&draft);
+            let mut term = Terminal::new(TestBackend::new(16, 5)).unwrap();
+            term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+            let end = term.get_cursor_position().unwrap();
+            let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+            for _ in 0..12 {
+                assert_eq!(l.handle_key(key(KeyCode::Up)), Action::None);
+                term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+            }
+            assert_eq!(l.title.cursor(), tail.len());
+            assert_eq!(term.get_cursor_position().unwrap().y, 0);
+            for _ in 0..12 {
+                assert_eq!(l.handle_key(key(KeyCode::Down)), Action::None);
+                term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+            }
+            assert_eq!(l.title.cursor(), draft.len());
+            assert_eq!(l.title.text(), draft);
+            assert_eq!(term.get_cursor_position().unwrap(), end);
+            assert_eq!(l.handle_key(key(KeyCode::Down)), Action::FocusThreads);
+        }
+    }
+
+    #[test]
+    fn launcher_arrows_preserve_columns_across_short_lines_and_resize() {
+        use crate::launcher::Action;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut l = launcher();
+        l.prompt_width = super::launcher_view::prompt_width(16);
+        l.handle_paste("abcdef\nx\nabcdef");
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for (code, cursor) in [(KeyCode::Up, 8), (KeyCode::Up, 6), (KeyCode::Down, 8), (KeyCode::Down, 15)] {
+            assert_eq!(l.handle_key(key(code)), Action::None);
+            assert_eq!(l.title.cursor(), cursor);
+        }
+        l.title.set_text("abcdefghijklm");
+        assert_eq!(l.handle_key(key(KeyCode::Up)), Action::None);
+        assert_eq!(l.title.cursor(), 3);
+        l.prompt_width = super::launcher_view::prompt_width(12);
+        assert_eq!(l.handle_key(key(KeyCode::Down)), Action::None);
+        assert_eq!(l.title.cursor(), 9);
+        let mut term = Terminal::new(TestBackend::new(12, 5)).unwrap();
+        term.draw(|f| super::launcher_view::render(f, &l, 5_000)).unwrap();
+        assert_eq!(term.get_cursor_position().unwrap(), ratatui::layout::Position::new(7, 2));
+    }
+
+    #[test]
     fn the_launcher_prompt_shows_its_lines_and_scrolls_to_the_cursor() {
         let mut l = launcher();
         l.title.paste("fix the login bug\nit fails on token refresh");
