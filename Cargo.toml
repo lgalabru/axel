@@ -11,14 +11,14 @@ repository = "https://github.com/scarce/axel"
 description = "Axel: agent orchestration, designed for Rex"
 
 [workspace.dependencies]
-axel-identity = { path = "crates/axel-identity" }
-axel-inbox = { path = "crates/axel-inbox" }
-axel-config = { path = "crates/axel-config" }
-axel-store = { path = "crates/axel-store" }
-axel-rex = { path = "crates/axel-rex" }
-axel-tui = { path = "crates/axel-tui" }
-axel-acp = { path = "crates/axel-acp" }
-axel-mcp = { path = "crates/axel-mcp" }
+axel-identity = { path = "crates/identity" }
+axel-inbox = { path = "crates/inbox" }
+axel-config = { path = "crates/config" }
+axel-store = { path = "crates/store" }
+axel-rex = { path = "crates/rex" }
+axel-tui = { path = "crates/tui" }
+axel-acp = { path = "crates/acp" }
+axel-mcp = { path = "crates/mcp" }
 
 anyhow = "1"
 thiserror = "2"

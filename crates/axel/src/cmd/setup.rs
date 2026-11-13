@@ -16,7 +16,7 @@ use dialoguer::{Confirm, Input, MultiSelect, Select};
 use super::Ctx;
 use super::launch::which;
 
-// The TUI's palette (`axel-tui/src/theme.rs`).
+// The TUI's palette (`crates/tui/src/theme.rs`).
 const ACCENT: console::Color = console::Color::TrueColor(255, 117, 101);
 const YOU: console::Color = ACCENT;
 const OK: u8 = 108;

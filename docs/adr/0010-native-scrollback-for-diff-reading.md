@@ -19,7 +19,7 @@ a different layout or turn, or edited notes. Keep review actions available.
 Use `r` to enter the existing alternate-screen line review when the owner
 wants source selection or comments. Returning without edits preserves the
 printed diff. This follows [ADR 0002](0002-terminal-first-on-rex.md) and the
-conversation stream implementation in `crates/axel-tui/src/stream.rs`.
+conversation stream implementation in `crates/tui/src/stream.rs`.
 
 ## Consequences
 

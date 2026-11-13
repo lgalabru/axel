@@ -68,12 +68,12 @@ Reviewed against main after `e79414e`, the multi-select question change.
 |---|---|---|
 | [Threads and parent relationships](../adr/0006-threads-are-the-primitive.md) | Parent thread for the goal; child thread per unit using `subagent` | Run/node projections and run-level aggregation |
 | [Managed launch and worktrees](../../crates/axel/src/cmd/launch.rs) | Fresh worker context in a specific checkout | Pin the checkout to the run base and accepted dependency revisions |
-| [ACP host](../../crates/axel-acp/src/host.rs) and [socket commands](../../crates/axel-acp/src/socket.rs) | Prompt, observe, interrupt and stop workers through structured protocols | Candidate-submission and controller lifecycle integration |
-| [Turn checkpoints](../../crates/axel-acp/src/checkpoint.rs) | Content snapshots, diffs and recovery evidence | A required snapshot for graph acceptance; UI checkpoints are currently best-effort |
-| [Signed event store](../../crates/axel-store/src/log.rs) | Auditable plan revisions, results and owner approvals | New event contracts; a local transactional controller lease |
-| [Reach, modes and budgets](../../crates/axel-store/src/policy.rs) | Keep existing identity and delegation restrictions | Run-wide reservations, deadlines and admission accounting |
+| [ACP host](../../crates/acp/src/host.rs) and [socket commands](../../crates/acp/src/socket.rs) | Prompt, observe, interrupt and stop workers through structured protocols | Candidate-submission and controller lifecycle integration |
+| [Turn checkpoints](../../crates/acp/src/checkpoint.rs) | Content snapshots, diffs and recovery evidence | A required snapshot for graph acceptance; UI checkpoints are currently best-effort |
+| [Signed event store](../../crates/store/src/log.rs) | Auditable plan revisions, results and owner approvals | New event contracts; a local transactional controller lease |
+| [Reach, modes and budgets](../../crates/store/src/policy.rs) | Keep existing identity and delegation restrictions | Run-wide reservations, deadlines and admission accounting |
 | [Usage reconciliation](../../crates/axel/src/cmd/usage/native.rs) | Count native requests once across attempts | Aggregate distinct run sessions, excluding unrelated work by the same agent |
-| [Diff reading](../../crates/axel-tui/src/diff/native.rs) and question popups | Review exact changes; collect genuine missing decisions | A run summary and a typed candidate-approval action |
+| [Diff reading](../../crates/tui/src/diff/native.rs) and question popups | Review exact changes; collect genuine missing decisions | A run summary and a typed candidate-approval action |
 
 An agent is a profile and identity, not a process. We do not need twenty new named
 agents. We need independently scoped sessions using the chosen profiles.

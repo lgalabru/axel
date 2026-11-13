@@ -491,7 +491,7 @@ replay on `session/load`. One difference on purpose: Claude uses its native Read
 Edit / Bash instead of the adapter's `mcp__acp__*` stand-ins (Axel's `fs/*` handlers read
 and write the disk just like them), which also saves Claude a ToolSearch round trip per
 turn. No Node or npm is needed; `AXEL_ACP_CLAUDE=claude-code-acp` goes back to Zed's.
-`crates/axel-acp/tests/claude_acp.rs` checks it against a fake `claude`.
+`crates/acp/tests/claude_acp.rs` checks it against a fake `claude`.
 
 **So is Codex's** (`axel codex-acp`, `axel-acp/src/codex/`). Zed's `codex-acp` compiles
 OpenAI's engine in (codex-core, pinned to one Codex release), so it lags the `codex` you
@@ -512,7 +512,7 @@ in three ways:
 - it supports `session/set_model`;
 - it passes the identity prompt as Codex developer instructions.
 
-`AXEL_ACP_CODEX=codex-acp` goes back to Zed's. `crates/axel-acp/tests/codex_acp.rs` checks it
+`AXEL_ACP_CODEX=codex-acp` goes back to Zed's. `crates/acp/tests/codex_acp.rs` checks it
 against a fake app-server.
 
 **Custom ACP agents** use the same host as the built-in adapters. When a model
