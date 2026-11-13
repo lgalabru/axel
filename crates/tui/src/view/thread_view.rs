@@ -513,21 +513,25 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
             };
             if it.status == Some(ItemStatus::Pending) {
                 let card = Style::default();
-                let mut lines = vec![Line::from(vec![
-                    Span::styled(format!("{glyph} "), card.fg(color).bold()),
-                    Span::styled(format!("{who} {verb}: "), card.bold()),
-                    Span::styled(ellipsize(&prompt, width.saturating_sub(who.len() + verb.len() + 6)), card),
-                ])];
+                let mut lines = question_header(glyph, color, &who, verb, &prompt, width);
                 let sel = v.choice_index(&it.id);
                 for (oi, o) in options.iter().enumerate() {
                     let on = oi == sel;
                     let checkbox = if multiple.is_some() {
                         if v.choice_checked.get(&it.id).is_some_and(|s|s.contains(&o.id)) {"[x] "} else {"[ ] "}
                     } else {""};
-                    lines.push(Line::from(vec![
-                        Span::styled(if on { "   ▸ " } else { "     " }, card.fg(theme::ACCENT)),
-                        Span::styled(format!("{checkbox}{}",o.label), if on { card.fg(theme::ACCENT).bold() } else { card }),
-                    ]));
+                    // The whole option, wrapped under its own text; the marker
+                    // alone carries the accent, the picked text is just bold.
+                    let indent = 5 + checkbox.len();
+                    let text = if on { card.bold() } else { card };
+                    for (li, l) in wrap(&o.label, width.saturating_sub(indent).max(1)).into_iter().enumerate() {
+                        let lead = match li {
+                            0 => Span::styled(if on { "   ▸ " } else { "     " }, card.fg(theme::ACCENT)),
+                            _ => Span::raw("     "),
+                        };
+                        let pad = if li == 0 { checkbox.to_string() } else { " ".repeat(checkbox.len()) };
+                        lines.push(Line::from(vec![lead, Span::styled(format!("{pad}{l}"), text)]));
+                    }
                 }
                 let hint = if multiple.is_some() {"↑↓ move · Space toggle · Enter confirm"} else if selected { "↑↓ pick · Enter answer" } else { "Tab then ↑↓ to this card, Enter answers" };
                 lines.push(Line::from(Span::styled(format!("     {hint}"), card.fg(theme::DIM))));
@@ -549,6 +553,25 @@ fn row_body(v: &ThreadView, row: &Row, width: usize, selected: bool) -> Vec<Line
             }
         }
     }
+}
+
+/// `? atlas asks: <prompt>`, the whole prompt wrapped under itself: a question
+/// is read in full before it is answered, so it is never cut short.
+pub(crate) fn question_header(glyph: &str, color: Color, who: &str, verb: &str, prompt: &str, width: usize) -> Vec<Line<'static>> {
+    let lead = format!("{who} {verb}: ");
+    let mut out = Vec::new();
+    for (i, l) in wrap(&format!("{lead}{}", prompt.trim()), width.saturating_sub(2).max(1)).into_iter().enumerate() {
+        let mut spans = vec![if i == 0 { Span::styled(format!("{glyph} "), Style::default().fg(color).bold()) } else { Span::raw("  ") }];
+        match l.strip_prefix(&lead) {
+            Some(rest) if i == 0 => {
+                spans.push(Span::styled(lead.clone(), Style::default().bold()));
+                spans.push(Span::raw(rest.to_string()));
+            }
+            _ => spans.push(Span::raw(l)),
+        }
+        out.push(Line::from(spans));
+    }
+    out
 }
 
 /// What the timeline says when there is nothing to show yet.

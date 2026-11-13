@@ -606,14 +606,9 @@ fn render_row(v: &ThreadView, row: &Row, width: usize) -> Vec<Line<'static>> {
                 _ => ("?", "asks", Color::Yellow),
             };
             let opts: Vec<String> = options.iter().enumerate().map(|(n, o)| format!("{} {}", n + 1, o.label)).collect();
-            return vec![
-                Line::from(vec![
-                    Span::styled(format!("{glyph} "), Style::default().fg(color).bold()),
-                    Span::styled(format!("{who} {verb}: "), theme::bold()),
-                    Span::raw(crate::util::ellipsize(prompt, width.saturating_sub(who.len() + verb.len() + 6))),
-                ]),
-                Line::from(Span::styled(format!("    {} · answer below", opts.join("  ")), theme::dim())),
-            ];
+            let mut lines = crate::view::thread_view::question_header(glyph, color, &who, verb, prompt, width);
+            lines.push(Line::from(Span::styled(format!("    {} · answer below", opts.join("  ")), theme::dim())));
+            return lines;
         }
     }
     let mut lines = row_lines(v, row, width.saturating_sub(1), false);

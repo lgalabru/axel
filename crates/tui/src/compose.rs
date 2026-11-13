@@ -518,6 +518,27 @@ mod tests {
     }
 
     #[test]
+    fn a_long_question_and_its_options_wrap_instead_of_being_cut() {
+        let mut v = ThreadView::new("T1", fixtures::data());
+        let i = v.pending_choice().unwrap();
+        let prompt = format!("{} the very end of the question", "a long question ".repeat(8));
+        let option = format!("{} the very end of the option", "a long option ".repeat(8));
+        if let crate::model::ItemBody::Choice { prompt: p, options, .. } = &mut v.data.items[i].body {
+            *p = prompt.clone();
+            options[0].label = option.clone();
+        }
+        let lines = row_lines(&v, &Row::Choice(i), 40, true);
+        let plain: Vec<String> = lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
+        assert!(plain.iter().all(|l| l.chars().count() <= 40), "{plain:#?}");
+        let all = plain.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+        assert!(all.contains("the very end of the question") && all.contains("the very end of the option"), "{all}");
+        // Only the marker is accented; the picked option's text keeps the terminal's colour.
+        for span in lines.iter().flat_map(|l| &l.spans).filter(|s| s.content.contains("option")) {
+            assert_ne!(span.style.fg, Some(crate::theme::ACCENT), "{span:?}");
+        }
+    }
+
+    #[test]
     fn arrows_move_through_a_draft_taller_than_the_composer_and_return_to_the_end() {
         let mut v = ThreadView::new("T1", fixtures::data());
         v.compose_only = true;
