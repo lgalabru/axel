@@ -193,9 +193,13 @@ pub enum Effort { Low, Medium, High, Xhigh, Max }                               
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)] pub enum Harness { #[default] Claude, Codex, Opencode, Custom(String) }
 impl Harness { pub const BUILTIN: [Harness; 3]; pub fn as_str(&self) -> &str; pub fn parse(s: &str) -> Harness; pub fn is_builtin(&self) -> bool; pub fn install(&self) -> &str; pub fn login(&self) -> String /* one-line hint shown when it isn't logged in */; }   // FromStr<Err = Infallible>, Display, Serialize/Deserialize as a string
 impl Harness {   // reasoning effort, by capability (ADR 0007)
-    pub fn native_effort(&self, effort: Effort) -> Option<&'static str>;     // the harness CLI's own word for the level: claude and pi all five; codex and grok all but max; others None
-    pub fn pane_effort_args(&self, effort: Effort) -> Option<Vec<String>>;   // claude --effort L; codex -c model_reasoning_effort=L; pi --thinking L; grok --reasoning-effort L; None = this pane cannot apply it
+    pub fn native_effort(&self, effort: Effort) -> Option<&'static str>;     // the harness CLI's own word for the level: claude, pi and omp all five; codex and grok all but max; others None
+    pub fn pane_effort_args(&self, effort: Effort) -> Option<Vec<String>>;   // claude --effort L; codex -c model_reasoning_effort=L; pi and omp --thinking L; grok --reasoning-effort L; None = this pane cannot apply it
     pub fn has_builtin_adapter(&self) -> bool;                               // claude and codex: their ACP adapter is inside `axel` and takes the effort in `_meta.axel.effort`
+}
+impl Harness {   // what a pane's CLI takes at launch, by capability
+    pub fn pane_system_prompt_flag(&self) -> Option<&'static str>;          // claude, pi and omp: --append-system-prompt, carrying Axel's agent context
+    pub fn pane_takes_prompt(&self) -> bool;                                // claude, codex, pi and omp: the first prompt is the CLI's last positional argument (not when resuming)
 }
 pub struct Thread { pub id: String, pub title: String, pub intent: String, pub state: ThreadState, pub created_by: String, pub parent_thread_id: Option<String>, pub relationship: Option<Relationship>, pub created_at: i64, pub updated_at: i64, pub done_at: Option<i64> }
 pub struct ThreadWorkspace { pub kind: WorkspaceKind, pub branch: Option<String>, pub worktree_path: Option<PathBuf> }

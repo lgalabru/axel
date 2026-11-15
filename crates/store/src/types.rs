@@ -318,12 +318,12 @@ impl Harness {
     }
 
     /// The harness CLI's own word for `effort`, when it documents that level:
-    /// Claude Code (`--effort`) and Pi (`--thinking`) take all five; Codex
-    /// (`model_reasoning_effort`) and Grok (`--reasoning-effort`) stop at
+    /// Claude Code (`--effort`), Pi and Oh My Pi (`--thinking`) take all five;
+    /// Codex (`model_reasoning_effort`) and Grok (`--reasoning-effort`) stop at
     /// xhigh.
     pub fn native_effort(&self, effort: Effort) -> Option<&'static str> {
         match (self, effort) {
-            (Harness::Claude | Harness::Pi, e) => Some(e.as_str()),
+            (Harness::Claude | Harness::Pi | Harness::Omp, e) => Some(e.as_str()),
             (Harness::Codex | Harness::Grok, Effort::Max) => None,
             (Harness::Codex | Harness::Grok, e) => Some(e.as_str()),
             _ => None,
@@ -337,10 +337,25 @@ impl Harness {
         Some(match self {
             Harness::Claude => vec!["--effort".into(), level.into()],
             Harness::Codex => vec!["-c".into(), format!("model_reasoning_effort={level}")],
-            Harness::Pi => vec!["--thinking".into(), level.into()],
+            Harness::Pi | Harness::Omp => vec!["--thinking".into(), level.into()],
             Harness::Grok => vec!["--reasoning-effort".into(), level.into()],
             _ => return None,
         })
+    }
+
+    /// The flag a pane's CLI takes to append Axel's agent context to its
+    /// system prompt. `None`: the pane gets it some other way, or not at all.
+    pub fn pane_system_prompt_flag(&self) -> Option<&'static str> {
+        match self {
+            Harness::Claude | Harness::Pi | Harness::Omp => Some("--append-system-prompt"),
+            _ => None,
+        }
+    }
+
+    /// Whether a pane's CLI starts on a prompt given as its last positional
+    /// argument (`pi "fix it"`, `omp "fix it"`).
+    pub fn pane_takes_prompt(&self) -> bool {
+        matches!(self, Harness::Claude | Harness::Codex | Harness::Pi | Harness::Omp)
     }
 
     /// How to install it, in one line.

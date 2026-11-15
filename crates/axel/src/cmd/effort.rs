@@ -57,6 +57,8 @@ mod tests {
         let (args, _) = launched(Harness::Codex, &["resume", "0199-thread", "--model", "gpt-5.5"], Some(Effort::High));
         assert_eq!(args, ["-c", "model_reasoning_effort=high", "resume", "0199-thread", "--model", "gpt-5.5"]);
         assert_eq!(launched(Harness::Pi, &[], Some(Effort::Max)).0, ["--thinking", "max"]);
+        assert_eq!(launched(Harness::Omp, &["fix it"], Some(Effort::Max)).0, ["--thinking", "max", "fix it"]);
+        assert_eq!(launched(Harness::Omp, &[], Some(Effort::Low)).0, ["--thinking", "low"]);
         assert_eq!(launched(Harness::Grok, &[], Some(Effort::Low)).0, ["--reasoning-effort", "low"]);
         let (args, warnings) = launched(Harness::Grok, &["go"], Some(Effort::Xhigh));
         assert_eq!(args, ["--reasoning-effort", "xhigh", "go"]);

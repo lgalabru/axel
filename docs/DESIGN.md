@@ -531,7 +531,7 @@ applied by capability, never by harness name:
 
 - a **pane** gets the harness's own flag ahead of its other arguments
   (`Harness::pane_effort_args`: Claude Code `--effort`, Codex `-c model_reasoning_effort=`,
-  Pi `--thinking`, Grok `--reasoning-effort`);
+  Pi and Oh My Pi `--thinking`, Grok `--reasoning-effort`);
 - a managed session under one of **Axel's own adapters** gets it in `_meta.axel.effort` of
   `session/new` / `session/load`, and the adapter starts the harness at it (Claude Code
   `--effort`, Codex `model_reasoning_effort` in the thread's config overrides);

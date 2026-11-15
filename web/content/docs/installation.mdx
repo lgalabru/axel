@@ -101,7 +101,9 @@ command Axel runs (`AXEL_ACP_PI="npx pi-acp"`). Skills are installed for Claude 
 and OpenCode; the others get your `AXEL.md` in their prompt.
 
 Without an adapter, an agent runs as its normal CLI in a Rex pane, and reports its status
-through hooks that Axel installs at launch.
+through hooks that Axel installs at launch. In a pane, Claude Code, Pi and Oh My Pi get
+Axel's agent context with `--append-system-prompt`, and the thread's first prompt as their
+last argument, as Codex does.
 
 ## A key binding
 
