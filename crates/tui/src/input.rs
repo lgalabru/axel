@@ -848,6 +848,26 @@ mod tests {
         assert_eq!(t.view(20), ("修复登录错误".to_string(), 12));
     }
 
+    /// The cases from issue #24 (CJK input in the launcher and composer).
+    #[test]
+    fn cjk_input_cases_from_issue_24() {
+        // Eight Chinese characters: the cursor sits sixteen cells in, not eight.
+        let t = TextInput::with_text("修复登录错误问题");
+        assert_eq!(t.view(80), ("修复登录错误问题".to_string(), 16));
+        assert_eq!(input_rows(&t.chars, 80, 8).1, (0, 16));
+        // Four CJK characters in a four-cell field: two per row.
+        let four: Vec<char> = "修复登录".chars().collect();
+        assert_eq!(input_rows(&four, 4, 4).0, vec![(0, 2), (2, 4), (4, 4)]);
+        // Mixed widths: `看a` and `看b` are three cells each.
+        let mixed: Vec<char> = "看a看b".chars().collect();
+        assert_eq!(input_rows(&mixed, 3, 4), (vec![(0, 2), (2, 4), (4, 4)], (2, 0)));
+        assert_eq!(input_rows(&mixed, 3, 3), (vec![(0, 2), (2, 4), (4, 4)], (1, 2)), "after the second `看`");
+        // Fields narrower than a wide character still end, one character a row.
+        let wide: Vec<char> = "看看".chars().collect();
+        assert_eq!(input_rows(&wide, 1, 2).0, vec![(0, 1), (1, 2), (2, 2)]);
+        assert_eq!(input_rows(&wide, 3, 2).0, vec![(0, 1), (1, 2)]);
+    }
+
     #[test]
     fn a_composer_paste_keeps_its_lines() {
         let mut t = TextInput::new();
