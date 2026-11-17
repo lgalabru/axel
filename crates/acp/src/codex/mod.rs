@@ -731,8 +731,10 @@ impl Agent {
 /// `codex app-server` in `cwd`, with a reader that routes its messages.
 fn spawn_codex(cwd: &PathBuf) -> Result<Arc<Codex>, RpcError> {
     let exe = std::env::var("CODEX_EXECUTABLE").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "codex".into());
+    let provider = inspector_provider_args(std::env::var("AXEL_CODEX_BASE_URL").ok().as_deref());
     let mut child = Command::new(&exe)
         .arg("app-server")
+        .args(provider)
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -763,6 +765,30 @@ fn spawn_codex(cwd: &PathBuf) -> Result<Arc<Codex>, RpcError> {
         reader.pending.lock().expect("pending lock").clear();
     });
     Ok(codex)
+}
+
+/// `-c` flags that send Codex's model requests through the session's
+/// inspector proxy (ADR 0011), as a custom model provider: Codex ignores
+/// `OPENAI_BASE_URL` with a ChatGPT login, but a provider that
+/// `requires_openai_auth` keeps the login and sends it to `base_url`.  Only
+/// a loopback `http` URL of plain characters is used, so nothing in it can
+/// break out of the TOML string; anything else runs Codex direct.
+fn inspector_provider_args(base_url: Option<&str>) -> Vec<String> {
+    let Some(url) = base_url.filter(|u| !u.is_empty()) else { return Vec::new() };
+    let is_plain = url.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'/' | b'.' | b'-' | b'_'));
+    if !is_plain || !url.starts_with("http://127.0.0.1:") {
+        return Vec::new();
+    }
+    [
+        "model_provider=axel".to_string(),
+        "model_providers.axel.name=\"axel\"".to_string(),
+        format!("model_providers.axel.base_url=\"{url}\""),
+        "model_providers.axel.wire_api=\"responses\"".to_string(),
+        "model_providers.axel.requires_openai_auth=true".to_string(),
+    ]
+    .into_iter()
+    .flat_map(|setting| ["-c".to_string(), setting])
+    .collect()
 }
 
 /// The thread's settings: approval and sandbox for the default mode, the
@@ -935,6 +961,20 @@ fn commands() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_inspector_provider_is_set_only_for_a_plain_loopback_url() {
+        let url = "http://127.0.0.1:50123/0123abcd/openai";
+        let args = inspector_provider_args(Some(url));
+        assert_eq!(args.len(), 10);
+        assert!(args.chunks(2).all(|pair| pair[0] == "-c"));
+        assert_eq!(args[1], "model_provider=axel");
+        assert_eq!(args[5], format!("model_providers.axel.base_url=\"{url}\""));
+        assert!(args.contains(&"model_providers.axel.requires_openai_auth=true".to_string()));
+        for bad in [None, Some(""), Some("https://evil.example/openai"), Some("http://127.0.0.1:1/x\"\nmodel=\"y"), Some("http://127.0.0.1.evil:1/x")] {
+            assert!(inspector_provider_args(bad).is_empty(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn modes_map_to_policies() {

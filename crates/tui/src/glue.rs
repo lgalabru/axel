@@ -875,6 +875,46 @@ pub fn load_usage(store: &Store, now: i64) -> Result<crate::model::UsageData> {
     Ok(data)
 }
 
+/// Most distinct agents or threads one inspector read names: far more than a
+/// day of work touches, and a bound on the lookups per refresh.
+const INSPECT_NAMES_MAX: usize = 200;
+
+/// The requests `filter` picks and the names to show them with;
+/// `scope_thread` is named even when it has no requests yet.
+pub fn load_inspect(store: &Store, filter: &axel_store::ModelRequestFilter, scope_thread: Option<&str>, now_ms: i64) -> Result<crate::model::InspectData> {
+    let requests = store.model_requests(filter).map_err(se)?;
+    assert!(requests.len() <= filter.limit.max(1), "the store honours the limit");
+    let mut agents: HashMap<String, (String, Option<AgentColor>)> =
+        store.list_agents().map_err(se)?.into_iter().map(|a| (a.pubkey, (a.name, a.color))).collect();
+    let mut threads: HashMap<String, String> = HashMap::new();
+    let wanted_threads = requests.iter().map(|r| r.thread_id.as_str()).chain(scope_thread);
+    for id in wanted_threads {
+        if threads.len() >= INSPECT_NAMES_MAX {
+            break;
+        }
+        if id.is_empty() || threads.contains_key(id) {
+            continue;
+        }
+        let title = store.get_thread(id).map_err(se)?.map(|t| t.title).unwrap_or_else(|| id.chars().take(8).collect());
+        threads.insert(id.to_string(), title);
+    }
+    // Archived agents keep their names on the requests they made.
+    let mut looked_up = 0usize;
+    for r in &requests {
+        if looked_up >= INSPECT_NAMES_MAX {
+            break;
+        }
+        if agents.contains_key(&r.agent_pubkey) {
+            continue;
+        }
+        looked_up += 1;
+        let named = store.agent_by_pubkey(&r.agent_pubkey).map_err(se)?.map_or_else(|| (r.agent_pubkey.chars().take(8).collect(), None), |a| (a.name, a.color));
+        agents.insert(r.agent_pubkey.clone(), named);
+    }
+    let inspected = store.inspected_threads().map_err(se)?.into_iter().collect();
+    Ok(crate::model::InspectData { requests, agents, threads, now_ms, inspected })
+}
+
 fn add(to: &mut axel_store::UsageTotals, u: &axel_store::UsageTotals) {
     to.input_tokens += u.input_tokens;
     to.output_tokens += u.output_tokens;

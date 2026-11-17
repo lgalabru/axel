@@ -54,6 +54,11 @@ const TOKENS_LABEL: &str = "tokens";
 const TOKENS_CELLS: (f64, f64) = (48.0, 9.0);
 /// Its bounds when our pane's size is unknown.
 const TOKENS_FALLBACK: [f64; 4] = [0.66, 0.02, 0.32, 0.24];
+/// The token inspector's label. Not one of the launcher's either.
+const INSPECT_LABEL: &str = "inspector";
+/// The token inspector: most of the window, centred, so the list, the
+/// inspector and the sidebar all have room.
+const INSPECT_BOUNDS: [f64; 4] = [0.05, 0.05, 0.90, 0.90];
 
 /// Harness names the new-agent form cycles through: the builtins installed on
 /// this machine, in order (all of them when none is, so the form still offers some).
@@ -146,6 +151,33 @@ pub fn toggle_usage() -> Result<()> {
     let cwd = std::env::current_dir().ok();
     rex.new_floating_terminal_with_focus(TOKENS_LABEL, bounds, &cmd, cwd.as_deref(), &passthrough_env(), false)
         .context(t!("opening the usage pane in Rex"))?;
+    Ok(())
+}
+
+/// `axel inspect`: the token inspector in a large floating pane over this
+/// Rex window, or, when it's open, closed. Outside Rex, the same screen
+/// right here. It starts on `thread`, else `$AXEL_THREAD`, else every thread.
+pub fn toggle_inspect(thread: Option<String>) -> Result<()> {
+    let thread = thread.or_else(|| std::env::var("AXEL_THREAD").ok()).filter(|t| !t.trim().is_empty());
+    let Some(env) = axel_rex::detect() else {
+        return run_inline(Some(ScreenArg::Inspect), thread);
+    };
+    let rex = axel_rex::Rex::new(env);
+    let open = floating_layers(&rex, &[INSPECT_LABEL])?;
+    if !open.is_empty() {
+        for layer in open {
+            rex.close_layer(&layer).ok();
+        }
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context(t!("locating the axel binary"))?.to_string_lossy().into_owned();
+    let mut cmd = vec![exe, "ui".into(), "--screen".into(), "inspect".into()];
+    if let Some(thread) = thread {
+        cmd.extend(["--thread".into(), thread]);
+    }
+    let cwd = std::env::current_dir().ok();
+    rex.new_floating_terminal_with_focus(INSPECT_LABEL, INSPECT_BOUNDS, &cmd, cwd.as_deref(), &passthrough_env(), true)
+        .context(t!("opening the token inspector in Rex"))?;
     Ok(())
 }
 
@@ -244,6 +276,9 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     let focus_peer_ref: Option<&dyn Fn()> = if peer.is_some() { Some(&focus_peer) } else { None };
     let is_prompt = peer.as_ref().is_some_and(|p| p.i_am_prompt);
     let fit_prompt_ref: Option<&dyn Fn(axel_tui::PromptSize)> = if is_prompt { Some(&fit_prompt) } else { None };
+    // From the usage pane, `i` opens the inspector as its own large pane.
+    let open_inspector = || toggle_inspect(None);
+    let open_inspector_ref: Option<&dyn Fn() -> Result<()>> = if ctx.rex.is_some() { Some(&open_inspector) } else { None };
     let deps = Deps {
         store: &ctx.store,
         keystore: &ctx.keystore,
@@ -258,6 +293,7 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
         manage_thread: Some(&manage_thread),
         open_controls: None,
         open_terminal: None,
+        open_inspector: open_inspector_ref,
     };
     let outcome = axel_tui::run(deps, initial)?;
     finish(&ctx, outcome, peer.as_ref())
@@ -275,6 +311,10 @@ fn resolve_initial(ctx: &Ctx, screen: Option<ScreenArg>, thread: Option<String>)
             Ok(Screen::Thread(id))
         }
         (Some(ScreenArg::Thread), None) => anyhow::bail!("{}", t!("--screen thread needs --thread ID")),
+        (Some(ScreenArg::Inspect), thread) => {
+            let thread = thread.or_else(|| std::env::var("AXEL_THREAD").ok()).filter(|t| !t.trim().is_empty());
+            Ok(Screen::Inspect(thread.map(|id| resolve_thread_id(ctx, &id)).transpose()?))
+        }
         (other, _) => initial_screen(other),
     }
 }
@@ -410,6 +450,7 @@ fn initial_screen(screen: Option<ScreenArg>) -> Result<Screen> {
         Some(ScreenArg::Thread) => Screen::Dashboard,
         Some(ScreenArg::Threads) => Screen::Threads,
         Some(ScreenArg::Usage) => Screen::Usage,
+        Some(ScreenArg::Inspect) => Screen::Inspect(None),
         None => {
             let ctx = Ctx::open()?;
             let owner_pk = ctx.owner()?.public().to_string();
@@ -869,7 +910,7 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
         }
     };
     let open_terminal = |thread_id: &str| open_thread_terminal(&ctx, thread_id);
-    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: Some(&open_controls), open_terminal: Some(&open_terminal) };
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: Some(&open_controls), open_terminal: Some(&open_terminal), open_inspector: None };
     let stream = ctx.rex.as_ref().and_then(stream_block);
     // The tokens pane opened beside us, in the same row, if there is one.
     let usage = ctx.rex.as_ref().and_then(|rex| rex.view().ok().and_then(|v| block_beside(&v, &rex.env().block, TOKENS_LABEL)));
@@ -1059,7 +1100,7 @@ pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
     let summon = |_: &str, _: &str, _: &str, _: &[std::path::PathBuf]| -> Result<String> { anyhow::bail!("not from here") };
     let runtime_label = |h: &axel_store::Harness| launch::runtime_label(h);
-    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: None, open_terminal: None };
+    let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: None, open_terminal: None, open_inspector: None };
     let res = axel_tui::run_answer(deps, thread_id, item_id);
     close_own_layer(&ctx);
     res

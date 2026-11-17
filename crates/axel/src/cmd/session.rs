@@ -163,7 +163,19 @@ fn host(session_id: &str) -> Result<()> {
     if let Some(profile) = ClaudeProfile::load(&agent.pubkey)? {
         profile.configure_host()?;
     }
-    let env = harness_env(&thread.id, &session.id, &agent);
+    let mut env = harness_env(&thread.id, &session.id, &agent);
+    // After harness_env, which edits our environment while single-threaded:
+    // the proxy's runtime starts threads.
+    let inspected = super::inspector::Session { session_id: &session.id, thread_id: &thread.id, agent_pubkey: &agent.pubkey, harness: &agent.harness };
+    // Off unless the owner asked for it on this thread (`axel inspect on`, or
+    // AXEL_INSPECT=1 for one session); an unreadable switch is off.
+    let switched_on = ctx.store.thread_inspected(&thread.id).unwrap_or(false);
+    let inspection = super::inspector::start(&inspected, super::inspector::wanted(switched_on), &mut env);
+    let (on_turn, notices) = match &inspection {
+        super::inspector::Inspection::On(inspector) => (Some(inspector.turn_hook()), Vec::new()),
+        super::inspector::Inspection::Failed { notice } => (None, vec![notice.clone()]),
+        super::inspector::Inspection::Off => (None, Vec::new()),
+    };
 
     let meta = session_meta(&agent, &cwd);
     let mcp_servers = vec![super::launch::axel_mcp_server(&env)];
@@ -192,6 +204,9 @@ fn host(session_id: &str) -> Result<()> {
         // The agent's reasoning effort; the host applies it per harness and
         // warns where it cannot.
         effort: agent.effort,
+        // The inspector proxy stamps each model request with its turn.
+        on_turn,
+        notices,
     };
     std::fs::create_dir_all(cfg.socket_path.parent().expect("socket_path joins onto the run directory"))?;
     std::fs::create_dir_all(cfg.log_path.parent().expect("log_path joins onto the logs directory"))?;
@@ -199,7 +214,11 @@ fn host(session_id: &str) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let local = tokio::task::LocalSet::new();
     let store = ctx.store;
-    local.block_on(&rt, axel_acp::run_host(cfg, store, signer, std::io::stdout()))
+    let hosted = local.block_on(&rt, axel_acp::run_host(cfg, store, signer, std::io::stdout()));
+    if let super::inspector::Inspection::On(inspector) = inspection {
+        inspector.stop();
+    }
+    hosted
 }
 
 /// The environment the adapter and harness run with: credentials, PATH and
@@ -212,6 +231,15 @@ fn harness_env(thread_id: &str, session_id: &str, agent: &axel_store::Agent) -> 
     for k in ["REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_CLIENT", "REX_BIN_DIR", "REX_HOME", "REX_RUNTIME_DIR"] {
         // SAFETY: single-threaded here, before the tokio runtime starts.
         unsafe { std::env::remove_var(k) };
+    }
+    // A host started from inside another managed session (an agent summoning
+    // one) inherits that session's inspector URLs: they name a proxy that is
+    // not this session's and dies with the other one.  Only our own goes in.
+    for k in ["AXEL_CODEX_BASE_URL", "ANTHROPIC_BASE_URL"] {
+        if std::env::var(k).is_ok_and(|v| k == "AXEL_CODEX_BASE_URL" || super::inspector::is_proxy_url(&v)) {
+            // SAFETY: single-threaded here, before any runtime starts.
+            unsafe { std::env::remove_var(k) };
+        }
     }
     let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k == "PATH" || k == "HOME" || k.starts_with("ANTHROPIC_") || k.starts_with("OPENAI_") || k.starts_with("CODEX_") || k.starts_with("AXEL_")).collect();
     env.push(("AXEL_THREAD".into(), thread_id.to_string()));

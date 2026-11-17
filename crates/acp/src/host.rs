@@ -76,6 +76,22 @@ pub struct HostConfig {
     /// The agent's reasoning effort, applied once the session exists (or, for
     /// Axel's own adapters, as it is created). `None` sends nothing.
     pub effort: Option<axel_store::Effort>,
+    /// Told the number of each turn as it starts: the inspector proxy stamps
+    /// the model requests that follow with it.  `None` tells nobody.
+    pub on_turn: Option<TurnHook>,
+    /// Problems from before the host ran (the inspector proxy would not
+    /// start) for the thread: each becomes an item there once the host is up.
+    pub notices: Vec<String>,
+}
+
+/// A callback for each turn's number as it starts.
+#[derive(Clone)]
+pub struct TurnHook(pub Arc<dyn Fn(u32) + Send + Sync>);
+
+impl std::fmt::Debug for TurnHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TurnHook")
+    }
 }
 
 /// A stdio MCP server for `session/new` / `session/load`.
@@ -278,6 +294,9 @@ pub async fn run_host(
     let socket_path = cfg.socket_path.clone();
     let mut host = Host::new(cfg, store, signer, out, cmd);
     host.line(CYAN, "●", &t!("adapter: {command}", command = host.adapter.join(" ")));
+    for notice in std::mem::take(&mut host.cfg.notices) {
+        host.warn(&notice);
+    }
     let reason = serve_agent(&mut host, transport_, rx, &tx).await;
 
     socket_task.abort();
@@ -1697,6 +1716,10 @@ impl<W: Write> Host<W> {
         // Text Claude was streaming on its own between turns ends here.
         self.finalize_text();
         self.turn += 1;
+        if let Some(hook) = &self.cfg.on_turn {
+            // Turns count from 1 and never near u32::MAX in one session.
+            (hook.0)(u32::try_from(self.turn).expect("a turn number fits a u32"));
+        }
         self.turn_started = Instant::now();
         self.turn_user_text = text.clone();
         self.turn_from = from.clone();

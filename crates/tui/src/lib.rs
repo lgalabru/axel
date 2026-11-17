@@ -18,6 +18,7 @@ pub mod dashboard;
 pub mod diff;
 mod glue;
 pub mod inbox;
+pub mod inspect;
 pub mod input;
 pub mod launcher;
 pub mod manage;
@@ -56,6 +57,9 @@ pub enum Screen {
     Threads,
     /// Tokens spent, per agent: the corner pane.
     Usage,
+    /// The model requests the session proxies recorded: the token inspector.
+    /// Scoped to this thread when there is one.
+    Inspect(Option<String>),
 }
 
 /// A completed launcher form, ready for the CLI to turn into a thread.
@@ -135,6 +139,9 @@ pub struct Deps<'a> {
     pub open_controls: Option<&'a dyn Fn(&str)>,
     /// Open a floating terminal in the thread's workspace (Ctrl+T).
     pub open_terminal: Option<&'a OpenThreadFn<'a>>,
+    /// Open the token inspector outside this TUI (from the usage pane: a
+    /// large floating pane). `None`, or an error, opens it here instead.
+    pub open_inspector: Option<&'a dyn Fn() -> anyhow::Result<()>>,
 }
 
 /// Run the TUI until the user launches a thread, focuses one, or quits.

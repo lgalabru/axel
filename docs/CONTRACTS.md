@@ -315,7 +315,8 @@ usage extension or the prompt reply. Other currencies are not treated as USD.
 // Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
 pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
 
-pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort> }
+pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort>, pub on_turn: Option<TurnHook> /* told each turn number as it starts */, pub notices: Vec<String> /* Error items pushed on the thread once the host is up */ }
+pub struct TurnHook(pub std::sync::Arc<dyn Fn(u32) + Send + Sync>);
 pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_identity::Keypair, out: impl std::io::Write + Send) -> anyhow::Result<()>;
 //   - spawns adapter, initialize (clientCapabilities fs read/write = true, terminal = false), session/new {cwd, mcpServers: []} (or session/load when resume_native_id and agent supports loadSession)
 //   - stores native session id via store.update_session(harness_session_id)
@@ -516,3 +517,60 @@ pub enum Outcome { Launch(LaunchRequest), FocusSession(String), OpenLog(String /
 //            pub summon: &'a dyn Fn(&str /*thread_id*/, &str /*agent name*/, &str /*text*/) -> anyhow::Result<String /*session_id*/>
 ```
 Thread view: header (title · agents with state glyphs · env · tokens · $), timeline from `thread_items` + `turns` (turns used only when a session has no local items anywhere, not merely outside the latest 500-item window), folds for consecutive ToolCall items between prose, Space/→ expands a fold, Shift-Space folds all, `l` → `Outcome::OpenLog(session_id of item under cursor or latest live)`, pending Permission/Question rendered inline with options; ↑/↓ moves, Enter on a pending item picks the highlighted option → `send(Answer)`; composer at the bottom: Enter → `send(Prompt)` to the thread's latest live managed session, or `summon()` when text starts with `@name` (or when no live session exists: summon the thread's last agent); Esc → Dashboard. Dashboard: Enter on a thread → `Screen::Thread`. Poll every 300 ms while a session is live.
+
+## Token inspector (ADR 0011)
+
+### axel-store additions (local-only table `model_requests`, migration v11)
+
+```rust
+pub enum ModelProvider { Anthropic, OpenAi, ChatGpt }                 // as_str/parse: "anthropic" | "openai" | "chatgpt"
+pub enum RequestOutcome { InFlight, Completed, HttpError, Failed, Cancelled }
+pub enum ContextKind { System, ToolDefinition, UserText, AssistantText, ToolCall, ToolResult, Image, Reasoning, Other }
+pub struct ContextPart { pub kind: ContextKind, pub label: String /* tool name for tool parts */, pub bytes: u64, pub count: u32 }
+pub struct ContextBreakdown { pub parts: Vec<ContextPart> /* largest first, ≤ CONTEXT_PARTS_MAX = 64 */, pub messages: u32, pub tools: u32 }
+pub struct ModelRequest {
+    pub id: String, pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub turn: Option<u32>,
+    pub provider: ModelProvider, pub endpoint: String /* path, no secret prefix, no query */, pub model: Option<String>,
+    pub started_at_ms: i64, pub first_byte_ms: Option<u32>, pub duration_ms: Option<u32>, pub http_status: Option<u16>,
+    pub streamed: bool, pub outcome: RequestOutcome,
+    pub input_tokens: Option<u64> /* uncached */, pub output_tokens: Option<u64>, pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>, pub reasoning_tokens: Option<u64>,
+    pub request_bytes: u64, pub response_bytes: u64, pub stop_reason: Option<String>, pub error: Option<String> /* ≤ 500 bytes, never a body or header */,
+    pub breakdown: Option<ContextBreakdown>,
+}
+impl ModelRequest { pub fn context_tokens(&self) -> u64; pub fn cost_usd_est(&self) -> f64; }
+pub struct ModelRequestFilter { pub thread_id: Option<String>, pub session_id: Option<String>, pub agent_pubkey: Option<String>, pub since_ms: i64, pub limit: usize /* ≤ MODEL_REQUESTS_LIMIT_MAX = 5000 */ }
+impl Store {
+    pub fn record_model_request(&self, r: &ModelRequest) -> Result<(), Error>;   // upsert by id: at start (InFlight), again at the end
+    pub fn model_request(&self, id: &str) -> Result<Option<ModelRequest>, Error>;
+    pub fn model_requests(&self, f: &ModelRequestFilter) -> Result<Vec<ModelRequest>, Error>;   // newest first
+    pub fn prune_model_requests(&self, before_ms: i64) -> Result<usize, Error>;
+}
+```
+
+### axel-proxy (new crate; the per-session proxy)
+
+```rust
+pub enum OpenAiUpstream { ApiKey /* https://api.openai.com/v1 */, ChatGpt /* https://chatgpt.com/backend-api/codex */ }
+pub struct ProxyConfig {
+    pub session_id: String, pub thread_id: String, pub agent_pubkey: String,
+    pub anthropic_upstream: Option<url-ish String> /* None: https://api.anthropic.com; Some: the user's own ANTHROPIC_BASE_URL, https only */,
+    pub openai_upstream: OpenAiUpstream,
+}
+pub trait RequestSink: Send + Sync + 'static { fn record(&self, request: &axel_store::ModelRequest); }   // called at start and at end of each request; must not block for long
+pub struct Proxy;   // dropping it (or shutdown) stops the listener
+impl Proxy {
+    pub async fn start(config: ProxyConfig, sink: std::sync::Arc<dyn RequestSink>) -> anyhow::Result<Proxy>;
+    pub fn anthropic_base_url(&self) -> String;   // http://127.0.0.1:<port>/<secret>/anthropic   → ANTHROPIC_BASE_URL
+    pub fn openai_base_url(&self) -> String;      // http://127.0.0.1:<port>/<secret>/openai      → Codex custom provider base_url
+    pub fn set_turn(&self, turn: Option<u32>);
+    pub async fn shutdown(self);
+}
+```
+`Store::thread_inspected(thread_id) -> Result<bool>`, `Store::set_thread_inspected(thread_id, on: bool)`, `Store::inspected_threads() -> Result<Vec<String>>` (≤ `INSPECTED_THREADS_MAX` = 1000; local-only table `inspected_threads`; a thread never turned on is off). `axel inspect on|off|status [--thread]` sets and reads it; `r` in the pane toggles the scoped thread.
+Session host: proxy only when the session's thread is inspected (or `AXEL_INSPECT=1`; `AXEL_INSPECT=0` forces it off); Claude gets `ANTHROPIC_BASE_URL`; the Codex adapter gets `AXEL_CODEX_BASE_URL` and adds `-c model_provider=axel -c model_providers.axel.{name,base_url,wire_api="responses",requires_openai_auth=true}` to `codex app-server`. A proxy that can't start leaves the session direct, with a notice on the thread.
+The host runs the proxy on its own two-thread runtime and feeds `set_turn` through `HostConfig::on_turn`; rows go to the store through a dedicated writer thread (its own connection) behind a bounded channel that drops rows when full. A user's own `ANTHROPIC_BASE_URL` becomes the Anthropic upstream (https only); an inherited proxy URL from a parent session is dropped. Allowlist: `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` (Anthropic), `/responses`, `/responses/compact`, `/models` (OpenAI). `axel gc` prunes rows older than 30 days.
+
+### axel (bin) and axel-tui additions
+
+`axel inspect` toggles a large floating Rex pane (`axel ui --screen inspect`; outside Rex, inline). `Screen::Inspect` reads `model_requests`.

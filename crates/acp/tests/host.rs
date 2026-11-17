@@ -90,6 +90,8 @@ fn fixture(mode: RuntimeMode, harness: Harness, initial_prompt: Option<&str>) ->
         initial_from: None,
         reply_with: None,
         effort: None,
+        on_turn: None,
+        notices: Vec::new(),
         mcp_servers: Vec::new(),
         session_meta: None,
         model: None,
@@ -356,6 +358,23 @@ fn supervised_session_asks_streams_and_records_turns() {
     assert!(pane.contains("turn 1 done · 1 tools"), "{pane}");
     assert!(pane.contains("thinking"), "{pane}");
     assert!(pane.contains("session ended: stopped"), "{pane}");
+}
+
+#[test]
+fn turns_reach_the_turn_hook_and_notices_reach_the_thread() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("go"));
+    let turns: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let seen = turns.clone();
+    f.cfg.on_turn = Some(axel_acp::TurnHook(Arc::new(move |turn| seen.lock().unwrap().push(turn))));
+    f.cfg.notices = vec!["the inspector proxy could not start".into()];
+    let host = spawn_host(&f);
+    wait_until("turn recorded", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    assert_eq!(*turns.lock().unwrap(), [1]);
+    let items = f.store.items(&f.session_id, 0, 100).unwrap();
+    let notice = items.iter().find(|i| i.kind == ItemKind::Error).expect("the notice is on the thread");
+    assert_eq!(notice.content["message"], "the inspector proxy could not start");
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
 }
 
 #[test]

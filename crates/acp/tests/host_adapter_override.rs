@@ -82,6 +82,8 @@ fn host(harness: Harness, effort: Effort, agent_env: &[(&str, &str)]) -> Hosted 
         initial_from: None,
         reply_with: None,
         effort: Some(effort),
+        on_turn: None,
+        notices: Vec::new(),
         mcp_servers: Vec::new(),
         session_meta: None,
         model: None,

@@ -7,6 +7,7 @@ pub mod launcher_view;
 pub mod picker_view;
 pub mod markdown;
 pub mod thread_view;
+pub mod inspect_view;
 pub mod usage_view;
 
 use ratatui::layout::Rect;

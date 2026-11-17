@@ -20,6 +20,7 @@ axel-rex.workspace = true
 axel-tui.workspace = true
 axel-acp.workspace = true
 axel-mcp.workspace = true
+axel-proxy.workspace = true
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

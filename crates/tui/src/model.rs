@@ -385,3 +385,19 @@ pub struct ThreadSpend {
     pub last_day: axel_store::UsageTotals,
     pub total: axel_store::UsageTotals,
 }
+
+/// What the token inspector shows: the model requests of its scope over the
+/// last 24 hours, and the names to show them with.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InspectData {
+    /// Newest first.
+    pub requests: Vec<axel_store::ModelRequest>,
+    /// Agent key → name and colour.
+    pub agents: std::collections::HashMap<String, (String, Option<AgentColor>)>,
+    /// Thread id → title.
+    pub threads: std::collections::HashMap<String, String>,
+    /// When it was read, Unix milliseconds: how long in-flight requests have run.
+    pub now_ms: i64,
+    /// Threads whose new managed sessions are recorded (`axel inspect on`).
+    pub inspected: std::collections::HashSet<String>,
+}

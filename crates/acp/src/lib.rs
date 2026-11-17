@@ -25,4 +25,4 @@ pub mod usage;
 mod transport;
 
 pub use adapter::{adapter_command, env_var_name, shell_split};
-pub use host::{HostConfig, McpStdio, resolve_model, run_host};
+pub use host::{HostConfig, McpStdio, TurnHook, resolve_model, run_host};

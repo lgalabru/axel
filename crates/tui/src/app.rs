@@ -16,10 +16,11 @@ use crossterm::execute;
 use crate::dashboard::{DashAction, Dashboard};
 use crate::glue;
 use crate::inbox::{Inbox, InboxAction};
+use crate::inspect::{InspectAction, Inspector};
 use crate::launcher::{Action, Launcher, Step, Workspace};
 use crate::picker::{PickAction, ThreadPicker};
 use crate::thread::{ThreadAction, ThreadView};
-use crate::util::now_secs;
+use crate::util::{now_ms, now_secs};
 use crate::view;
 use crate::{Deps, LaunchRequest, Outcome, Screen};
 
@@ -79,6 +80,8 @@ struct App<'a> {
     thread: Option<ThreadView>,
     picker: ThreadPicker,
     usage: crate::model::UsageData,
+    /// The token inspector, once opened.
+    inspect: Option<Inspector>,
     /// Whether this terminal has focus (from focus reports).  The picker
     /// starts without it: the prompt above is focused first.
     focused: bool,
@@ -111,6 +114,7 @@ impl<'a> App<'a> {
             thread: None,
             picker: ThreadPicker { can_manage: deps.manage_thread.is_some(), ..Default::default() },
             usage: Default::default(),
+            inspect: None,
             focused,
             prompt_first,
             prompt_size: None,
@@ -154,6 +158,12 @@ impl<'a> App<'a> {
                     // Start empty on a load error: the refresh below shows it in the status line.
                     let data = glue::load_thread(self.deps.store, self.owner_pk, tid, now_secs()).unwrap_or_default();
                     self.thread = Some(ThreadView::new(tid, data));
+                }
+            }
+            Screen::Inspect(home) => {
+                let same = self.inspect.as_ref().is_some_and(|i| &i.home_thread == home);
+                if !same {
+                    self.inspect = Some(Inspector::new(home.clone(), Default::default()));
                 }
             }
             _ => {}
@@ -207,6 +217,19 @@ impl<'a> App<'a> {
                 Ok(u) => self.usage = u,
                 Err(e) => eprintln!("axel: refresh failed: {e}"),
             },
+            Screen::Inspect(_) => {
+                if let Some(i) = self.inspect.as_mut() {
+                    let now = now_ms();
+                    let scope_thread = match &i.scope {
+                        crate::inspect::Scope::Thread(t) => Some(t.as_str()),
+                        _ => None,
+                    };
+                    match glue::load_inspect(self.deps.store, &i.query(now), scope_thread, now) {
+                        Ok(d) => i.set_data(d),
+                        Err(e) => eprintln!("axel: refresh failed: {e}"),
+                    }
+                }
+            }
             Screen::Launcher => {}
         }
     }
@@ -257,6 +280,11 @@ impl<'a> App<'a> {
             Screen::Inbox => view::inbox_view::render(frame, &self.inbox, now),
             Screen::Threads => view::picker_view::render(frame, &self.picker, self.focused, now),
             Screen::Usage => view::usage_view::render(frame, &self.usage, frame.area()),
+            Screen::Inspect(_) => {
+                if let Some(i) = &self.inspect {
+                    view::inspect_view::render(frame, i, frame.area());
+                }
+            }
             Screen::Thread(_) => {
                 if let Some(t) = &self.thread {
                     view::thread_view::render(frame, t, now);
@@ -314,8 +342,36 @@ impl<'a> App<'a> {
                 let action = self.picker.handle_key(key);
                 self.on_picker(action)
             }
-            // Nothing to pick: Esc or q closes it.
-            Screen::Usage => matches!(key.code, KeyCode::Esc | KeyCode::Char('q')).then_some(Outcome::Quit),
+            // Nothing to pick: Esc or q closes it; i opens the token inspector.
+            Screen::Usage => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Outcome::Quit),
+                KeyCode::Char('i') => {
+                    let opened = self.deps.open_inspector.is_some_and(|f| f().is_ok());
+                    if !opened {
+                        self.open(Screen::Inspect(None));
+                    }
+                    None
+                }
+                _ => None,
+            },
+            Screen::Inspect(_) => {
+                let action = self.inspect.as_mut().map_or(InspectAction::Quit, |i| i.handle_key(key));
+                match action {
+                    InspectAction::None => None,
+                    InspectAction::Quit => Some(Outcome::Quit),
+                    InspectAction::Reload => {
+                        self.refresh(true);
+                        None
+                    }
+                    InspectAction::SetInspected(thread, on) => {
+                        if let Err(e) = self.deps.store.set_thread_inspected(&thread, on) {
+                            eprintln!("axel: inspect: {e}");
+                        }
+                        self.refresh(true);
+                        None
+                    }
+                }
+            }
         }
     }
 

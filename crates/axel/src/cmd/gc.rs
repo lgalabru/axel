@@ -1,7 +1,8 @@
 //! `axel gc`: prune old turn checkpoints.  Checkpoint refs keep objects alive,
 //! so they go once a thread is archived (after a week) or a turn is old (a
 //! month, keeping the last turns of each session).  Git's own gc then
-//! reclaims the objects.  Runs on demand, and after `axel thread archive`.
+//! reclaims the objects.  The token inspector's request rows go after 30
+//! days.  Runs on demand, and after `axel thread archive`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -190,12 +191,49 @@ pub fn run(ctx: &Ctx, quiet: bool) -> Result<usize> {
         let message = if total == 1 { t!("1 checkpoint ref pruned").to_string() } else { t!("{n} checkpoint refs pruned", n = total) };
         println!("{message}");
     }
+    let requests = prune_model_requests(store, chrono::Utc::now().timestamp_millis())?;
+    if !quiet && requests > 0 {
+        println!("{}", t!("{n} inspector request record(s) pruned", n = requests));
+    }
     Ok(total)
+}
+
+/// The token inspector's request rows are kept this long (ADR 0011).
+const MODEL_REQUESTS_KEEP_DAYS: i64 = 30;
+
+/// Drop inspector rows older than [`MODEL_REQUESTS_KEEP_DAYS`] before `now_ms`.
+fn prune_model_requests(store: &axel_store::Store, now_ms: i64) -> Result<usize> {
+    let before_ms = now_ms - MODEL_REQUESTS_KEEP_DAYS * 24 * 60 * 60 * 1000;
+    assert!(before_ms < now_ms);
+    Ok(store.prune_model_requests(before_ms)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_rows_older_than_thirty_days_are_pruned() {
+        let store = axel_store::Store::open_memory().unwrap();
+        let day_ms = 24 * 60 * 60 * 1000;
+        let now_ms = 100 * day_ms;
+        for (id, age_days) in [("old", 31), ("edge", 29), ("new", 0)] {
+            let row: axel_store::ModelRequest = serde_json::from_value(serde_json::json!({
+                "id": id, "session_id": "S", "thread_id": "T", "agent_pubkey": "P", "turn": null,
+                "provider": "anthropic", "endpoint": "/v1/messages", "model": null,
+                "started_at_ms": now_ms - age_days * day_ms, "first_byte_ms": null, "duration_ms": null,
+                "http_status": null, "streamed": false, "outcome": "in_flight", "input_tokens": null,
+                "output_tokens": null, "cache_read_tokens": null, "cache_write_tokens": null,
+                "reasoning_tokens": null, "request_bytes": 0, "response_bytes": 0, "stop_reason": null,
+                "error": null, "breakdown": null
+            }))
+            .unwrap();
+            store.record_model_request(&row).unwrap();
+        }
+        assert_eq!(prune_model_requests(&store, now_ms).unwrap(), 1);
+        assert!(store.model_request("old").unwrap().is_none());
+        assert!(store.model_request("edge").unwrap().is_some());
+    }
 
     fn r(name: &str, created: i64) -> CheckpointRef {
         parse_ref(&format!("{name}\t{created}")).unwrap()

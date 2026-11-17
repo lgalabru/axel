@@ -71,6 +71,11 @@ pub fn now_secs() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Current Unix time in milliseconds.
+pub fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Case-insensitive fuzzy match: every character of `needle` must appear in
 /// `haystack` in order (not necessarily adjacent). An empty needle matches.
 /// Returns a score (higher is better) or `None` when it does not match.

@@ -49,6 +49,72 @@ pub struct ManageData {
     pub hosts: Vec<String>,
     /// What just happened, for the footer.
     pub note: Option<String>,
+    /// The token inspector, for this thread.
+    pub inspect: InspectOverview,
+}
+
+/// Minutes of requests the overview adds up, and its chart spans.
+pub const INSPECT_MINUTES: usize = 60;
+/// How often the overview reads the store again while it records.
+const INSPECT_REFRESH_MS: u64 = 1_000;
+
+/// The token inspector for this thread (ADR 0011): whether it records, and
+/// when it does, its last [`INSPECT_MINUTES`] minutes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InspectOverview {
+    pub on: bool,
+    pub totals: crate::inspect::Totals,
+    /// Context tokens sent a minute, oldest first, [`INSPECT_MINUTES`] long.
+    pub spark: Vec<i64>,
+    pub latest: Option<LatestRequest>,
+}
+
+/// The newest request, in a line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LatestRequest {
+    pub agent: String,
+    pub model: String,
+    pub context_tokens: u64,
+    /// `context_tokens` is guessed from the request's size: the provider
+    /// hasn't said yet (still running) or didn't.
+    pub estimated: bool,
+    /// What took the most of its context, and its share.
+    pub largest: Option<(String, u64)>,
+    pub age_secs: i64,
+    pub in_flight: bool,
+}
+
+/// The overview from `requests` (newest first) of the last
+/// [`INSPECT_MINUTES`] minutes before `now_ms`; `agent_name` names a pubkey.
+pub fn inspect_overview(on: bool, requests: &[axel_store::ModelRequest], agent_name: &dyn Fn(&str) -> String, now_ms: i64) -> InspectOverview {
+    let window_ms = i64::try_from(INSPECT_MINUTES).expect("a small constant") * 60_000;
+    let since_ms = now_ms.saturating_sub(window_ms);
+    let recent: Vec<&axel_store::ModelRequest> = requests.iter().filter(|r| r.started_at_ms >= since_ms).collect();
+    let mut spark = vec![0i64; INSPECT_MINUTES];
+    for r in &recent {
+        let minute = usize::try_from((r.started_at_ms - since_ms) / 60_000).unwrap_or(0).min(INSPECT_MINUTES - 1);
+        spark[minute] = spark[minute].saturating_add(i64::try_from(r.context_tokens()).unwrap_or(i64::MAX));
+    }
+    let latest = recent.first().map(|r| {
+        let billed = r.context_tokens();
+        let est = r.breakdown.as_ref().map(|b| crate::inspect::estimate(b, billed));
+        // Before usage arrives the breakdown's size is the best guess.
+        let (context_tokens, estimated) = match &est {
+            Some(e) if billed == 0 => (e.tokens, true),
+            _ => (billed, false),
+        };
+        let largest = est.as_ref().and_then(|e| crate::inspect::largest(e).map(|(bar, pct)| (crate::view::inspect_view::largest_name(&bar), pct)));
+        LatestRequest {
+            agent: agent_name(&r.agent_pubkey),
+            model: r.model.as_deref().map(crate::view::inspect_view::short_model).unwrap_or_default(),
+            context_tokens,
+            estimated,
+            largest,
+            age_secs: now_ms.saturating_sub(r.started_at_ms) / 1000,
+            in_flight: r.outcome == axel_store::RequestOutcome::InFlight,
+        }
+    });
+    InspectOverview { on, totals: crate::inspect::Totals::of(recent.iter().copied()), spark, latest }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -62,6 +128,8 @@ pub struct SessionRow {
     pub live: bool,
     /// Where it runs when not here.
     pub host: Option<String>,
+    /// Axel drives it over ACP (the inspector can reach it), rather than a harness in a pane.
+    pub managed: bool,
     pub turns: i64,
     pub tool_calls: i64,
     pub tokens: i64,
@@ -82,6 +150,10 @@ pub enum Action {
     Stop,
     StopAgent,
     Rename,
+    /// Turn the token inspector on or off for this thread.
+    Inspect,
+    /// Open the token inspector on this thread's requests.
+    Requests,
     /// Everything ends, nobody restarts: the next message starts from scratch.
     HardReset,
 }
@@ -98,6 +170,8 @@ impl Action {
             Action::Stop => 'x',
             Action::StopAgent => 't',
             Action::Rename => 'n',
+            Action::Inspect => 'i',
+            Action::Requests => 'v',
             Action::HardReset => 'h',
         }
     }
@@ -112,6 +186,8 @@ impl Action {
             Action::Stop => t!("Stop all"),
             Action::StopAgent => t!("Agents"),
             Action::Rename => t!("Rename"),
+            Action::Inspect => t!("Inspector"),
+            Action::Requests => t!("Requests"),
             Action::HardReset => t!("Hard reset"),
         }
     }
@@ -140,6 +216,13 @@ pub enum Outcome {
     ResumeAgent { agent: String },
     RemoveAgent { agent: String },
     Rename(String),
+    /// Record this thread's new managed sessions through the inspector
+    /// (`on`), or stop; with `restart`, its idle managed sessions end too, so
+    /// they come back (their conversation kept) on the next message, with the
+    /// switch applied.
+    SetInspected { on: bool, restart: bool },
+    /// Open the token inspector on this thread.
+    OpenInspector,
     /// End every session and relaunch the panes; no agent, no recap.
     HardReset,
 }
@@ -186,6 +269,10 @@ impl ManageView {
         if !self.data.agents.is_empty() { out.push(Action::StopAgent); }
         if self.data.sessions.iter().any(|s| s.live) { out.push(Action::Stop); }
         out.push(Action::Rename);
+        out.push(Action::Inspect);
+        if self.data.inspect.on || self.data.inspect.totals.requests > 0 {
+            out.push(Action::Requests);
+        }
         out.push(Action::HardReset);
         out
     }
@@ -203,8 +290,24 @@ impl ManageView {
             Action::Stop if self.live_count() == 1 => t!("end 1 live session").into(),
             Action::Stop => t!("end {n} live sessions", n = self.live_count()),
             Action::Rename => t!("change the title (the window follows)").into(),
+            Action::Inspect if self.data.inspect.on => t!("on: new sessions here are recorded; turn it off").into(),
+            Action::Inspect => t!("off: record what each model request costs, and why").into(),
+            Action::Requests => t!("each request: its cost and what filled its context").into(),
             Action::HardReset => t!("end every session and relaunch the panes; no agent, no recap: the next message starts from scratch").into(),
         }
+    }
+
+    /// Agents whose session here could restart now to pick up the
+    /// inspector's switch: live, managed, on this machine, between turns.
+    pub fn restartable(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.data.sessions {
+            let between_turns = matches!(s.state.as_str(), "idle" | "done");
+            if s.live && s.managed && s.host.is_none() && between_turns && !out.contains(&s.agent) {
+                out.push(s.agent.clone());
+            }
+        }
+        out
     }
 
     fn live_count(&self) -> usize {
@@ -249,6 +352,12 @@ impl ManageView {
                     self.step = Step::Menu;
                     Some(outcome)
                 }
+                // "No" to the restart still flips the switch, for new sessions.
+                KeyCode::Char('n') if matches!(outcome, Outcome::SetInspected { .. }) => {
+                    self.step = Step::Menu;
+                    let Outcome::SetInspected { on, .. } = outcome else { unreachable!("matched above") };
+                    Some(Outcome::SetInspected { on, restart: false })
+                }
                 KeyCode::Esc | KeyCode::Char('n') => {
                     self.step = Step::Menu;
                     None
@@ -267,12 +376,12 @@ impl ManageView {
             KeyCode::Down | KeyCode::Char('j') => self.cursor = (self.cursor + 1).min(actions.len().saturating_sub(1)),
             KeyCode::Enter => {
                 let action = actions.get(self.cursor).copied()?;
-                self.start(action);
+                return self.start(action);
             }
             KeyCode::Char(c) => {
                 // Each row has a key of its own, shown beside it.
                 if let Some(a) = actions.iter().find(|a| a.key() == c.to_ascii_lowercase()) {
-                    self.start(*a);
+                    return self.start(*a);
                 }
             }
             _ => {}
@@ -339,8 +448,19 @@ impl ManageView {
         None
     }
 
-    fn start(&mut self, action: Action) {
+    /// Begin `action`: a step to go through, or (for the switches) an outcome at once.
+    fn start(&mut self, action: Action) -> Option<Outcome> {
         match action {
+            // Sessions already running keep how they started: offer to restart
+            // the idle ones; with none, nothing to confirm.
+            Action::Inspect => {
+                let on = !self.data.inspect.on;
+                if self.restartable().is_empty() {
+                    return Some(Outcome::SetInspected { on, restart: false });
+                }
+                self.step = Step::Confirm(Outcome::SetInspected { on, restart: true });
+            }
+            Action::Requests => return Some(Outcome::OpenInspector),
             Action::Reset | Action::Move | Action::StopAgent => {
                 let candidates = self.data.agents.clone();
                 if candidates.len() > 1 {
@@ -356,6 +476,7 @@ impl ManageView {
             Action::Rename => self.step = Step::Rename(self.data.title.clone()),
             Action::HardReset => self.step = Step::Confirm(Outcome::HardReset),
         }
+        None
     }
 
     fn after_agent(&mut self, action: Action, agent: String) {
@@ -392,6 +513,9 @@ pub fn render(frame: &mut Frame, v: &ManageView) {
     rows.push(Line::from(Span::styled("─".repeat(width), theme::dim())));
     render_sessions(&mut rows, d, width);
     render_totals(&mut rows, d, width);
+    if d.inspect.on {
+        render_inspect(&mut rows, &d.inspect, width);
+    }
     rows.push(Line::from(Span::styled("─".repeat(width), theme::dim())));
     render_step(&mut rows, v, width);
     // The footer owns its row, whatever the menu left there.
@@ -548,6 +672,47 @@ fn render_totals(rows: &mut Rows, d: &ManageData, width: usize) {
     rows.push(Line::from(spans));
 }
 
+/// The inspector's last hour: totals and a chart of context sent, then the
+/// newest request and what filled it.
+fn render_inspect(rows: &mut Rows, o: &InspectOverview, width: usize) {
+    let t = &o.totals;
+    let live = if t.in_flight > 0 { Span::styled(format!("● {} ", t!("live")), theme::accent()) } else { Span::styled("○ ", theme::dim()) };
+    if t.requests == 0 {
+        rows.push(Line::from(vec![
+            live,
+            Span::styled(t!("inspector"), theme::bold()),
+            Span::styled(format!("  {}", t!("on · nothing in the last hour: this thread's new managed sessions are recorded")), theme::dim()),
+        ]));
+        return;
+    }
+    let requests = if t.requests == 1 { t!("1 request").to_string() } else { t!("{n} requests", n = t.requests) };
+    let cached = t.cache_hit_pct().map(|p| format!(" · {}", t!("{pct}% cached", pct = p))).unwrap_or_default();
+    let errors = if t.errors > 0 { format!(" · {}", t!("{n} failed", n = t.errors)) } else { String::new() };
+    let numbers = format!(
+        "{requests} · {} · ~${:.2}{cached}{errors}  ",
+        t!("{n} context", n = format_tokens(i64::try_from(t.context_tokens).unwrap_or(i64::MAX))),
+        t.cost_usd
+    );
+    let head = Line::from(vec![live.clone(), Span::styled(t!("inspector"), theme::bold()), Span::raw("  ")]);
+    let room = width.saturating_sub(head.width() + text_width(&numbers));
+    let spark_width = room.clamp(0, 30);
+    let mut spans = head.spans;
+    spans.push(Span::styled(numbers, if t.errors > 0 { theme::danger() } else { theme::dim() }));
+    if spark_width >= 8 {
+        let peak = crate::view::chart::peak(&o.spark, spark_width);
+        spans.extend(crate::view::chart::braille(&o.spark, spark_width, peak, theme::accent()));
+    }
+    rows.push(Line::from(spans));
+    if let Some(l) = &o.latest {
+        let when = if l.in_flight { t!("running").to_string() } else { t!("{age} ago", age = duration_label(l.age_secs)) };
+        let largest = l.largest.as_ref().map(|(what, pct)| format!(" · {}", t!("{part}: {pct}%", part = what, pct = pct))).unwrap_or_default();
+        let size = format_tokens(i64::try_from(l.context_tokens).unwrap_or(i64::MAX));
+        let size = if l.estimated { format!("~{size}") } else { size };
+        let text = format!("  {} {} · {} · {}{largest} · {when}", t!("latest"), l.agent, l.model, t!("{n} context", n = size));
+        rows.push(Line::from(Span::styled(ellipsize(&text, width), theme::dim())));
+    }
+}
+
 /// The menu, or the step in progress.
 fn render_step(rows: &mut Rows, v: &ManageView, width: usize) {
     let pick = |sel: bool, text: String| Line::from(Span::styled(format!("{} {text}", if sel { "›" } else { " " }), if sel { theme::accent_bold() } else { Style::default() }));
@@ -602,7 +767,7 @@ fn footer_line(v: &ManageView) -> Line<'static> {
     match &v.step {
         Step::Confirm(o) => {
             let style = if matches!(o, Outcome::HardReset) { theme::danger().add_modifier(ratatui::style::Modifier::BOLD) } else { theme::accent_bold() };
-            Line::from(Span::styled(format!("{}  y/n", confirm_question(o)), style))
+            Line::from(Span::styled(format!("{}  y/n", confirm_question(o, &v.restartable().join(", "))), style))
         }
         Step::Rename(text) => Line::from(vec![Span::styled(format!("{} ", t!("title:")), theme::accent()), Span::raw(text.clone()), Span::styled("▏", theme::accent())]),
         Step::PickAgent { .. } | Step::PickHost { .. } | Step::AgentActions { .. } => Line::from(Span::styled(t!("↑↓ choose  ⏎ pick  Esc back"), theme::dim())),
@@ -613,7 +778,8 @@ fn footer_line(v: &ManageView) -> Line<'static> {
     }
 }
 
-fn confirm_question(o: &Outcome) -> String {
+/// The question for `o`; `agents` are the ones a restart would restart.
+fn confirm_question(o: &Outcome, agents: &str) -> String {
     match o {
         Outcome::Reset { agent } => t!("reset: end the thread's sessions and start {agent} fresh with a recap?", agent = agent),
         Outcome::Move { agent, host } => t!("move {agent} to {host}?", agent = agent, host = host),
@@ -627,16 +793,27 @@ fn confirm_question(o: &Outcome) -> String {
         Outcome::RemoveAgent { agent } => t!("stop {agent} and remove it from this thread? Its history is kept.", agent = agent),
         Outcome::Rename(title) => t!("rename to {title}?", title = title),
         Outcome::HardReset => t!("hard reset: end every session, relaunch the panes, start nobody; the conversation is not carried over?").into(),
-        Outcome::Close => String::new(),
+        Outcome::SetInspected { on: true, .. } => t!("record this thread: restart {agents} now so it's recorded too? Its conversation continues on your next message (n: only new sessions)", agents = agents),
+        Outcome::SetInspected { on: false, .. } => t!("stop recording: restart {agents} now so it stops too? Its conversation continues on your next message (n: only new sessions)", agents = agents),
+        Outcome::Close | Outcome::OpenInspector => String::new(),
     }
 }
 
-/// Run the pane until it has something for the caller.
-pub fn run_manage(data: ManageData) -> Result<Outcome> {
+/// Run the pane until it has something for the caller.  While the
+/// inspector records, `refresh` reads its overview again about once a second
+/// (`None` keeps the last one).
+pub fn run_manage(data: ManageData, refresh: &mut dyn FnMut() -> Option<InspectOverview>) -> Result<Outcome> {
     let mut v = ManageView::new(data);
     let mut terminal = ratatui::init();
+    let mut refreshed = std::time::Instant::now();
     let result = (|| -> Result<Outcome> {
         loop {
+            if v.data.inspect.on && refreshed.elapsed() >= Duration::from_millis(INSPECT_REFRESH_MS) {
+                refreshed = std::time::Instant::now();
+                if let Some(o) = refresh() {
+                    v.data.inspect = o;
+                }
+            }
             terminal.draw(|f| render(f, &v))?;
             if event::poll(POLL)?
                 && let Event::Key(key) = event::read()?
@@ -680,18 +857,26 @@ mod tests {
             agents: vec!["opus".into(), "fable".into()],
             hosts: vec!["mini".into()],
             note: None,
+            inspect: InspectOverview::default(),
         }
+    }
+
+    /// Requests a minute apart, newest first, the newest `age_ms` old.
+    fn requests(now_ms: i64) -> Vec<axel_store::ModelRequest> {
+        let mut all = crate::inspect::fixtures::requests(now_ms);
+        all.sort_by_key(|r| std::cmp::Reverse(r.started_at_ms));
+        all
     }
 
     #[test]
     fn the_menu_offers_what_fits_the_thread() {
         let v = ManageView::new(data());
-        assert_eq!(v.actions(), vec![Action::Reset, Action::Move, Action::Settle, Action::Archive, Action::StopAgent, Action::Stop, Action::Rename, Action::HardReset]);
+        assert_eq!(v.actions(), vec![Action::Reset, Action::Move, Action::Settle, Action::Archive, Action::StopAgent, Action::Stop, Action::Rename, Action::Inspect, Action::HardReset]);
         let mut done = data();
         done.state = "done".into();
         done.hosts.clear();
         done.sessions.iter_mut().for_each(|s| s.live = false);
-        assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::StopAgent, Action::Rename, Action::HardReset], "no hosts: no move; nothing live: no stop");
+        assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::StopAgent, Action::Rename, Action::Inspect, Action::HardReset], "no hosts: no move; nothing live: no stop");
     }
 
     #[test]
@@ -749,22 +934,82 @@ mod tests {
     #[test]
     fn the_pane_draws_the_sessions_and_the_menu() {
         let v = ManageView::new(data());
-        let mut term = Terminal::new(TestBackend::new(90, 17)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(90, 18)).unwrap();
         term.draw(|f| render(f, &v)).unwrap();
-        let text: Vec<String> = (0..17).map(|y| (0..90).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
+        let text: Vec<String> = (0..18).map(|y| (0..90).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert!(text[0].starts_with("Ship it") && text[0].ends_with("open · 2d · 2 sessions"), "{:?}", text[0]);
         assert!(text[3].contains("state") && text[3].contains("tokens") && text[3].contains("ctx") && text[3].contains("for"), "{:?}", text[3]);
         assert!(text[4].starts_with("opus") && text[4].contains("claude/opus") && text[4].contains("idle") && text[4].contains("34M") && text[4].contains("62%") && text[4].contains("5h 12m"), "{:?}", text[4]);
         assert!(text[6].starts_with("37M tokens") && text[6].contains("16 turns") && text[6].contains("9 files changed"), "{:?}", text[6]);
         assert!(text[8].starts_with("› r Reset") && text[9].starts_with("  m Move"), "{:?}", &text[8..10]);
-        assert!(text[15].starts_with("  h Hard reset"), "last, apart: {:?}", text[15]);
-        let red = term.backend().buffer()[(4, 15)].style().fg;
+        assert!(text[15].starts_with("  i Inspector") && text[15].contains("off: record what each model request costs"), "{:?}", text[15]);
+        assert!(text[16].starts_with("  h Hard reset"), "last, apart: {:?}", text[16]);
+        let red = term.backend().buffer()[(4, 16)].style().fg;
         assert_eq!(red, Some(theme::DANGER), "drawn in red");
-        assert_eq!(text[16], "↑↓ choose  ⏎ go  Esc close");
+        assert_eq!(text[17], "↑↓ choose  ⏎ go  Esc close");
         // Narrow: the rightmost columns go first.
         let mut term = Terminal::new(TestBackend::new(44, 17)).unwrap();
         term.draw(|f| render(f, &v)).unwrap();
         let row: String = (0..44).map(|x| term.backend().buffer()[(x, 3)].symbol().to_string()).collect();
         assert!(row.contains("state") && row.contains("turns") && !row.contains("ctx"), "{row:?}");
+    }
+
+    #[test]
+    fn i_turns_the_inspector_on_offering_to_restart_idle_sessions_and_v_opens_its_requests() {
+        let mut d = data();
+        d.sessions[0].managed = true;
+        let mut v = ManageView::new(d);
+        assert!(!v.actions().contains(&Action::Requests), "nothing to look at while it's off and empty");
+        assert_eq!(v.restartable(), ["opus"], "live, managed, here and idle; fable has ended");
+        assert_eq!(v.handle_key(key(KeyCode::Char('i'))), None, "asks first: opus runs as it started");
+        assert_eq!(v.step, Step::Confirm(Outcome::SetInspected { on: true, restart: true }));
+        assert_eq!(v.handle_key(key(KeyCode::Char('n'))), Some(Outcome::SetInspected { on: true, restart: false }), "no restart, still on");
+        v.data.inspect.on = true;
+        v.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::SetInspected { on: false, restart: true }));
+        // Working, remote or in a pane: nothing to restart, nothing to ask.
+        v.data.sessions[0].state = "working".into();
+        assert!(v.restartable().is_empty());
+        assert_eq!(v.handle_key(key(KeyCode::Char('i'))), Some(Outcome::SetInspected { on: false, restart: false }));
+        assert!(v.actions().contains(&Action::Requests));
+        assert_eq!(v.handle_key(key(KeyCode::Char('v'))), Some(Outcome::OpenInspector));
+    }
+
+    #[test]
+    fn the_overview_adds_up_the_last_hour_and_names_what_filled_the_newest_request() {
+        const NOW: i64 = 1_800_000_000_000;
+        let all = requests(NOW);
+        let name = |pk: &str| pk.chars().take(5).collect::<String>();
+        let o = inspect_overview(true, &all, &name, NOW);
+        let recent: Vec<_> = all.iter().filter(|r| r.started_at_ms >= NOW - 3_600_000).collect();
+        assert_eq!(o.totals.requests as usize, recent.len());
+        assert_eq!(o.spark.len(), INSPECT_MINUTES);
+        assert_eq!(o.spark.iter().sum::<i64>() as u64, recent.iter().map(|r| r.context_tokens()).sum::<u64>(), "every request of the hour is in the chart");
+        let latest = o.latest.expect("a newest request");
+        if recent[0].context_tokens() == 0 {
+            assert!(latest.estimated && latest.context_tokens > 0, "still running: its size is guessed from the breakdown");
+        } else {
+            assert_eq!((latest.context_tokens, latest.estimated), (recent[0].context_tokens(), false));
+        }
+        assert!(latest.age_secs >= 0);
+        // Nothing an hour ago or newer: empty, but still on.
+        let quiet = inspect_overview(true, &all, &name, NOW + 10 * 3_600_000);
+        assert!(quiet.on && quiet.totals.requests == 0 && quiet.latest.is_none());
+    }
+
+    #[test]
+    fn the_overview_draws_under_the_numbers_and_fits() {
+        const NOW: i64 = 1_800_000_000_000;
+        let mut d = data();
+        d.inspect = inspect_overview(true, &requests(NOW), &|pk: &str| pk.chars().take(5).collect(), NOW);
+        let v = ManageView::new(d);
+        for width in [44u16, 90, 140] {
+            let mut term = Terminal::new(TestBackend::new(width, 22)).unwrap();
+            term.draw(|f| render(f, &v)).unwrap();
+            let text: Vec<String> = (0..22).map(|y| (0..width).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>()).collect();
+            let at = text.iter().position(|l| l.contains("inspector")).unwrap_or_else(|| panic!("an inspector line at {width}:\n{}", text.join("\n")));
+            assert!(text[at].contains("requests") && text[at].contains("context"), "{:?}", text[at]);
+            assert!(text[at + 1].contains("latest"), "{:?}", text[at + 1]);
+        }
     }
 }

@@ -24,8 +24,10 @@ mod items;
 mod local;
 mod native_usage;
 mod log;
+mod model_requests;
 mod policy;
 mod reads;
+mod inspected;
 mod remote;
 pub mod pricing;
 pub mod schema;
@@ -56,6 +58,11 @@ pub use types::{
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,
     ThreadWorkspace, Turn, TurnChanges, TurnMark, FileChange, ChangeStatus, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, NativeUsage, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
 };
+pub use model_requests::{
+    CONTEXT_PARTS_MAX, ContextBreakdown, ContextKind, ContextPart, MODEL_REQUESTS_LIMIT_MAX, ModelProvider, ModelRequest,
+    ModelRequestFilter, RequestOutcome,
+};
+pub use inspected::INSPECTED_THREADS_MAX;
 pub use wire::kind;
 
 /// The read-frontier scope used by [`Store::unread_count`] and [`Store::mark_read`].

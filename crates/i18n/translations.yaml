@@ -691,6 +691,186 @@
 "plan limits":
   zh-Hans: "套餐限额"
 
+# The token inspector (inspect.rs, view/inspect_view.rs).
+"done":
+  zh-Hans: "完成"
+"inspect":
+  zh-Hans: "查看"
+"search":
+  zh-Hans: "搜索"
+"group by turn":
+  zh-Hans: "按轮次分组"
+"fold":
+  zh-Hans: "折叠"
+"help":
+  zh-Hans: "帮助"
+"each tool":
+  zh-Hans: "每个工具"
+"back to the list":
+  zh-Hans: "返回列表"
+"time":
+  zh-Hans: "时间"
+"model":
+  zh-Hans: "模型"
+"endpoint":
+  zh-Hans: "端点"
+"in":
+  zh-Hans: "输入"
+"cached":
+  zh-Hans: "缓存"
+"out":
+  zh-Hans: "输出"
+"took":
+  zh-Hans: "耗时"
+"{n} requests":
+  zh-Hans: "{n} 个请求"
+"live":
+  zh-Hans: "进行中"
+"thread {title}":
+  zh-Hans: "话题 {title}"
+"agent {name}":
+  zh-Hans: "智能体 {name}"
+"all threads":
+  zh-Hans: "全部话题"
+"token inspector":
+  zh-Hans: "token 检查器"
+"context":
+  zh-Hans: "上下文"
+"{n} flagged":
+  zh-Hans: "{n} 项异常"
+"no requests match “{query}”":
+  zh-Hans: "没有请求匹配“{query}”"
+"no turn":
+  zh-Hans: "无轮次"
+"turn {n}":
+  zh-Hans: "第 {n} 轮"
+"in flight":
+  zh-Hans: "进行中"
+"ok":
+  zh-Hans: "成功"
+"error":
+  zh-Hans: "错误"
+"select a request to inspect it":
+  zh-Hans: "选择一个请求以查看详情"
+"inference":
+  zh-Hans: "推理"
+"streamed":
+  zh-Hans: "流式"
+"not streamed":
+  zh-Hans: "非流式"
+"status":
+  zh-Hans: "状态"
+"started":
+  zh-Hans: "开始于"
+"first token":
+  zh-Hans: "首个 token"
+"{input} in · {output} out":
+  zh-Hans: "输入 {input} · 输出 {output}"
+"{read} read · {written} written":
+  zh-Hans: "读取 {read} · 写入 {written}"
+"{pct}% hit":
+  zh-Hans: "命中 {pct}%"
+"cache":
+  zh-Hans: "缓存"
+"reasoning":
+  zh-Hans: "推理过程"
+"throughput":
+  zh-Hans: "吞吐"
+"{n} tokens/s":
+  zh-Hans: "{n} token/秒"
+"{sent} sent · {received} received":
+  zh-Hans: "发送 {sent} · 接收 {received}"
+"first token {time}":
+  zh-Hans: "首个 token {time}"
+"counted when the response ends":
+  zh-Hans: "响应结束后统计"
+"the provider reported no usage":
+  zh-Hans: "服务商未报告用量"
+"{input} in · {cached} cached · {written} written · {output} out":
+  zh-Hans: "输入 {input} · 缓存 {cached} · 写入 {written} · 输出 {output}"
+"context per request, oldest first":
+  zh-Hans: "每个请求的上下文，从早到晚"
+"{n} earlier":
+  zh-Hans: "更早的 {n} 个"
+"no breakdown was recorded for this request":
+  zh-Hans: "此请求没有记录构成明细"
+"{n} messages":
+  zh-Hans: "{n} 条消息"
+"{n} tools":
+  zh-Hans: "{n} 个工具"
+"estimated by size, scaled to the billed tokens":
+  zh-Hans: "按大小估算，并换算到计费 token"
+"estimated by size: about 4 bytes a token":
+  zh-Hans: "按大小估算：约 4 字节一个 token"
+"largest: {part}":
+  zh-Hans: "最大：{part}"
+"{pct}% of this request":
+  zh-Hans: "占此请求的 {pct}%"
+"the cache was rebuilt: {n} tokens written, not read":
+  zh-Hans: "缓存已重建：写入 {n} token，而非读取"
+"system prompt":
+  zh-Hans: "系统提示词"
+"tool definitions":
+  zh-Hans: "工具定义"
+"user text":
+  zh-Hans: "用户文本"
+"assistant text":
+  zh-Hans: "助手文本"
+"tool results":
+  zh-Hans: "工具结果"
+"images":
+  zh-Hans: "图片"
+"other":
+  zh-Hans: "其他"
+"tool results from {tool}":
+  zh-Hans: "{tool} 的工具结果"
+"by agent":
+  zh-Hans: "按智能体"
+"by model":
+  zh-Hans: "按模型"
+"cache hit":
+  zh-Hans: "缓存命中"
+"anomalies":
+  zh-Hans: "异常"
+"nothing unusual":
+  zh-Hans: "没有异常"
+"see the red dots in the list":
+  zh-Hans: "见列表中的红点"
+"cache rebuilt, {n} written":
+  zh-Hans: "缓存已重建，写入 {n}"
+"context {from} → {to} over {n} requests":
+  zh-Hans: "上下文 {from} → {to}，共 {n} 个请求"
+"Token inspector":
+  zh-Hans: "Token 检查器"
+"Every request your agents send to their model: what it cost, and what filled its context.":
+  zh-Hans: "智能体发给模型的每个请求：花了多少，上下文里装了什么。"
+"Nothing was recorded here in the last 24 hours.":
+  zh-Hans: "最近 24 小时内这里没有记录。"
+"then start a managed session.":
+  zh-Hans: "然后启动一个托管会话。"
+"recording off":
+  zh-Hans: "记录已关闭"
+"shows every thread":
+  zh-Hans: "显示全部话题"
+"inspect the request":
+  zh-Hans: "查看该请求"
+"back to the list, then quit":
+  zh-Hans: "返回列表，再按退出"
+"filter: thread, agent, all":
+  zh-Hans: "筛选：话题、智能体、全部"
+"search model, agent and endpoint":
+  zh-Hans: "搜索模型、智能体和端点"
+"fold or unfold a turn":
+  zh-Hans: "折叠或展开一轮"
+"each tool's definition":
+  zh-Hans: "每个工具的定义"
+"page":
+  zh-Hans: "翻页"
+"close this help":
+  zh-Hans: "关闭帮助"
+"keys":
+  zh-Hans: "按键"
+
 # --- axel ---
 # cmd/mod.rs
 "opening ~/.axel/axel.db":
@@ -1416,6 +1596,10 @@
 "pushing the code to {host}: {error}":
   zh-Hans: "将代码推送到 {host}：{error}"
 
+# cmd/ui.rs: axel inspect
+"opening the token inspector in Rex":
+  zh-Hans: "在 Rex 中打开 token 检查器"
+
 # --- acp ---
 # The session host's pane lines.
 "adapter: {command}":
@@ -1620,3 +1804,89 @@
   zh-Hans: "是，在本会话中"
 "Permissions: {permissions}":
   zh-Hans: "权限：{permissions}"
+
+# The token inspector's proxy, started by the session host (ADR 0011).
+"the token inspector could not start, so this session talks to its provider directly: {error}":
+  zh-Hans: "token 检查器无法启动，因此本会话直接连接其提供方：{error}"
+"the token inspector is behind; some requests go unrecorded":
+  zh-Hans: "token 检查器跟不上，部分请求未被记录"
+"the token inspector could not record a request: {error}":
+  zh-Hans: "token 检查器无法记录一个请求：{error}"
+"the inspector's writer stopped with an error":
+  zh-Hans: "检查器的写入线程因错误而停止"
+"{n} inspector request record(s) pruned":
+  zh-Hans: "已清理 {n} 条检查器请求记录"
+"Open it with `axel inspect`; turn it off with `axel inspect off`.":
+  zh-Hans: "用 `axel inspect` 打开；用 `axel inspect off` 关闭。"
+"This thread's new managed sessions are recorded as they work.":
+  zh-Hans: "这个话题的新托管会话在工作时会被记录。"
+"Inspected threads' new managed sessions are recorded as they work.":
+  zh-Hans: "已开启检查的话题，其新托管会话在工作时会被记录。"
+"Recording is off for this thread: nothing goes through the inspector until you ask.":
+  zh-Hans: "这个话题的记录已关闭：在你开启之前，不会有任何请求经过检查器。"
+"Recording is off for every thread: nothing goes through the inspector until you ask.":
+  zh-Hans: "所有话题的记录均已关闭：在你开启之前，不会有任何请求经过检查器。"
+"Press":
+  zh-Hans: "按"
+"or run":
+  zh-Hans: "或运行"
+"Inside a thread, run":
+  zh-Hans: "在话题中运行"
+"record this thread, or stop":
+  zh-Hans: "记录这个话题，或停止记录"
+"which thread? Pass --thread <id>; inside a thread, its own is used.":
+  zh-Hans: "哪个话题？请传入 --thread <id>；在话题中运行时会使用当前话题。"
+"The token inspector is on for {thread}. Its new managed sessions send their model requests through a local proxy on 127.0.0.1, which records their size, tokens and timing, never their prompts or credentials. Sessions already running are unchanged.":
+  zh-Hans: "Token 检查器已为 {thread} 开启。它的新托管会话会通过 127.0.0.1 上的本地代理发送模型请求，代理只记录请求的大小、token 和耗时，从不记录提示词或凭据。已在运行的会话不受影响。"
+"The token inspector is off for {thread}. Its new managed sessions talk to their provider directly; sessions already running keep their proxy until they end.":
+  zh-Hans: "Token 检查器已为 {thread} 关闭。它的新托管会话会直接连接服务商；已在运行的会话会保留代理，直到结束。"
+"The token inspector is on for {thread}: its new managed sessions are recorded.":
+  zh-Hans: "Token 检查器已为 {thread} 开启：它的新托管会话会被记录。"
+"The token inspector is off for {thread}. Turn it on with `axel inspect on`.":
+  zh-Hans: "Token 检查器已为 {thread} 关闭。用 `axel inspect on` 开启。"
+"The token inspector is off for every thread. Turn it on for one with `axel inspect on --thread <id>`.":
+  zh-Hans: "所有话题的 Token 检查器均已关闭。用 `axel inspect on --thread <id>` 为某个话题开启。"
+"The token inspector is on for {n} threads:":
+  zh-Hans: "Token 检查器已为 {n} 个话题开启："
+"The token inspector is on for 1 thread:":
+  zh-Hans: "Token 检查器已为 1 个话题开启："
+"1 request":
+  zh-Hans: "1 个请求"
+"Inspector":
+  zh-Hans: "检查器"
+"Requests":
+  zh-Hans: "请求"
+"inspector off: this thread's new managed sessions talk to their provider directly":
+  zh-Hans: "检查器已关闭：这个话题的新托管会话将直接连接服务商"
+"inspector":
+  zh-Hans: "检查器"
+"latest":
+  zh-Hans: "最新"
+"on · nothing in the last hour: this thread's new managed sessions are recorded":
+  zh-Hans: "已开启 · 最近一小时没有请求：这个话题的新托管会话会被记录"
+"opened the token inspector":
+  zh-Hans: "已打开 Token 检查器"
+"{age} ago":
+  zh-Hans: "{age}前"
+"{n} context":
+  zh-Hans: "{n} 上下文"
+"{part}: {pct}%":
+  zh-Hans: "{part}：{pct}%"
+"{pct}% cached":
+  zh-Hans: "{pct}% 命中缓存"
+"on: new sessions here are recorded; turn it off":
+  zh-Hans: "已开启：这里的新会话会被记录；选择以关闭"
+"off: record what each model request costs, and why":
+  zh-Hans: "已关闭：开启后记录每个模型请求的费用及原因"
+"each request: its cost and what filled its context":
+  zh-Hans: "每个请求：它的费用，以及上下文里装了什么"
+"inspector on: this thread's new managed sessions are recorded":
+  zh-Hans: "检查器已开启：这个话题的新托管会话会被记录"
+"inspector on: {n} session(s) restarted; they're recorded from your next message":
+  zh-Hans: "检查器已开启：已重启 {n} 个会话；从你的下一条消息起会被记录"
+"inspector off: {n} session(s) restarted; they talk to their provider directly from your next message":
+  zh-Hans: "检查器已关闭：已重启 {n} 个会话；从你的下一条消息起直接连接服务商"
+"record this thread: restart {agents} now so it's recorded too? Its conversation continues on your next message (n: only new sessions)":
+  zh-Hans: "记录这个话题：现在重启 {agents}，让它也被记录？它的对话会在你的下一条消息时继续（n：仅新会话）"
+"stop recording: restart {agents} now so it stops too? Its conversation continues on your next message (n: only new sessions)":
+  zh-Hans: "停止记录：现在重启 {agents}，让它也停止记录？它的对话会在你的下一条消息时继续（n：仅新会话）"

@@ -108,6 +108,17 @@ pub enum Command {
     /// The built-in Codex ACP agent (what managed Codex sessions run).
     #[command(name = "codex-acp", hide = true)]
     CodexAcp,
+    /// Inspect each request agents send to their model, in a large Rex
+    /// pane (again to hide it); outside Rex, right here.
+    Inspect {
+        /// `on` or `off` records a thread's new managed sessions or stops
+        /// (off until you turn it on); `status` says which.
+        #[command(subcommand)]
+        switch: Option<InspectSwitch>,
+        /// The thread (default: $AXEL_THREAD; the pane: else every thread).
+        #[arg(long, global = true)]
+        thread: Option<String>,
+    },
     /// Show the tokens each agent spent, in the top-right corner of this
     /// Rex window (again to hide it); outside Rex, right here.
     Usage {
@@ -463,6 +474,19 @@ pub enum ScreenArg {
     Threads,
     /// Tokens spent per agent (the corner pane).
     Usage,
+    /// Each model request and what filled its context (the token inspector).
+    Inspect,
+}
+
+/// The token inspector's switch.
+#[derive(Copy, Clone, Debug, Subcommand, PartialEq, Eq)]
+pub enum InspectSwitch {
+    /// Route the thread's new managed sessions through the local proxy and record their requests.
+    On,
+    /// Let the thread's new managed sessions talk to their provider directly again.
+    Off,
+    /// Say whether the thread is inspected (with no thread: which threads are).
+    Status,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
