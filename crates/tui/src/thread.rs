@@ -260,6 +260,11 @@ pub struct ThreadView {
     pub update_hint: Option<String>,
     /// Agent suggestions for the `@name` being typed in the composer.
     pub mention: crate::mention::MentionMenu,
+    /// Skill suggestions for the `/skill` being typed.
+    pub skill_menu: crate::skill_menu::SkillMenu,
+    /// Every installed skill, read when a `/skill` word was started (see
+    /// [`ThreadView::needs_skills`]), and that word's index.
+    pub skills: Option<(usize, Vec<axel_config::SkillHint>)>,
 }
 
 impl ThreadView {
@@ -290,6 +295,8 @@ impl ThreadView {
             compose_only: false,
             update_hint: None,
             mention: crate::mention::MentionMenu::default(),
+            skill_menu: crate::skill_menu::SkillMenu::default(),
+            skills: None,
         };
         v.cursor = v.rows().len().saturating_sub(1);
         v
@@ -650,7 +657,14 @@ impl ThreadView {
             self.composer.clear();
             return ThreadAction::None;
         }
-        // An `@name` being typed: its suggestions take ↑↓, Tab, Enter and Esc.
+        // A `/skill` or an `@name` being typed: its suggestions take ↑↓, Tab, Enter and Esc.
+        if self.focus == Focus::Composer
+            && let Some((_, skills)) = &self.skills
+            && self.skill_menu.handle_key(key, &mut self.composer, skills)
+        {
+            self.hist_pos = None;
+            return ThreadAction::None;
+        }
         if self.focus == Focus::Composer {
             let names = self.mention_names();
             if self.mention.handle_key(key, &mut self.composer, &names) {
@@ -781,6 +795,35 @@ impl ThreadView {
             return Vec::new();
         }
         self.mention.options(&self.composer, &self.mention_names())
+    }
+
+    /// Skills suggested for the `/skill` at the composer's cursor.
+    pub fn skill_options(&self) -> Vec<&axel_config::SkillHint> {
+        match &self.skills {
+            Some((_, skills)) if self.focus == Focus::Composer => self.skill_menu.options(&self.composer, skills),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the glue should read the installed skills now: a `/skill`
+    /// word was just started. Read once per word, so a skill installed
+    /// meanwhile shows on the next one.
+    pub fn needs_skills(&self) -> bool {
+        if self.focus != Focus::Composer {
+            return false;
+        }
+        match (self.composer.skill_at_cursor(), &self.skills) {
+            (Some((at, _)), Some((word, _))) => at != *word,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+
+    /// The skills read for [`ThreadView::needs_skills`].
+    pub fn set_skills(&mut self, skills: Vec<axel_config::SkillHint>) {
+        if let Some((at, _)) = self.composer.skill_at_cursor() {
+            self.skills = Some((at, skills));
+        }
     }
 
     /// Who the composer's text would reach (see [`target_label`]).
@@ -1261,6 +1304,7 @@ impl ThreadView {
     pub fn help(&self) -> Vec<(&'static str, &'static str)> {
         match self.focus {
             Focus::Composer if !self.mention_options().is_empty() => vec![("↑↓", t!("pick")), ("Tab", t!("mention")), ("Esc", t!("dismiss"))],
+            Focus::Composer if !self.skill_options().is_empty() => vec![("↑↓", t!("pick")), ("Tab", t!("skill")), ("Esc", t!("dismiss"))],
             Focus::Composer => {
                 let queued = !self.queued().is_empty();
                 if self.editing.is_some() {
@@ -1694,6 +1738,28 @@ mod tests {
         assert!(v.composer.is_empty(), "not typed");
         assert_eq!(v.handle_compose_key(key(KeyCode::Char('l'))), ThreadAction::None, "a plain l is text");
         assert_eq!(v.composer.text(), "l");
+    }
+
+    #[test]
+    fn a_skill_word_reads_the_skills_once_and_tab_lists_them() {
+        use axel_config::{SkillHint, SkillScope};
+        let mut v = ThreadView::new("T1", data());
+        type_str(&mut v, "use ");
+        assert!(!v.needs_skills(), "no skill word yet");
+        type_str(&mut v, "/");
+        assert!(v.needs_skills());
+        let skill = |n: &str| SkillHint { name: n.into(), description: None, scope: SkillScope::User, path: format!("/s/{n}/SKILL.md").into() };
+        v.set_skills(vec![skill("rex"), skill("review")]);
+        type_str(&mut v, "r");
+        assert!(!v.needs_skills(), "read once per word");
+        assert_eq!(v.handle_key(key(KeyCode::Tab)), ThreadAction::None);
+        let shown: Vec<&str> = v.skill_options().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(shown, ["rex", "review"]);
+        assert_eq!(v.help()[1], ("Tab", t!("skill")));
+        assert_eq!(v.handle_key(key(KeyCode::Enter)), ThreadAction::None, "Enter takes the suggestion, it doesn't send");
+        assert_eq!(v.composer.text(), "use /rex ");
+        type_str(&mut v, "then /");
+        assert!(v.needs_skills(), "a new word reads them again");
     }
 
     #[test]

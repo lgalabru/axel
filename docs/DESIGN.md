@@ -596,6 +596,11 @@ thread view (TUI, any pane) ──unix socket──▶ axel session host <id> �
   hand the text to it if live; pick an option on a pending permission/question → `answer`.
   The text goes as typed, mention included. Without a mention it goes to the live session
   whose agent replied last; the footer shows the target (`→ nova`, `→ +vega` to summon).
+  Tab completes a name being typed: `@` lists agents; `/` at the start of a word lists
+  every installed skill (each harness's project and user directories, and Axel's own).
+  Any agent can be sent any `/skill`: its adapter makes the skill its harness's own for
+  that turn (linked in a directory of the session's, outside the project, and reloaded),
+  spelled the harness's way (`$name` for Codex). See ADR 0012.
 - **Catch-up**: agents can't see each other's turns, so the host starts each turn with
   what its agent missed since its last one (`axel-acp/src/catchup.rs`): other sessions'
   assistant replies, the owner's and other agents' messages to them, `fyi` notes left in

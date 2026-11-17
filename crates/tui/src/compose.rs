@@ -74,6 +74,7 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                 match ev {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         let action = v.handle_compose_key(key);
+                        glue::read_skills(deps.store, &mut v);
                         match carry_out(&deps, thread_id, &mut v, action, toggle_log) {
                             Next::Wait => {}
                             // What was sent shows sooner.

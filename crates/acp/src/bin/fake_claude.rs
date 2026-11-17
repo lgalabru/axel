@@ -9,8 +9,11 @@
 //! the turn, or one reading `late`, which ends the turn first and runs them
 //! as a turn of their own.  The prompt `later` answers at once and, a moment
 //! after, says more on its own, as Claude Code does when a background task it
-//! started finishes.  Its argv and every control request it receives
-//! are appended to `$FAKE_CLAUDE_LOG`, one JSON value per line.
+//! started finishes.  A prompt starting `skill` just answers `ok`.
+//! `reload_skills` answers with the skills under `<--add-dir>/.claude/skills`
+//! whose `SKILL.md` it can read, as Claude Code does.  Its argv, every
+//! control request it receives and each prompt's text (`{"user": …}`) are
+//! appended to `$FAKE_CLAUDE_LOG`, one JSON value per line.
 
 use std::io::{BufRead, Write};
 
@@ -107,6 +110,21 @@ fn work(lines: &mut impl Iterator<Item = std::io::Result<String>>) {
     }
 }
 
+/// The skills in `<--add-dir>/.claude/skills` with a readable `SKILL.md`.
+fn added_skills() -> Vec<Value> {
+    let Some(dir) = std::env::args().skip_while(|a| a != "--add-dir").nth(1) else { return Vec::new() };
+    let skills = std::path::Path::new(&dir).join(".claude/skills");
+    let mut out: Vec<Value> = std::fs::read_dir(skills)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| std::fs::read_to_string(e.path().join("SKILL.md")).is_ok())
+        .map(|e| json!({ "name": e.file_name().to_string_lossy() }))
+        .collect();
+    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    out
+}
+
 fn main() {
     log(&json!({ "argv": std::env::args().skip(1).collect::<Vec<_>>() }));
     if let Ok(path) = std::env::var("FAKE_CLAUDE_PIDFILE") {
@@ -136,14 +154,22 @@ fn main() {
                             ]
                         }),
                     ),
+                    Some("reload_skills") => ok(&id, json!({ "skills": added_skills() })),
                     _ => ok(&id, json!({})),
                 }
             }
             Some("user") => {
                 let text = msg["message"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+                let all: String = msg["message"]["content"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect();
+                log(&json!({ "user": all }));
                 send(json!({ "type": "system", "subtype": "init", "session_id": session }));
                 if replays {
                     echo(&json!("prompt-uuid"), &text);
+                }
+                if text.starts_with("skill") {
+                    text_reply("ok");
+                    send(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "ok" }));
+                    continue;
                 }
                 if text == "work" {
                     work(&mut lines);

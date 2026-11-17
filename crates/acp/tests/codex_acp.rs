@@ -286,3 +286,50 @@ fn the_agents_effort_is_a_config_override_on_new_and_resumed_threads() {
     assert_eq!(starts[1]["config"]["mcp_servers"]["axel"]["command"], "/bin/axel", "the MCP override stays");
     assert_eq!(logged(&log, "thread/resume")[0]["config"], json!({ "model_reasoning_effort": "low" }));
 }
+
+#[test]
+fn a_skill_the_prompt_names_goes_to_codex_as_a_skill_and_one_it_cant_load_is_pointed_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("work");
+    let src = dir.path().join("src");
+    for (at, name) in [(cwd.join(".agents/skills"), "native"), (src.clone(), "zz")] {
+        std::fs::create_dir_all(at.join(name)).unwrap();
+        std::fs::write(at.join(name).join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+    }
+    let mut agent = Agent::start(dir.path());
+    assert_eq!(init(&mut agent)["agentCapabilities"]["_meta"]["axel"]["skills"], true, "the host may send skills");
+    let (_, new) = agent.call("session/new", json!({ "cwd": cwd, "mcpServers": [] }), |_| json!({}));
+    let sid = new["result"]["sessionId"].as_str().unwrap().to_string();
+    let prompt = |agent: &mut Agent, text: &str, skills: Value| {
+        let (_, r) = agent.call("session/prompt", json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": text }], "_meta": { "axel": { "skills": skills } } }), |_| json!({}));
+        assert_eq!(r["result"]["stopReason"], "end_turn", "{r}");
+    };
+    let zz = json!({ "name": "zz", "path": src.join("zz/SKILL.md") });
+    let native = json!({ "name": "native", "path": cwd.join(".agents/skills/native/SKILL.md") });
+    prompt(&mut agent, "skill /zz and /native", json!([zz, native]));
+
+    // zz wasn't Codex's: linked in the session's own root, set once.
+    let log = codex_log(dir.path());
+    let roots = logged(&log, "skills/extraRoots/set");
+    assert_eq!(roots.len(), 1);
+    let root = std::path::PathBuf::from(roots[0]["extraRoots"][0].as_str().unwrap());
+    assert!(!root.starts_with(&cwd), "outside the project");
+    let input = &logged(&log, "turn/start")[0]["input"];
+    assert_eq!(input[0]["text"], "skill $zz and $native", "spelled Codex's way");
+    assert_eq!(input[1], json!({ "type": "skill", "name": "zz", "path": root.join("zz/SKILL.md") }));
+    assert_eq!(input[2], json!({ "type": "skill", "name": "native", "path": cwd.join(".agents/skills/native/SKILL.md") }));
+
+    // Again: Codex has it now, nothing more to set up.
+    prompt(&mut agent, "skill /zz", json!([zz]));
+    let log = codex_log(dir.path());
+    assert_eq!(logged(&log, "skills/extraRoots/set").len(), 1);
+    assert_eq!(logged(&log, "turn/start")[1]["input"][1]["name"], "zz");
+
+    // One Codex can't load (its file is gone): pointed at instead.
+    let gone = json!({ "name": "gone", "path": src.join("gone/SKILL.md") });
+    prompt(&mut agent, "skill /gone", json!([gone]));
+    let log = codex_log(dir.path());
+    let input = logged(&log, "turn/start")[2]["input"].clone();
+    assert_eq!(input[0]["text"], "skill /gone", "not Codex's: left as written");
+    assert!(input[1]["text"].as_str().unwrap().contains(&format!("- /gone: {}", src.join("gone/SKILL.md").display())), "{input}");
+}

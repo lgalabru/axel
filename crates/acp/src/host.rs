@@ -691,6 +691,9 @@ struct Host<W: Write> {
     queue: VecDeque<Queued>,
     /// The adapter can take prompts into a running turn (`_axel/steer`).
     can_steer: bool,
+    /// The adapter takes the skills a prompt names (`_meta.axel.skills`) and
+    /// makes them its harness's own; otherwise the agent is pointed at their files.
+    can_take_skills: bool,
     /// Prompts sent into the running turn and not taken in yet, oldest first.
     steering: VecDeque<Queued>,
     /// The runtime mode the fs handler reads (kept equal to `cfg.runtime_mode`).
@@ -747,6 +750,7 @@ impl<W: Write> Host<W> {
             pending: HashMap::new(),
             queue: VecDeque::new(),
             can_steer: false,
+            can_take_skills: false,
             steering: VecDeque::new(),
             mode_cell,
             native_modes: None,
@@ -972,14 +976,11 @@ impl<W: Write> Host<W> {
             .await
             .map_err(|e| anyhow::anyhow!("initialize: {e}"))?;
         self.prompt_caps = PromptCaps::from(&init.agent_capabilities.prompt_capabilities);
-        self.can_steer = init
-            .agent_capabilities
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("axel"))
-            .and_then(|a| a.get("steer"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let axel_cap = |name: &str| {
+            init.agent_capabilities.meta.as_ref().and_then(|m| m.get("axel")).and_then(|a| a.get(name)).and_then(Value::as_bool).unwrap_or(false)
+        };
+        self.can_steer = axel_cap("steer");
+        self.can_take_skills = axel_cap("skills");
         let agent_name = init
             .agent_info
             .as_ref()
@@ -1457,9 +1458,13 @@ impl<W: Write> Host<W> {
     async fn send_steer(&mut self, cx: &ConnectionTo<Agent>, item_id: &str) {
         let Some(q) = self.steering.iter().find(|q| q.item_id == item_id) else { return };
         let (text, files) = (q.text.clone(), q.files.clone());
-        let blocks = self.prompt_blocks(&text, &files);
+        let (wire, meta) = self.with_skills(&text, text.clone());
+        let blocks = self.prompt_blocks(&wire, &files);
         let Some(sid) = self.native_session_id.clone() else { return };
-        let params = json!({ "sessionId": sid.to_string(), "messageId": item_id, "prompt": blocks });
+        let mut params = json!({ "sessionId": sid.to_string(), "messageId": item_id, "prompt": blocks });
+        if let Some(meta) = meta {
+            params["_meta"] = Value::Object(meta);
+        }
         let accepted = match self.raw_request(cx, "_axel/steer", params).await {
             Ok(v) => v.get("accepted").and_then(Value::as_bool).unwrap_or(false),
             Err(e) => {
@@ -1729,13 +1734,14 @@ impl<W: Write> Host<W> {
             t!("prompt {turn}  {text} {files}", turn = self.turn, text = shown, files = attached)
         };
         self.line(BOLD, "▶", &line);
+        let (wire_text, meta) = self.with_skills(&text, wire_text);
         let blocks = self.prompt_blocks(&wire_text, &files);
         let sid = self
             .native_session_id
             .clone()
             .expect("session created before prompting");
         let fut = cx
-            .send_request(acp::PromptRequest::new(sid, blocks))
+            .send_request(acp::PromptRequest::new(sid, blocks).meta(meta))
             .block_task();
         Box::pin(fut)
     }
@@ -1770,6 +1776,32 @@ impl<W: Write> Host<W> {
             self.line(RED, "✖", &t!("status: {error}", error = e));
         }
         self.program_status(axel_rex::osc::State::Working, None, &head(text, 200));
+    }
+
+    /// The skills `written` (the message as its author wrote it) names, for
+    /// the agent: as `_meta.axel.skills` when its adapter takes them (it makes
+    /// them its harness's own), or else as a note added to `wire`, the text
+    /// it reads, naming each skill's file. `wire` as it goes out, and the
+    /// prompt's `_meta`.
+    fn with_skills(&mut self, written: &str, wire: String) -> (String, Option<acp::Meta>) {
+        if !written.contains('/') {
+            return (wire, None);
+        }
+        let Some(home) = dirs::home_dir() else { return (wire, None) };
+        let global = axel_config::default_global_skills_dir();
+        let known = axel_config::skill_hints(&axel_config::all_skill_dirs(std::slice::from_ref(&self.cfg.cwd), &home, global.as_deref()));
+        let named = axel_config::named_skills(written, &known);
+        if named.is_empty() {
+            return (wire, None);
+        }
+        let names: Vec<&str> = named.iter().map(|s| s.name.as_str()).collect();
+        self.line(DIM, "·", &t!("skills: {names}", names = names.join(", ")));
+        if self.can_take_skills {
+            (wire, Some(crate::skills::prompt_meta(&named)))
+        } else {
+            let files: Vec<(&str, &std::path::Path)> = named.iter().map(|s| (s.name.as_str(), s.path.as_path())).collect();
+            (format!("{wire}\n\n{}", axel_config::skill_pointers(&files)), None)
+        }
     }
 
     /// A prompt's content blocks, with a warning in the pane for each

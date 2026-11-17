@@ -36,6 +36,8 @@ test = false
 doc = false
 
 [dependencies]
+axel-config.workspace = true
+dirs.workspace = true
 axel-i18n.workspace = true
 axel-identity.workspace = true
 axel-rex.workspace = true

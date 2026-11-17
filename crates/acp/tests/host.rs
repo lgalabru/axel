@@ -539,6 +539,52 @@ fn attachments_become_prompt_blocks_and_land_on_the_item() {
     );
 }
 
+/// The prompt frame the host sent the adapter, after running one turn of
+/// `text` in a fixture whose workspace has the skill `zz-probe`.
+fn prompt_frame_naming_a_skill(adapter_takes_skills: bool, text: &str) -> (serde_json::Value, std::path::PathBuf) {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    let skill = f.cfg.cwd.join(".claude/skills/zz-probe/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(&skill, "---\nname: zz-probe\n---\n").unwrap();
+    if adapter_takes_skills {
+        f.cfg.env.push(("FAKE_AGENT_SKILLS".into(), "1".into()));
+    }
+    let host = spawn_host(&f);
+    wait_until("idle after setup", Duration::from_secs(10), || {
+        f.store.get_session(&f.session_id).unwrap().unwrap().state == SessionState::Idle
+    });
+    send_ok(&f.cfg.socket_path, Command::Prompt { text: text.into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+    let user = f.store.items(&f.session_id, 0, 100).unwrap().into_iter().find(|i| i.kind == ItemKind::UserMessage).unwrap();
+    assert_eq!(user.content["text"], text, "the thread keeps the message as written");
+    let log = std::fs::read_to_string(&f.cfg.log_path).unwrap();
+    let frame = log
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|fr| fr["frame"]["method"] == "session/prompt")
+        .unwrap();
+    (frame["frame"]["params"].clone(), skill)
+}
+
+#[test]
+fn a_named_skill_goes_to_an_adapter_that_takes_skills_in_the_prompt_meta() {
+    let (params, skill) = prompt_frame_naming_a_skill(true, "use /zz-probe, not /nothing-here");
+    assert_eq!(params["_meta"]["axel"]["skills"], serde_json::json!([{ "name": "zz-probe", "path": skill }]), "only installed skills");
+    assert_eq!(params["prompt"][0]["text"], "use /zz-probe, not /nothing-here", "the adapter makes it its own");
+}
+
+#[test]
+fn a_named_skill_is_pointed_at_for_an_adapter_that_doesnt() {
+    let (params, skill) = prompt_frame_naming_a_skill(false, "use /zz-probe");
+    assert!(params["_meta"]["axel"]["skills"].is_null(), "{params}");
+    assert_eq!(
+        params["prompt"][0]["text"],
+        format!("use /zz-probe\n\nSkills named above that you don't have installed: read each file and follow it.\n- /zz-probe: {}", skill.display())
+    );
+}
+
 #[test]
 fn cancel_ends_the_turn_as_cancelled() {
     let f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("sleep"));

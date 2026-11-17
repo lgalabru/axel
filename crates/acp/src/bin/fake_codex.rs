@@ -3,8 +3,11 @@
 //! `turn/start` streams a message, then a file change and a command that each
 //! ask for approval, a plan and token usage, and completes the turn (status
 //! `failed` if the command was refused).  The prompt `sleep` instead waits for
-//! `turn/interrupt`.  Every request it receives (and every approval reply) is
-//! appended to `$FAKE_CODEX_LOG`.
+//! `turn/interrupt`; one starting `skill` just completes.  `skills/list`
+//! lists the skills under `<cwd>/.agents/skills` and each root set with
+//! `skills/extraRoots/set` whose `SKILL.md` it can read, as Codex does.
+//! Every request it receives (and every approval reply) is appended to
+//! `$FAKE_CODEX_LOG`.
 
 use std::io::{BufRead, Write};
 
@@ -36,6 +39,7 @@ fn main() {
     let mut lines = stdin.lock().lines();
     let mut turns = 0;
     let mut next_req = 100;
+    let mut extra_roots: Vec<String> = Vec::new();
     while let Some(Ok(line)) = lines.next() {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
         let Some(method) = msg.get("method").and_then(Value::as_str) else { continue };
@@ -61,12 +65,32 @@ fn main() {
                 { "id": "gpt-big", "displayName": "GPT Big", "description": "smart", "hidden": false, "isDefault": false },
                 { "id": "gpt-hidden", "displayName": "Hidden", "description": "", "hidden": true, "isDefault": false }
             ] })),
+            "skills/extraRoots/set" => {
+                extra_roots = params["extraRoots"].as_array().into_iter().flatten().filter_map(|r| r.as_str().map(String::from)).collect();
+                reply(json!({}));
+            }
+            "skills/list" => {
+                let cwd = params["cwds"][0].as_str().unwrap_or(".").to_string();
+                let mut roots = vec![std::path::Path::new(&cwd).join(".agents/skills")];
+                roots.extend(extra_roots.iter().map(std::path::PathBuf::from));
+                let skills: Vec<Value> = roots
+                    .iter()
+                    .flat_map(|r| std::fs::read_dir(r).into_iter().flatten().flatten())
+                    .filter(|e| std::fs::read_to_string(e.path().join("SKILL.md")).is_ok())
+                    .map(|e| json!({ "name": e.file_name().to_string_lossy(), "path": e.path().join("SKILL.md"), "description": "", "enabled": true }))
+                    .collect();
+                reply(json!({ "data": [{ "cwd": cwd, "skills": skills, "errors": [] }] }));
+            }
             "turn/start" => {
                 turns += 1;
                 let turn = format!("turn-{turns}");
                 reply(json!({ "turn": { "id": turn, "status": "inProgress", "items": [] } }));
                 let text = params["input"][0]["text"].as_str().unwrap_or("").to_string();
                 note("turn/started", json!({ "threadId": THREAD, "turn": { "id": turn } }));
+                if text.starts_with("skill") {
+                    note("turn/completed", json!({ "threadId": THREAD, "turn": { "id": turn, "status": "completed" } }));
+                    continue;
+                }
                 if text == "sleep" {
                     while let Some(Ok(l)) = lines.next() {
                         let Ok(m) = serde_json::from_str::<Value>(&l) else { continue };

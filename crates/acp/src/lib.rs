@@ -20,6 +20,7 @@ pub mod checkpoint;
 mod host;
 pub mod log;
 pub mod policy;
+pub mod skills;
 pub mod socket;
 pub mod usage;
 mod transport;

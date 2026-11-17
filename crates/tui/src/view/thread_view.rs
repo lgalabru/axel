@@ -813,9 +813,9 @@ pub fn composer_height(v: &ThreadView, area: Rect) -> u16 {
     cells(composer_text_rows(v, area.width, max)) + menu_rows(v) + chips + 2
 }
 
-/// Rows the `@name` suggestions take under the composer's text.
+/// Rows the `@name` or `/skill` suggestions take under the composer's text.
 fn menu_rows(v: &ThreadView) -> u16 {
-    cells(v.mention_options().len().min(crate::mention::MAX_ROWS))
+    cells(v.mention_options().len().max(v.skill_options().len()).min(crate::mention::MAX_ROWS))
 }
 
 /// `run [ axel update ] to get 0.3.139`, the command a pill; only the pill
@@ -935,7 +935,11 @@ pub(crate) fn render_composer(frame: &mut Frame, v: &ThreadView, area: Rect) {
         render_composer_text(frame, v, layout.text, glyph, focused);
     }
     if layout.menu.height > 0 {
-        frame.render_widget(Paragraph::new(v.mention.lines(&v.composer, &v.mention_names(), indent, width)), layout.menu);
+        let lines = match &v.skills {
+            Some((_, skills)) if !v.skill_options().is_empty() => v.skill_menu.lines(&v.composer, skills, indent, width),
+            _ => v.mention.lines(&v.composer, &v.mention_names(), indent, width),
+        };
+        frame.render_widget(Paragraph::new(lines), layout.menu);
     }
     if layout.chips.height > 0 {
         let selected = chips_focused.then_some(v.attach_sel);

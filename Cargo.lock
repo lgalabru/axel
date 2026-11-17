@@ -189,12 +189,14 @@ version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "axel-config",
  "axel-i18n",
  "axel-identity",
  "axel-rex",
  "axel-store",
  "base64 0.23.1",
  "chrono",
+ "dirs",
  "futures",
  "libc",
  "serde",
@@ -316,6 +318,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "terminal-colorsaurus",
  "unicode-width",
 ]

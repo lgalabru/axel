@@ -39,6 +39,12 @@ pub fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
+/// A character of a skill's name: a name character, or `:` and `.` (plugin
+/// skills are `plugin:skill`).
+pub fn is_skill_char(c: char) -> bool {
+    is_name_char(c) || c == ':' || c == '.'
+}
+
 /// Steps kept for undo.
 const UNDO_DEPTH: usize = 200;
 
@@ -178,6 +184,46 @@ impl TextInput {
             end += 1;
         }
         let mut with: Vec<char> = std::iter::once('@').chain(name.chars()).collect();
+        let spaced = self.chars.get(end).is_some_and(|c| c.is_whitespace());
+        if !spaced {
+            with.push(' ');
+        }
+        let n = with.len();
+        self.chars.splice(at..end, with);
+        self.cursor = at + n + usize::from(spaced);
+        self.last = None;
+    }
+
+    /// The `/skill` word the cursor is in, if any: where its `/` is, and the
+    /// name typed up to the cursor. It starts a word, so `a/b` isn't one, and
+    /// a word with another `/` in it is a path, not a skill.
+    pub fn skill_at_cursor(&self) -> Option<(usize, String)> {
+        let mut i = self.cursor;
+        while i > 0 && is_skill_char(self.chars[i - 1]) {
+            i -= 1;
+        }
+        let at = i.checked_sub(1)?;
+        if self.chars[at] != '/' || (at > 0 && !self.chars[at - 1].is_whitespace()) {
+            return None;
+        }
+        if self.chars[self.cursor..].iter().take_while(|c| !c.is_whitespace()).any(|&c| c == '/') {
+            return None;
+        }
+        Some((at, self.chars[at + 1..self.cursor].iter().collect()))
+    }
+
+    /// Replace the skill word starting at `at` (the whole word, also what
+    /// follows the cursor) with `/name` and a space: one undoable step.
+    pub fn complete_skill(&mut self, at: usize, name: &str) {
+        if self.chars.get(at) != Some(&'/') {
+            return;
+        }
+        self.save(Edit::Other);
+        let mut end = at + 1;
+        while end < self.chars.len() && is_skill_char(self.chars[end]) {
+            end += 1;
+        }
+        let mut with: Vec<char> = std::iter::once('/').chain(name.chars()).collect();
         let spaced = self.chars.get(end).is_some_and(|c| c.is_whitespace());
         if !spaced {
             with.push(' ');

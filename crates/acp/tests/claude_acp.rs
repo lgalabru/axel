@@ -531,3 +531,53 @@ fn the_agents_effort_starts_claude_with_the_effort_flag_and_none_adds_no_flag() 
     let argv = claude_argv(home.path(), 2).join(" ");
     assert!(argv.contains("--effort low") && argv.contains(&format!("--resume {saved}")), "{argv}");
 }
+
+/// A prompt naming skills (`_meta.axel.skills`): its reply, and what came before.
+fn prompt_with_skills(agent: &mut Agent, sid: &str, text: &str, skills: Value) -> Value {
+    let (_, reply) = agent.call(
+        "session/prompt",
+        json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": text }], "_meta": { "axel": { "skills": skills } } }),
+        |_| json!({}),
+    );
+    reply
+}
+
+#[test]
+fn a_skill_the_prompt_names_becomes_claudes_own_and_one_it_cant_is_pointed_at() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(src.path().join("zz")).unwrap();
+    std::fs::write(src.path().join("zz/SKILL.md"), "---\nname: zz\n---\nSay PINEAPPLE.\n").unwrap();
+    let mut agent = Agent::start(home.path());
+    let (_, init) = agent.call("initialize", json!({ "protocolVersion": 1, "clientCapabilities": {} }), |_| json!({}));
+    assert_eq!(init["result"]["agentCapabilities"]["_meta"]["axel"]["skills"], true, "the host may send skills");
+    let (_, new) = agent.call("session/new", json!({ "cwd": cwd.path(), "mcpServers": [] }), |_| json!({}));
+    let sid = new["result"]["sessionId"].as_str().unwrap().to_string();
+    let argv = claude_argv(home.path(), 0);
+    let added = std::path::PathBuf::from(&argv[argv.iter().position(|a| a == "--add-dir").expect("--add-dir") + 1]);
+    assert!(!added.starts_with(cwd.path()), "the session's own directory, not the project's");
+
+    // zz is new to Claude: linked, reloaded, and the prompt goes as written.
+    // compact Claude has already: nothing to do.
+    let zz = json!({ "name": "zz", "path": src.path().join("zz/SKILL.md") });
+    let compact = json!({ "name": "compact", "path": src.path().join("zz/SKILL.md") });
+    let reply = prompt_with_skills(&mut agent, &sid, "skill /zz /compact", json!([zz, compact]));
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    assert_eq!(std::fs::read_to_string(added.join(".claude/skills/zz/SKILL.md")).unwrap(), "---\nname: zz\n---\nSay PINEAPPLE.\n");
+    assert!(!added.join(".claude/skills/compact").exists());
+    let reloads = |home: &std::path::Path| claude_log(home).iter().filter(|l| l["subtype"] == "reload_skills").count();
+    assert_eq!(reloads(home.path()), 1);
+    let users = |home: &std::path::Path| claude_log(home).iter().filter_map(|l| l["user"].as_str().map(String::from)).collect::<Vec<_>>();
+    assert_eq!(users(home.path()), ["skill /zz /compact"], "Claude has both: no note");
+
+    // Named again: Claude has it, so no second reload.
+    prompt_with_skills(&mut agent, &sid, "skill /zz again", json!([zz]));
+    assert_eq!(reloads(home.path()), 1);
+
+    // One Claude can't load (its file is gone): pointed at instead.
+    let gone = json!({ "name": "gone", "path": src.path().join("gone/SKILL.md") });
+    prompt_with_skills(&mut agent, &sid, "skill /gone", json!([gone]));
+    let last = users(home.path()).pop().unwrap();
+    assert!(last.starts_with("skill /gone") && last.contains(&format!("- /gone: {}", src.path().join("gone/SKILL.md").display())), "{last}");
+}

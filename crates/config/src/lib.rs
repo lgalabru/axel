@@ -29,5 +29,6 @@ pub use config::{
 pub use error::Error;
 pub use indexmap::IndexMap;
 pub use skills::{
-    SKILL_FILE, Skill, default_global_skills_dir, find_all_skills, find_skills, missing_skills, resolve_skills,
+    SKILL_FILE, Skill, SkillHint, SkillScope, all_skill_dirs, default_global_skills_dir, find_all_skills, find_skills,
+    missing_skills, named_skills, resolve_skills, rewrite_skill_words, skill_hints, skill_pointers,
 };

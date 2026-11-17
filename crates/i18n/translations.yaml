@@ -162,6 +162,8 @@
   zh-Hans: "启动"
 "mention":
   zh-Hans: "提及"
+"skill":
+  zh-Hans: "技能"
 "dismiss":
   zh-Hans: "关闭"
 "select":
@@ -1444,6 +1446,8 @@
   zh-Hans: "存储：{error}"
 "usage: {error}":
   zh-Hans: "用量：{error}"
+"skills: {names}":
+  zh-Hans: "技能：{names}"
 "status: {error}":
   zh-Hans: "状态：{error}"
 "permission: {error}":

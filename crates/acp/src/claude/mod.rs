@@ -74,6 +74,12 @@ struct Session {
     steering: Mutex<Steering>,
     /// What the turn spent, from Claude's messages and results.
     meter: Mutex<ClaudeMeter>,
+    /// The skills prompts named that Claude didn't load itself, linked where
+    /// it reads them (`--add-dir`): see [`crate::skills`].
+    skills: crate::skills::SessionSkills,
+    /// The skill (and command) names Claude has: from `initialize`, then
+    /// each `reload_skills` and `commands_changed`.
+    has_skills: Mutex<HashSet<String>>,
 }
 
 /// Messages sent into a running turn (`_axel/steer`). Claude takes each in
@@ -250,8 +256,9 @@ impl Agent {
                         "promptCapabilities": { "image": true, "embeddedContext": true },
                         "mcpCapabilities": { "http": true, "sse": true },
                         "loadSession": true,
-                        // Messages can be sent into a running turn (`_axel/steer`).
-                        "_meta": { "axel": { "steer": true } }
+                        // Messages can be sent into a running turn (`_axel/steer`),
+                        // and the skills a prompt names made Claude's own (`_meta.axel.skills`).
+                        "_meta": { "axel": { "steer": true, "skills": true } }
                     },
                     "agentInfo": { "name": "axel-claude-acp", "title": "Claude Code", "version": env!("CARGO_PKG_VERSION") },
                     "authMethods": [{ "id": "claude-login", "name": "Log in with Claude Code", "description": "Run `claude /login` in the terminal" }]
@@ -339,8 +346,12 @@ impl Agent {
         let meta = params.get("_meta").cloned().unwrap_or(Value::Null);
         let user_options = meta.pointer("/claudeCode/options").cloned().unwrap_or(Value::Null);
         let mcp = mcp_servers(params, &user_options);
-        let args = claude_args(params, &user_options, &mcp, resume.as_deref(), &session_id);
-        let session = self.start_claude(&cwd, &args, &session_id, resume.is_some())?;
+        let skills = crate::skills::SessionSkills::new(&session_id);
+        let mut args = claude_args(params, &user_options, &mcp, resume.as_deref(), &session_id);
+        // Claude reads `<dir>/.claude/skills` of an added directory, and
+        // rereads it on `reload_skills`.
+        args.extend(["--add-dir".into(), skills.made().display().to_string()]);
+        let session = self.start_claude(&cwd, &args, &session_id, resume.is_some(), skills)?;
         let init = session.control(initialize_request(&meta), INITIALIZE_TIMEOUT).map_err(RpcError::internal)?;
         let models = select_model(&session, &init, &cwd);
         let reply = json!({
@@ -349,11 +360,12 @@ impl Agent {
             "modes": { "currentModeId": PermissionMode::Default.as_str(), "availableModes": available_modes() },
         });
         let commands = init.get("commands").cloned().unwrap_or(Value::Array(vec![]));
+        session.has_skills.lock().expect("skills lock").extend(command_names(&commands));
         Ok((session_id, reply, commands))
     }
 
     /// Spawn Claude Code with `args` in `cwd`, and the threads that read it.
-    fn start_claude(self: &Arc<Self>, cwd: &Path, args: &[String], session_id: &str, resumed: bool) -> Result<Arc<Session>, RpcError> {
+    fn start_claude(self: &Arc<Self>, cwd: &Path, args: &[String], session_id: &str, resumed: bool, skills: crate::skills::SessionSkills) -> Result<Arc<Session>, RpcError> {
         let exe = std::env::var("CLAUDE_CODE_EXECUTABLE").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "claude".into());
         let mut cmd = claude_command(&exe);
         cmd.args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
@@ -375,6 +387,8 @@ impl Agent {
             hooked: Mutex::new(HashSet::new()),
             steering: Mutex::new(Steering::default()),
             meter: Mutex::new(if resumed { ClaudeMeter::resumed() } else { ClaudeMeter::default() }),
+            skills,
+            has_skills: Mutex::new(HashSet::new()),
         });
         self.spawn_reader(session.clone(), stdout, tx);
         self.spawn_idle_relay(session.clone());
@@ -640,6 +654,8 @@ impl Agent {
     fn steer(&self, params: &Value) -> RpcResult {
         let s = self.session(params)?;
         let message_id = params.get("messageId").and_then(Value::as_str).unwrap_or("").to_string();
+        // Before the steering lock: the reload waits on Claude's reader.
+        let params = &self.give_skills(&s, params);
         let mut steering = s.steering.lock().expect("steering lock");
         if !steering.prompting || s.cancelled.load(Ordering::SeqCst) {
             return Ok(json!({ "accepted": false }));
@@ -674,6 +690,37 @@ impl Agent {
         ids.into_iter().filter(|id| self.withdraw(s, id)).collect()
     }
 
+    /// `params` with the skills it names (`_meta.axel.skills`) made Claude's
+    /// own: each one Claude doesn't have is linked into the session's skill
+    /// directory, and Claude rereads it (`reload_skills`) before the prompt
+    /// goes in. A skill that still isn't Claude's (the link or the reload
+    /// failed) is named with its file at the end of the prompt instead.
+    fn give_skills(&self, s: &Session, params: &Value) -> Value {
+        let wanted = crate::skills::requested(params);
+        let missing: Vec<crate::skills::Requested> = {
+            let has = s.has_skills.lock().expect("skills lock");
+            wanted.into_iter().filter(|r| !has.contains(&r.name)).collect()
+        };
+        if missing.is_empty() {
+            return params.clone();
+        }
+        if !s.skills.link(Path::new(".claude/skills"), &missing).is_empty() {
+            match s.control(json!({ "subtype": "reload_skills" }), CONTROL_TIMEOUT) {
+                Ok(r) => s.has_skills.lock().expect("skills lock").extend(command_names(r.get("skills").unwrap_or(&Value::Null))),
+                Err(e) => eprintln!("[axel claude-acp] reload_skills: {e}"),
+            }
+        }
+        let has = s.has_skills.lock().expect("skills lock");
+        let unmet: Vec<(&str, &Path)> = missing.iter().filter(|r| !has.contains(&r.name)).map(|r| (r.name.as_str(), r.path.as_path())).collect();
+        let mut params = params.clone();
+        if !unmet.is_empty()
+            && let Some(prompt) = params.get_mut("prompt").and_then(Value::as_array_mut)
+        {
+            prompt.push(json!({ "type": "text", "text": format!("\n\n{}", axel_config::skill_pointers(&unmet)) }));
+        }
+        params
+    }
+
     /// `prompt` from the adapter: send the user message, relay Claude's
     /// stream until its `result` (and, when messages were sent into the turn
     /// too late for it, until the turn they start ends too).
@@ -706,8 +753,9 @@ impl Agent {
         }
         // Only now may messages be sent into the turn: one accepted before the
         // prompt itself went out would reach Claude first, as a prompt of its own.
+        let params = self.give_skills(session, params);
         session.steering.lock().expect("steering lock").prompting = true;
-        session.stdin.send(&prompt_to_claude(params));
+        session.stdin.send(&prompt_to_claude(&params));
         loop {
             let Ok(message) = rx.recv() else {
                 if session.cancelled.load(Ordering::SeqCst) {
@@ -725,7 +773,16 @@ impl Agent {
     /// turn (a `result`, or an error that does); the idle relay ignores that.
     fn relay_message(&self, session: &Arc<Session>, message: &Value) -> Option<RpcResult> {
         match message.get("type").and_then(Value::as_str).unwrap_or("") {
-            "system" | "tool_progress" | "tool_use_summary" | "auth_status" => None,
+            "system" => {
+                // Claude found skills or commands mid-session.
+                if message.get("subtype").and_then(Value::as_str) == Some("commands_changed")
+                    && let Some(commands) = message.get("commands")
+                {
+                    session.has_skills.lock().expect("skills lock").extend(command_names(commands));
+                }
+                None
+            }
+            "tool_progress" | "tool_use_summary" | "auth_status" => None,
             // How much of the plan's windows the account has used.
             "rate_limit_event" => {
                 let limits = claude_limits(message);
@@ -1402,6 +1459,11 @@ fn uri_link(uri: &str) -> String {
         return format!("[@{name}]({uri})");
     }
     uri.to_string()
+}
+
+/// The names in a list of Claude's commands or skills (`[{name, ...}]`).
+fn command_names(commands: &Value) -> Vec<String> {
+    commands.as_array().into_iter().flatten().filter_map(|c| c.get("name").and_then(Value::as_str)).map(String::from).collect()
 }
 
 /// `getAvailableSlashCommands`.

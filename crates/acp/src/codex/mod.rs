@@ -154,6 +154,89 @@ struct Session {
     turn: Mutex<Option<String>>,
     /// What each turn spent, from Codex's token reports.
     meter: Mutex<CodexMeter>,
+    /// The thread's working directory: where Codex looks for skills.
+    cwd: PathBuf,
+    /// The skills prompts named that Codex didn't load itself, linked in a
+    /// directory it reads as an extra skill root: see [`crate::skills`].
+    skills: crate::skills::SessionSkills,
+    /// Codex's skills by name (`skills/list`), once a prompt has named one.
+    listed: Mutex<Option<HashMap<String, PathBuf>>>,
+}
+
+impl Session {
+    /// `input` with the skills `params` names (`_meta.axel.skills`) given to
+    /// Codex as skills: each one Codex doesn't list is linked into the
+    /// session's skill root, and Codex rereads its skills; each named skill
+    /// then goes in as a `skill` item, spelled `$name` in the text. A skill
+    /// Codex still doesn't list is named with its file at the end instead.
+    fn give_skills(&self, params: &Value, mut input: Vec<Value>) -> Vec<Value> {
+        let wanted = crate::skills::requested(params);
+        if wanted.is_empty() {
+            return input;
+        }
+        let mut listed = self.listed.lock().expect("listed lock");
+        let first = listed.is_none();
+        if first {
+            *listed = Some(self.list_skills(false));
+        }
+        let missing: Vec<crate::skills::Requested> =
+            wanted.iter().filter(|r| !listed.as_ref().is_some_and(|l| l.contains_key(&r.name))).cloned().collect();
+        if !self.skills.link(Path::new(""), &missing).is_empty() {
+            let root = json!({ "extraRoots": [self.skills.root()] });
+            if let Err(e) = self.codex.request("skills/extraRoots/set", root, REQUEST_TIMEOUT) {
+                eprintln!("[axel codex-acp] skills/extraRoots/set: {e}");
+            }
+            *listed = Some(self.list_skills(true));
+        }
+        let listed = listed.as_ref().expect("listed above");
+        let mut given: Vec<&str> = Vec::new();
+        let mut unmet: Vec<(&str, &Path)> = Vec::new();
+        for r in &wanted {
+            match listed.get(&r.name) {
+                Some(path) => {
+                    input.push(json!({ "type": "skill", "name": r.name, "path": path }));
+                    given.push(&r.name);
+                }
+                None => unmet.push((&r.name, &r.path)),
+            }
+        }
+        for item in input.iter_mut().filter(|i| i.get("type").and_then(Value::as_str) == Some("text")) {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                item["text"] = json!(axel_config::rewrite_skill_words(text, &given, '$'));
+            }
+        }
+        if !unmet.is_empty() {
+            input.push(json!({ "type": "text", "text": format!("\n\n{}", axel_config::skill_pointers(&unmet)), "text_elements": [] }));
+        }
+        input
+    }
+
+    /// Codex's skills for the thread's directory, by name; `reload` rereads
+    /// them from disk. Empty when Codex won't say.
+    fn list_skills(&self, reload: bool) -> HashMap<String, PathBuf> {
+        let params = json!({ "cwds": [self.cwd], "forceReload": reload });
+        match self.codex.request("skills/list", params, REQUEST_TIMEOUT) {
+            Ok(r) => listed_skills(&r),
+            Err(e) => {
+                eprintln!("[axel codex-acp] skills/list: {e}");
+                HashMap::new()
+            }
+        }
+    }
+}
+
+/// A `skills/list` reply's enabled skills, by name.
+fn listed_skills(reply: &Value) -> HashMap<String, PathBuf> {
+    let mut out = HashMap::new();
+    for entry in reply.get("data").and_then(Value::as_array).into_iter().flatten() {
+        for skill in entry.get("skills").and_then(Value::as_array).into_iter().flatten() {
+            let enabled = skill.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            if let (true, Some(name), Some(path)) = (enabled, skill.get("name").and_then(Value::as_str), skill.get("path").and_then(Value::as_str)) {
+                out.entry(name.to_string()).or_insert_with(|| PathBuf::from(path));
+            }
+        }
+    }
+    out
 }
 
 struct Agent {
@@ -259,8 +342,9 @@ impl Agent {
                     "promptCapabilities": { "image": true, "embeddedContext": true },
                     "mcpCapabilities": { "http": true },
                     "loadSession": true,
-                    // Messages can be sent into a running turn (`_axel/steer`).
-                    "_meta": { "axel": { "steer": true } }
+                    // Messages can be sent into a running turn (`_axel/steer`),
+                    // and the skills a prompt names made Codex's own (`_meta.axel.skills`).
+                    "_meta": { "axel": { "steer": true, "skills": true } }
                 },
                 "agentInfo": { "name": "axel-codex-acp", "title": "Codex", "version": env!("CARGO_PKG_VERSION") },
                 "authMethods": [{ "id": "codex-login", "name": "Log in with Codex", "description": "Run `codex login` in the terminal" }]
@@ -281,7 +365,8 @@ impl Agent {
                     return Ok(json!({ "accepted": false }));
                 };
                 let message_id = params.get("messageId").and_then(Value::as_str).unwrap_or("").to_string();
-                let steer = json!({ "threadId": s.id, "expectedTurnId": turn, "input": prompt_input(&params), "clientUserMessageId": message_id });
+                let input = s.give_skills(&params, prompt_input(&params));
+                let steer = json!({ "threadId": s.id, "expectedTurnId": turn, "input": input, "clientUserMessageId": message_id });
                 match s.codex.request("turn/steer", steer, REQUEST_TIMEOUT) {
                     Ok(_) => {
                         self.client.notify("_axel/steered", json!({ "sessionId": s.id, "messageId": message_id }));
@@ -350,6 +435,9 @@ impl Agent {
             model: Mutex::new(None),
             turn: Mutex::new(None),
             meter: Mutex::new(CodexMeter::new(current_model.clone())),
+            skills: crate::skills::SessionSkills::new(&thread_id),
+            cwd: cwd.clone(),
+            listed: Mutex::new(None),
         });
         self.sessions.lock().expect("sessions lock").insert(thread_id.clone(), session.clone());
         self.read_limits_later(&codex);
@@ -410,7 +498,7 @@ impl Agent {
         } else if let Some(target) = review_target(&text) {
             Some(s.codex.request("review/start", json!({ "threadId": s.id, "target": target }), START_TIMEOUT).map_err(RpcError::internal)?)
         } else {
-            let input = if slash(&text, "init").is_some() { vec![json!({ "type": "text", "text": INIT_PROMPT, "text_elements": [] })] } else { input };
+            let input = if slash(&text, "init").is_some() { vec![json!({ "type": "text", "text": INIT_PROMPT, "text_elements": [] })] } else { s.give_skills(params, input) };
             let mut turn = json!({ "threadId": s.id, "input": input, "approvalPolicy": approval, "sandboxPolicy": sandbox });
             if let Some(m) = s.model.lock().expect("model lock").clone() {
                 turn["model"] = json!(m);

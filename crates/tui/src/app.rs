@@ -307,6 +307,9 @@ impl<'a> App<'a> {
             }
             Screen::Thread(_) => {
                 let action = self.thread.as_mut().map(|t| t.handle_key(key)).unwrap_or(ThreadAction::Back);
+                if let Some(t) = self.thread.as_mut() {
+                    glue::read_skills(self.deps.store, t);
+                }
                 self.on_thread(action)
             }
             Screen::Threads => {

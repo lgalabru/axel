@@ -99,8 +99,17 @@ pub mod remote {   // AXEL.lock pins each remote source to a commit; cache <cach
     pub fn check_updates(config: &WorkspaceConfig, cache: &Path) -> (Lock, Vec<Update>, Vec<String>);
 }
 pub fn resolve_skills(requested: &[String], all: &IndexMap<String, Skill>) -> Vec<Skill>;  // "*" = all
+// `/skill` in prompts (ADR 0012): the composer lists every installed skill; the session host sends the ones a prompt names.
+pub enum SkillScope { Project, User }
+pub struct SkillHint { pub name: String, pub description: Option<String>, pub scope: SkillScope, pub path: PathBuf }
+pub fn all_skill_dirs(work_dirs: &[PathBuf], home: &Path, global: Option<&Path>) -> Vec<(PathBuf, SkillScope)>;  // every driver's project then user dirs, then Axel's global; each once
+pub fn skill_hints(dirs: &[(PathBuf, SkillScope)]) -> Vec<SkillHint>;  // first name wins; unreadable files and dirs skipped
+pub fn named_skills<'a>(text: &str, known: &'a [SkillHint]) -> Vec<&'a SkillHint>;  // `/name` words naming a known skill, each once; paths aren't
+pub fn rewrite_skill_words(text: &str, names: &[&str], sigil: char) -> String;   // `/name` → `{sigil}name` for those names
+pub fn skill_pointers(skills: &[(&str, &Path)]) -> String;                        // the note naming each skill's file, for an agent that can't be given it
 pub mod drivers {
-    pub trait SkillDriver { fn install(&self, project: &Path, skills: &[Skill]) -> Result<(), Error>; fn cleanup(&self, project: &Path) -> Result<(), Error>; fn install_context(&self, project: &Path, axel_md: &Path) -> Result<bool, Error> /* false: the project has its own context file */; }
+    pub trait SkillDriver { fn install(&self, project: &Path, skills: &[Skill]) -> Result<(), Error>; fn cleanup(&self, project: &Path) -> Result<(), Error>; fn install_context(&self, project: &Path, axel_md: &Path) -> Result<bool, Error> /* false: the project has its own context file */;
+        fn project_skill_dirs(&self, project: &Path) -> Vec<PathBuf> /* default: skills_dir */; fn user_skill_dirs(&self, home: &Path) -> Vec<PathBuf> /* default: none */; }
     pub fn for_harness(kind: HarnessKind) -> Option<Box<dyn SkillDriver>>;
 }
 pub mod launch {
@@ -287,6 +296,18 @@ The TUI creates new agents itself: `Keypair::generate()` → `keystore.put_agent
 Inbox screen: list pending requests + recent messages for the owner and all agents; `a`/`d` on a permission request writes a PERMISSION_REPLY envelope signed by the owner (content "allow"/"deny", reply_to(request.id, request.id), thread tag) via `axel_inbox::EnvelopeBuilder` and `store.insert_message`.
 
 ## axel-acp (managed runtime: ACP client, session host, policy)
+
+Skills a prompt names (ADR 0012): the host finds the `/name` words in the message as written that
+name an installed skill (`axel_config::named_skills` over `all_skill_dirs` for its cwd). To an
+adapter whose `initialize` says `agentCapabilities._meta.axel.skills: true` it sends them with the
+prompt (and with an `_axel/steer`) as `_meta.axel.skills: [{name, path}]`, the text unchanged; to
+any other it appends `skill_pointers` to the text. `axel_acp::skills::SessionSkills` is an
+adapter's per-session directory (under the temp dir, its own process's) where it links each named
+skill its harness doesn't load; it's removed with the session. `claude-acp` starts Claude Code with
+`--add-dir` on it, links into `.claude/skills` there and sends `reload_skills` before the prompt;
+`codex-acp` links into it, sets it with `skills/extraRoots/set`, rereads `skills/list` with
+`forceReload`, and sends each named skill as a `{type: "skill", name, path}` input, `/name` spelled
+`$name`. A skill the harness still doesn't list gets `skill_pointers` instead.
 
 The host prefers a model selector from ACP `configOptions` and sends
 `session/set_config_option`; adapters without one retain `session/set_model`.

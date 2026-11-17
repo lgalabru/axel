@@ -24,6 +24,7 @@ pub mod manage;
 pub mod mention;
 pub mod model;
 pub mod picker;
+pub mod skill_menu;
 pub mod theme;
 pub mod thread;
 pub mod tools;

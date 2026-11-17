@@ -31,4 +31,15 @@ impl SkillDriver for CodexDriver {
     fn context_filename(&self) -> &'static str {
         "AGENTS.md"
     }
+
+    /// Where Axel installs, then the shared `.agents/skills` Codex reads.
+    fn project_skill_dirs(&self, project: &Path) -> Vec<PathBuf> {
+        vec![self.skills_dir(project), project.join(".agents").join("skills")]
+    }
+
+    /// The user's `~/.agents/skills`, then Codex's own `~/.codex/skills`.
+    fn user_skill_dirs(&self, home: &Path) -> Vec<PathBuf> {
+        vec![home.join(".agents").join("skills"), home.join(".codex").join("skills")]
+    }
+
 }

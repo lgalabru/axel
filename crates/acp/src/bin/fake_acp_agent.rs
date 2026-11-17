@@ -35,7 +35,8 @@ fn main() {
                 id,
                 json!({
                     "protocolVersion": 1,
-                    "agentCapabilities": { "loadSession": std::env::var_os("FAKE_AGENT_LOAD").is_some(), "promptCapabilities": { "image": true, "embeddedContext": false } },
+                    "agentCapabilities": { "loadSession": std::env::var_os("FAKE_AGENT_LOAD").is_some(), "promptCapabilities": { "image": true, "embeddedContext": false },
+                        "_meta": { "axel": { "skills": std::env::var_os("FAKE_AGENT_SKILLS").is_some() } } },
                     "agentInfo": { "name": "fake-acp-agent", "version": "0.0.1" }
                 }),
             ),

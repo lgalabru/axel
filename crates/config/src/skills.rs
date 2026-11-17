@@ -182,6 +182,134 @@ fn skill_files_in(dir: &Path) -> Result<Vec<PathBuf>, Error> {
     Ok(files)
 }
 
+/// Where a hinted skill was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum SkillScope {
+    /// In one of the thread's work directories.
+    Project,
+    /// In the user's home directory, for every project.
+    User,
+}
+
+/// A skill the composer can suggest by name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SkillHint {
+    pub name: String,
+    pub description: Option<String>,
+    pub scope: SkillScope,
+    /// Its markdown file: what an agent reads when its harness doesn't load it.
+    pub path: PathBuf,
+}
+
+/// Every skill directory any harness loads, for `work_dirs`: each driver's
+/// project directories in each work directory, then each driver's user
+/// directories under `home`, then Axel's own `global` skills. Each once.
+pub fn all_skill_dirs(work_dirs: &[PathBuf], home: &Path, global: Option<&Path>) -> Vec<(PathBuf, SkillScope)> {
+    let drivers = crate::drivers::all();
+    let mut dirs: Vec<(PathBuf, SkillScope)> = Vec::new();
+    let mut add = |d: PathBuf, scope| {
+        if !dirs.iter().any(|(have, _)| *have == d) {
+            dirs.push((d, scope));
+        }
+    };
+    for dir in work_dirs {
+        for driver in &drivers {
+            driver.project_skill_dirs(dir).into_iter().for_each(|d| add(d, SkillScope::Project));
+        }
+    }
+    for driver in &drivers {
+        driver.user_skill_dirs(home).into_iter().for_each(|d| add(d, SkillScope::User));
+    }
+    if let Some(g) = global {
+        add(expand_tilde(g), SkillScope::User);
+    }
+    dirs
+}
+
+/// The `/name` words in `text`: a `/` that starts a word, then a name
+/// (letters, digits, `_ - : .`, trailing `.` and `:` left out as
+/// punctuation), not followed by another `/` (that's a path). Each as the
+/// char range of the whole word and the name.
+fn skill_words(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '/' && (i == 0 || chars[i - 1].is_whitespace()) {
+            let mut end = i + 1;
+            while end < chars.len() && (chars[end].is_alphanumeric() || matches!(chars[end], '_' | '-' | ':' | '.')) {
+                end += 1;
+            }
+            let path = chars.get(end) == Some(&'/');
+            let mut name_end = end;
+            while name_end > i + 1 && matches!(chars[name_end - 1], '.' | ':') {
+                name_end -= 1;
+            }
+            if !path && name_end > i + 1 {
+                out.push((i..name_end, chars[i + 1..name_end].iter().collect()));
+            }
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The skills in `known` that `text` names as `/name`, each once, in the
+/// order named. A `/name` that names no known skill, or a path, isn't one.
+pub fn named_skills<'a>(text: &str, known: &'a [SkillHint]) -> Vec<&'a SkillHint> {
+    let mut out: Vec<&SkillHint> = Vec::new();
+    for (_, name) in skill_words(text) {
+        if let Some(s) = known.iter().find(|s| s.name == name)
+            && !out.iter().any(|o| o.name == s.name)
+        {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// `text` with each `/name` word for a skill in `names` spelled with
+/// `sigil` instead (`$name` for Codex). Other words are left alone.
+pub fn rewrite_skill_words(text: &str, names: &[&str], sigil: char) -> String {
+    let mut chars: Vec<char> = text.chars().collect();
+    for (range, name) in skill_words(text) {
+        if names.contains(&name.as_str()) {
+            chars[range.start] = sigil;
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// For an agent that can't be given skills (its adapter doesn't take
+/// `_meta.axel.skills`): a note naming each skill's file, to read and follow.
+pub fn skill_pointers(skills: &[(&str, &Path)]) -> String {
+    let mut out = String::from("Skills named above that you don't have installed: read each file and follow it.");
+    for (name, path) in skills {
+        out.push_str(&format!("\n- /{name}: {}", path.display()));
+    }
+    out
+}
+
+/// The skills in `dirs`, in order, each name once (the first found wins).
+/// A directory that's missing or unreadable, or a skill file that won't
+/// parse, is skipped: one broken skill mustn't hide the rest.
+pub fn skill_hints(dirs: &[(PathBuf, SkillScope)]) -> Vec<SkillHint> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (dir, scope) in dirs {
+        let Ok(files) = skill_files_in(dir) else { continue };
+        for file in files {
+            let Ok(skill) = Skill::from_file(&file) else { continue };
+            if seen.insert(skill.name.clone()) {
+                out.push(SkillHint { name: skill.name, description: skill.description, scope: *scope, path: skill.path });
+            }
+        }
+    }
+    out
+}
+
 /// Pick the requested skills out of `all`, preserving request order and dropping
 /// duplicates. A request containing `"*"` selects every skill in discovery order.
 /// Unknown names are skipped; see [`missing_skills`].
@@ -213,6 +341,54 @@ mod tests {
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn hints_skip_what_cant_be_read_and_keep_the_first_of_a_name() {
+        let root = tempfile::tempdir().unwrap();
+        let (project, user) = (root.path().join("project"), root.path().join("user"));
+        write(&project.join("review/SKILL.md"), "---\nname: review\ndescription: the project's\n---\n");
+        write(&user.join("review/SKILL.md"), "---\nname: review\ndescription: the user's\n---\n");
+        write(&user.join("rex/SKILL.md"), "---\ndescription: Drive Rex\n---\n");
+        // Not UTF-8: unreadable as a skill, skipped without hiding the rest.
+        fs::create_dir_all(user.join("broken")).unwrap();
+        fs::write(user.join("broken/SKILL.md"), [0xff, 0xfe, 0x00]).unwrap();
+        let dirs = [(project, SkillScope::Project), (root.path().join("missing"), SkillScope::User), (user.clone(), SkillScope::User)];
+        let got: Vec<(String, Option<String>, SkillScope)> = skill_hints(&dirs).into_iter().map(|h| (h.name, h.description, h.scope)).collect();
+        assert_eq!(got, [
+            ("review".into(), Some("the project's".into()), SkillScope::Project),
+            ("rex".into(), Some("Drive Rex".into()), SkillScope::User),
+        ]);
+        assert_eq!(skill_hints(&[(user.clone(), SkillScope::User)])[1].path, user.join("rex/SKILL.md"));
+    }
+
+    #[test]
+    fn skill_words_are_named_once_rewritten_or_pointed_at() {
+        let hint = |n: &str| SkillHint { name: n.into(), description: None, scope: SkillScope::User, path: PathBuf::from(format!("/skills/{n}/SKILL.md")) };
+        let known = [hint("rex"), hint("review"), hint("writing:plain-english")];
+        let text = "/rex then /review, and /review again; /writing:plain-english.";
+        let names: Vec<&str> = named_skills(text, &known).iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["rex", "review", "writing:plain-english"]);
+        // Not skills: unknown names, paths, a slash inside a word, a bare slash.
+        assert!(named_skills("/compact see /rex/notes.md and/or /Users/dylan / x", &known).is_empty());
+        assert_eq!(rewrite_skill_words(text, &["rex", "review"], '$'), "$rex then $review, and $review again; /writing:plain-english.");
+        assert_eq!(rewrite_skill_words("see /rex/notes.md", &["rex"], '$'), "see /rex/notes.md");
+        assert_eq!(
+            skill_pointers(&[("rex", known[0].path.as_path())]),
+            "Skills named above that you don't have installed: read each file and follow it.\n- /rex: /skills/rex/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn every_harness_dir_once_then_axels_own() {
+        let root = tempfile::tempdir().unwrap();
+        let (work, home) = (root.path().join("work"), root.path().join("home"));
+        let dirs: Vec<PathBuf> = all_skill_dirs(std::slice::from_ref(&work), &home, Some(&root.path().join("axel"))).into_iter().map(|(d, _)| d).collect();
+        for want in [work.join(".claude/skills"), work.join(".agents/skills"), home.join(".claude/skills"), home.join(".agents/skills"), root.path().join("axel")] {
+            assert!(dirs.contains(&want), "{want:?} in {dirs:?}");
+        }
+        assert_eq!(dirs.iter().collect::<HashSet<_>>().len(), dirs.len(), "each once");
+        assert!(dirs.iter().position(|d| d.starts_with(&work)) < dirs.iter().position(|d| d.starts_with(&home)), "project first");
     }
 
     #[test]

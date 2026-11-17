@@ -457,6 +457,32 @@ fn tokens_panel(store: &Store, usages: &HashMap<String, axel_store::Usage>, sinc
 
 // ---------------------------------------------------------------- thread view
 
+/// Give `v` every installed skill when it has just started a `/skill` word
+/// (see [`ThreadView::needs_skills`]).
+pub fn read_skills(store: &Store, v: &mut crate::thread::ThreadView) {
+    if v.needs_skills() {
+        let skills = skill_hints(store, &v.thread_id);
+        v.set_skills(skills);
+    }
+}
+
+/// Every skill any harness loads in `thread_id`'s work directories or the
+/// user's home, and Axel's own: each name once, project skills first. Any
+/// agent can be sent any of them (its session host forwards what its
+/// harness doesn't load). Best effort: what can't be read is left out.
+pub fn skill_hints(store: &Store, thread_id: &str) -> Vec<axel_config::SkillHint> {
+    let work_dirs: Vec<std::path::PathBuf> = store
+        .thread_projects(thread_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.workspace.worktree_path.unwrap_or(p.path_hint))
+        .filter(|d| d.is_dir())
+        .collect();
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let global = axel_config::default_global_skills_dir();
+    axel_config::skill_hints(&axel_config::all_skill_dirs(&work_dirs, &home, global.as_deref()))
+}
+
 fn map_kind(k: axel_store::ItemKind) -> ItemKind {
     use axel_store::ItemKind as K;
     match k {
@@ -896,6 +922,27 @@ mod tests {
         let ItemBody::Choice {multiple,chosen,options,..}=body else {panic!("expected choice")};
         assert_eq!(multiple,Some((1,2))); assert_eq!(chosen.as_deref(),Some("Postgres, SQLite"));
         assert!(options[2].exclusive); assert!(!options[0].exclusive);
+    }
+
+    #[test]
+    fn the_thread_projects_skills_for_every_harness_come_first() {
+        let store = Store::open_memory().unwrap();
+        let owner = axel_identity::Keypair::generate();
+        let project = tempfile::tempdir().unwrap();
+        for (dir, name) in [(".codex/skills", "zz-deploy-for-codex"), (".claude/skills", "zz-review-for-claude")] {
+            let d = project.path().join(dir).join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("SKILL.md"), "---\ndescription: test skill\n---\n").unwrap();
+        }
+        let thread = store.create_thread(&owner, "skills", "", None).unwrap();
+        let ws = axel_store::ThreadWorkspace { kind: axel_store::WorkspaceKind::InPlace, branch: None, worktree_path: None };
+        store.attach_project(&owner, &thread.id, None, project.path(), &ws).unwrap();
+
+        let skills = skill_hints(&store, &thread.id);
+        let mut first: Vec<&str> = skills.iter().take(2).map(|s| s.name.as_str()).collect();
+        first.sort();
+        assert_eq!(first, ["zz-deploy-for-codex", "zz-review-for-claude"], "both harnesses' project skills, before the user's");
+        assert!(skills.iter().take(2).all(|s| s.scope == axel_config::SkillScope::Project));
     }
 
     #[test]

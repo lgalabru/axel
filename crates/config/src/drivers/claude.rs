@@ -30,4 +30,8 @@ impl SkillDriver for ClaudeDriver {
     fn context_filename(&self) -> &'static str {
         "CLAUDE.md"
     }
+
+    fn user_skill_dirs(&self, home: &Path) -> Vec<PathBuf> {
+        vec![home.join(".claude").join("skills")]
+    }
 }

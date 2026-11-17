@@ -48,6 +48,17 @@ pub trait SkillDriver {
     fn skills_dir(&self, project: &Path) -> PathBuf;
     /// Project context file the harness reads.
     fn context_filename(&self) -> &'static str;
+
+    /// The skill directories the harness itself loads under `project`,
+    /// nearest first: where Axel installs, unless the harness reads more.
+    fn project_skill_dirs(&self, project: &Path) -> Vec<PathBuf> {
+        vec![self.skills_dir(project)]
+    }
+    /// The user's own skill directories under `home` that the harness loads
+    /// for every project. None unless the driver knows them.
+    fn user_skill_dirs(&self, _home: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// The driver for a harness kind. `None` for `Custom`.
