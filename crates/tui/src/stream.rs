@@ -485,10 +485,10 @@ impl Stream {
     }
 
     /// The message waiting for its reply: a braille spinner in place of its
-    /// `> `, its rows on the accent colour across the pane.
+    /// `> `, and its text in the accent colour (no background).
     fn awaiting_ansi(&self, v: &ThreadView, row: &Row, width: usize) -> Vec<String> {
         let frame = SENDING[self.tick % SENDING.len()];
-        let on_accent = Style::default().fg(ratatui::style::Color::Black).bg(theme::ACCENT);
+        let accent = theme::accent();
         let mut lines = render_row(v, row, width);
         let mut first = true;
         for line in &mut lines {
@@ -500,12 +500,15 @@ impl Stream {
             for (n, span) in line.spans.iter_mut().enumerate().skip(1) {
                 if first && n == 1 && span.content == crate::view::thread_view::YOU_MARK {
                     span.content = format!("{frame} ").into();
+                    span.style = accent.add_modifier(ratatui::style::Modifier::BOLD);
+                    continue;
                 }
-                span.style = span.style.patch(on_accent);
+                // The time at the right keeps its own dim colour.
+                if span.style.fg != Some(theme::DIM) {
+                    span.style = span.style.fg(theme::ACCENT);
+                }
             }
             first = false;
-            let room = width.saturating_add(1).saturating_sub(line.width());
-            line.spans.push(Span::styled(" ".repeat(room), on_accent));
         }
         let mut out: Vec<String> = lines.iter().map(to_ansi).collect();
         if let Row::Prose(i) = row {
@@ -1010,7 +1013,8 @@ mod tests {
         let mut v = ThreadView::new("T1", d.clone());
         let mut s = Stream::default();
         let raw = s.frame(&v, 80, 40);
-        assert!(raw.contains("48;2;255;117;101"), "on the accent colour: {raw:?}");
+        let waiting = raw.lines().find(|l| plain(l).contains("ship it")).unwrap();
+        assert!(waiting.contains("38;2;255;117;101") && !waiting.contains("48;2;"), "the text in the accent colour, no background: {waiting:?}");
         assert!(SENDING.iter().any(|f| plain(&raw).contains(&format!("{f} ship it"))), "a braille spinner for its `> `: {}", plain(&raw));
         assert!(!plain(&raw).contains("Atlas is working…"), "one spinner, on the message");
         // The spinner moves.
@@ -1022,7 +1026,7 @@ mod tests {
         let after = s.frame(&v, 80, 40);
         assert!(plain(&after).contains("> ship it") && plain(&after).contains("On it."), "{}", plain(&after));
         let message_line = after.lines().find(|l| plain(l).contains("ship it")).unwrap();
-        assert!(!message_line.contains("48;2;255;117;101"), "no background once answered: {message_line:?}");
+        assert!(!message_line.contains("38;2;255;117;101m ship it") && !message_line.contains("38;2;255;117;101mship it"), "back to the normal colours once answered: {message_line:?}");
     }
 
     #[test]
