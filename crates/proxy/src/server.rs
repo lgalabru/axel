@@ -1,7 +1,6 @@
 //! The listener and the request path: accept on loopback, refuse what isn't
 //! the harness, forward the rest unchanged, stream the answer back.
 
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +22,7 @@ use crate::analyze::{self, Analysis};
 use crate::observe::{Observer, Shape};
 use crate::record::{Failure, ObservedBody, Owner, ProxyBody, Recording};
 use crate::route::{self, Endpoint, Refusal, Secret};
+use crate::throttle::{Loss, Paced, Throttle};
 use crate::upstream::{Client, Upstream, Upstreams};
 
 /// Most connections served at once; one more is closed as it arrives.  A
@@ -56,6 +56,9 @@ pub(crate) struct Shared {
     pub(crate) thread_id: String,
     pub(crate) agent_pubkey: String,
     pub(crate) turn: Arc<AtomicU64>,
+    pub(crate) throttle: Option<Throttle>,
+    /// Which requests the throttle loses; never, without one.
+    pub(crate) loss: Loss,
     pub(crate) connections: Arc<Semaphore>,
 }
 
@@ -130,7 +133,7 @@ async fn serve_connection(stream: TcpStream, shared: Arc<Shared>, mut shutdown: 
     }
 }
 
-async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Result<Response<ProxyBody>, Infallible> {
+async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Result<Response<ProxyBody>, Lost> {
     let started = Instant::now();
     let endpoint = match route::check(request.method(), request.uri(), request.headers(), &shared.secret, shared.port) {
         Ok(endpoint) => endpoint,
@@ -141,17 +144,53 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Result<Respo
         Ok(body) => body,
         Err(refusal) => return Ok(bare(refusal.status())),
     };
+    // Only a request the proxy accepted is throttled: refusals stay instant.
     let analysis = analyze_off_thread(endpoint, &parts.headers, &body).await;
     let (upstream, provider) = shared.upstreams.for_side(endpoint.side());
     let request_bytes = body.len() as u64;
-    let recording = Recording::start(shared.sink.clone(), shared.owner(), provider, endpoint, analysis, request_bytes, started);
-    let outgoing = upstream_request(parts, upstream, endpoint, body);
+    let is_throttled = shared.throttle.is_some();
+    let recording = Recording::start(shared.sink.clone(), shared.owner(), provider, endpoint, analysis, request_bytes, started, is_throttled);
+    // The way out: half the round trip, then perhaps lost on it.
+    wait_latency(shared.throttle).await;
+    if shared.loss.is_lost() {
+        recording.fail(Failure::Lost);
+        return Err(Lost);
+    }
+    let up_bits_per_sec = shared.throttle.and_then(|t| t.up_bits_per_sec);
+    let outgoing = upstream_request(parts, upstream, endpoint, Paced::new(Full::new(body), up_bits_per_sec));
     match shared.client.request(outgoing).await {
-        Ok(response) => Ok(respond(response, endpoint, recording)),
+        Ok(response) => {
+            // The way back: the other half, before the response starts.
+            wait_latency(shared.throttle).await;
+            let down_bits_per_sec = shared.throttle.and_then(|t| t.down_bits_per_sec);
+            Ok(respond(response, endpoint, recording, down_bits_per_sec))
+        }
         Err(e) => {
             recording.fail(if e.is_connect() { Failure::Connect } else { Failure::Request });
             Ok(bare(StatusCode::BAD_GATEWAY))
         }
+    }
+}
+
+/// A request the throttle lost.  Returned from the service, it makes hyper
+/// close the connection without a response, so the harness sees a broken
+/// connection and retries, as it would on a real network.
+#[derive(Debug)]
+pub(crate) struct Lost;
+
+impl std::fmt::Display for Lost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("lost by the network throttle")
+    }
+}
+
+impl std::error::Error for Lost {}
+
+/// One way's latency, if the session is throttled.
+async fn wait_latency(throttle: Option<Throttle>) {
+    let Some(throttle) = throttle else { return };
+    if throttle.latency_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(u64::from(throttle.latency_ms))).await;
     }
 }
 
@@ -193,27 +232,27 @@ fn is_encoded(headers: &HeaderMap) -> bool {
 /// The harness's request, for the provider: the same method, headers and
 /// body, with the upstream's URL and `Host`, no hop-by-hop headers, and a
 /// plain response asked for so its usage can be read.
-fn upstream_request(parts: Parts, upstream: &Upstream, endpoint: Endpoint, body: Bytes) -> Request<Full<Bytes>> {
+fn upstream_request(parts: Parts, upstream: &Upstream, endpoint: Endpoint, body: Paced<Full<Bytes>>) -> Request<Paced<Full<Bytes>>> {
     let uri = upstream.uri(endpoint, parts.uri.query());
     let mut headers = parts.headers;
     strip_hop_by_hop(&mut headers);
-    // Hyper sets the length from the body, which is complete.
+    // Hyper sets the length from the body's exact size, paced or not.
     headers.remove(header::CONTENT_LENGTH);
     headers.insert(header::HOST, upstream.host());
     headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
-    let mut request = Request::new(Full::new(body));
+    let mut request = Request::new(body);
     *request.method_mut() = parts.method;
     *request.uri_mut() = uri;
     *request.headers_mut() = headers;
     request
 }
 
-fn respond(response: Response<Incoming>, endpoint: Endpoint, recording: Recording) -> Response<ProxyBody> {
+fn respond(response: Response<Incoming>, endpoint: Endpoint, recording: Recording, down_bits_per_sec: Option<u64>) -> Response<ProxyBody> {
     let (mut parts, body) = response.into_parts();
     strip_hop_by_hop(&mut parts.headers);
     let shape = shape(endpoint, &parts.headers);
     let observer = Observer::new(endpoint.side(), shape);
-    let body = ObservedBody::new(body, observer, recording, parts.status);
+    let body = ObservedBody::new(Paced::new(body, down_bits_per_sec), observer, recording, parts.status);
     Response::from_parts(parts, ProxyBody::Observed(Box::new(body)))
 }
 

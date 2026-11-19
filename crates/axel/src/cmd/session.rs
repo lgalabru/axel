@@ -168,18 +168,24 @@ fn host(session_id: &str) -> Result<()> {
     if let Some(profile) = ClaudeProfile::load(&agent.pubkey)? {
         profile.configure_host()?;
     }
+    // A bad network to replay (`AXEL_THROTTLE`), checked before anything
+    // starts: a malformed profile refuses the session rather than run it
+    // unthrottled.
+    let throttle = super::inspector::throttle_from_env()?;
     let mut env = harness_env(&thread.id, &session.id, &agent);
     // After harness_env, which edits our environment while single-threaded:
     // the proxy's runtime starts threads.
     let inspected = super::inspector::Session { session_id: &session.id, thread_id: &thread.id, agent_pubkey: &agent.pubkey, harness: &agent.harness };
     // Off unless the owner asked for it on this thread (`axel inspect on`, or
-    // AXEL_INSPECT=1 for one session); an unreadable switch is off.
+    // AXEL_INSPECT=1 for one session) or throttled it; an unreadable switch is off.
     let switched_on = ctx.store.thread_inspected(&thread.id).unwrap_or(false);
-    let inspection = super::inspector::start(&inspected, super::inspector::wanted(switched_on), &mut env);
-    let (on_turn, notices) = match &inspection {
-        super::inspector::Inspection::On(inspector) => (Some(inspector.turn_hook()), Vec::new()),
-        super::inspector::Inspection::Failed { notice } => (None, vec![notice.clone()]),
-        super::inspector::Inspection::Off => (None, Vec::new()),
+    let inspection = super::inspector::start(&inspected, super::inspector::wanted(switched_on), throttle.as_ref().map(|t| t.throttle), &mut env);
+    let (on_turn, notices) = match (&inspection, &throttle) {
+        (super::inspector::Inspection::On(inspector), Some(throttle)) => (Some(inspector.turn_hook()), vec![throttle.notice()]),
+        (super::inspector::Inspection::On(inspector), None) => (Some(inspector.turn_hook()), Vec::new()),
+        (super::inspector::Inspection::Failed { notice }, _) => (None, vec![notice.clone()]),
+        (super::inspector::Inspection::Off, Some(_)) => (None, vec![t!("the network is not throttled: only Claude and Codex sessions run through the proxy").to_string()]),
+        (super::inspector::Inspection::Off, None) => (None, Vec::new()),
     };
 
     let meta = session_meta(&agent, &cwd);

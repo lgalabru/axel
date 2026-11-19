@@ -796,6 +796,7 @@ pub mod fixtures {
             stop_reason: Some(if claude { "tool_use".into() } else { "completed".into() }),
             error: None,
             breakdown: Some(if claude { claude_breakdown(40 + (at_ms / 1000 % 60) as u64) } else { codex_breakdown() }),
+            throttled: false,
         }
     }
 

@@ -15,6 +15,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
 use crate::route::{Endpoint, Side};
+use crate::throttle::Paced;
 
 /// Which OpenAI backend Codex's login talks to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,7 +135,8 @@ impl Upstreams {
     }
 }
 
-pub(crate) type Client = HyperClient<HttpsConnector<HttpConnector>, Full<Bytes>>;
+/// Request bodies go up paced, when the session is throttled.
+pub(crate) type Client = HyperClient<HttpsConnector<HttpConnector>, Paced<Full<Bytes>>>;
 
 /// Which schemes the client may use.  Only tests can name the plain one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

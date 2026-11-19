@@ -1948,3 +1948,11 @@
   zh-Hans: "正在写入 {path}"
 "{glyph} {took} · {tokens} tokens · ~${cost} · kept warm for {keep} · more: axel expedite -c \"…\" · all of it: axel thread open {thread}":
   zh-Hans: "{glyph} {took} · {tokens} token · ~${cost} · 保持预热 {keep} · 继续：axel expedite -c \"…\" · 查看全部：axel thread open {thread}"
+"network throttled: {name} ({profile})":
+  zh-Hans: "网络已限速：{name}（{profile}）"
+"AXEL_THROTTLE is not a network profile":
+  zh-Hans: "AXEL_THROTTLE 不是有效的网络配置"
+"the network is not throttled: only Claude and Codex sessions run through the proxy":
+  zh-Hans: "网络未限速：只有 Claude 和 Codex 会话经过代理"
+"network throttled":
+  zh-Hans: "网络已限速"
