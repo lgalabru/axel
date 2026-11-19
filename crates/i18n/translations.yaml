@@ -1926,3 +1926,25 @@
   zh-Hans: "{name} 必须是秒数，而不是 {value}"
 "{name} is at most {max} seconds (a day), not {value}":
   zh-Hans: "{name} 最多为 {max} 秒（一天），而不是 {value}"
+"could not take the prompt back from the busy session: {error}":
+  zh-Hans: "无法从忙碌的会话中收回提示：{error}"
+"the session took the prompt but never recorded it; its log is in ~/.axel/logs/{session}.host.log":
+  zh-Hans: "会话接收了提示，却没有记录下来；日志在 ~/.axel/logs/{session}.host.log"
+"session {session} holds more items than expedite reads":
+  zh-Hans: "会话 {session} 的条目超出了 expedite 能读取的数量"
+"a spare needs a --keep above 0: it waits for the next prompt":
+  zh-Hans: "备用会话需要大于 0 的 --keep：它要等待下一个提示"
+"✓ a spare {agent} is already ready here":
+  zh-Hans: "✓ 这里已有一个备用的 {agent} 准备就绪"
+"expedite: a spare, waiting for its prompt":
+  zh-Hans: "expedite：备用会话，等待提示"
+"✓ a spare {agent} is ready ({took}) · kept warm for {keep} · the next axel expedite \"…\" here takes it":
+  zh-Hans: "✓ 备用的 {agent} 已就绪（{took}）· 保持预热 {keep} · 在这里运行的下一个 axel expedite \"…\" 会使用它"
+"{value} is not a duration: try 0, 90s, 10m or 1h":
+  zh-Hans: "{value} 不是时长：试试 0、90s、10m 或 1h"
+"a session is kept warm for a day at most, not {value}":
+  zh-Hans: "会话最多保持预热一天，而不是 {value}"
+"writing {path}":
+  zh-Hans: "正在写入 {path}"
+"{glyph} {took} · {tokens} tokens · ~${cost} · kept warm for {keep} · more: axel expedite -c \"…\" · all of it: axel thread open {thread}":
+  zh-Hans: "{glyph} {took} · {tokens} token · ~${cost} · 保持预热 {keep} · 继续：axel expedite -c \"…\" · 查看全部：axel thread open {thread}"

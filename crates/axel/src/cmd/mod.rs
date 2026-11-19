@@ -5,7 +5,7 @@ mod claude_profile;
 mod convert;
 mod diff;
 mod effort;
-mod expedite;
+pub(crate) mod expedite;
 mod gc;
 mod doctor;
 mod hook;
@@ -118,8 +118,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Inspect { switch: None, thread }) => ui::toggle_inspect(thread),
         Some(Command::Usage { refresh: true }) => usage::refresh(),
         Some(Command::Usage { refresh: false }) => ui::toggle_usage(),
-        Some(Command::Expedite { prompt, agent, resume_last, thread }) => {
-            expedite::run(expedite::Request { prompt: prompt.join(" "), agent, resume_last, thread })
+        Some(Command::Expedite { prompt, keep, warm, agent, resume_last, thread }) => {
+            expedite::run(expedite::Request { prompt: prompt.join(" "), agent, resume_last, thread, keep, warm })
         }
         Some(Command::Doctor) => doctor::run(),
         Some(Command::Gc) => gc::run(&Ctx::open()?, false).map(|_| ()),

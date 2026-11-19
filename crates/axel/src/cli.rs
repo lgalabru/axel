@@ -120,11 +120,20 @@ pub enum Command {
         thread: Option<String>,
     },
     /// The quickest way through: one agent, a fresh context, the reply right
-    /// here, no window. The session stops when its turn ends; -c goes on.
+    /// here, no window. The session stays warm for a while after its turn,
+    /// so -c goes on at once; --warm starts one ahead of the next prompt.
     Expedite {
         /// What to do.
-        #[arg(required = true, trailing_var_arg = true)]
+        #[arg(required_unless_present = "warm", trailing_var_arg = true)]
         prompt: Vec<String>,
+        /// How long the session stays up idle after its turn (0, 90s, 10m,
+        /// 1h; at most 24h). Default 10m, or 30m with --warm; 0 stops it at once.
+        #[arg(long, value_name = "DURATION", value_parser = crate::cmd::expedite::parse_keep)]
+        keep: Option<std::time::Duration>,
+        /// Start a spare session here, idle, for the next `axel expedite "…"`
+        /// in this directory with this agent to take.
+        #[arg(long, conflicts_with_all = ["prompt", "resume_last", "thread"])]
+        warm: bool,
         /// Agent (default: the one used last).
         #[arg(long)]
         agent: Option<String>,
