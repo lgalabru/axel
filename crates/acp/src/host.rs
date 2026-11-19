@@ -843,11 +843,22 @@ impl<W: Write> Host<W> {
     ) -> String {
         let mut in_flight: Option<PromptFuture> = None;
         match self.setup(cx).await {
-            Ok(Some((text, files))) => {
-                let from = self.cfg.initial_from.clone();
-                in_flight = Some(self.start_turn(cx, text, files, from));
+            Ok(initial) => {
+                // A loaded session's history arrives as updates before
+                // `session/load` answers: it is the old conversation, already
+                // on the thread, not this turn's.
+                let early = self.drop_replayed_history(&mut rx).await;
+                if let Some((text, files)) = initial {
+                    let from = self.cfg.initial_from.clone();
+                    in_flight = Some(self.start_turn(cx, text, files, from));
+                }
+                for ev in early {
+                    let action = self.handle_event(cx, ev, in_flight.is_some());
+                    if let Some(reason) = self.act(cx, action, &mut in_flight).await {
+                        return reason;
+                    }
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 let error = format!("{e:#}");
                 self.line(RED, "✖", &t!("setup failed: {error}", error = error));
@@ -941,6 +952,25 @@ impl<W: Write> Host<W> {
             }
         }
         deferred
+    }
+
+    /// The conversation updates waiting before the first prompt starts, which
+    /// can only be a loaded session replaying its history: dropped.  Anything
+    /// else waiting (commands, usage, modes) is returned, to handle as usual.
+    async fn drop_replayed_history(&mut self, rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        tokio::task::yield_now().await;
+        let mut kept = Vec::new();
+        let mut dropped = 0usize;
+        while let Ok(ev) = rx.try_recv() {
+            match &ev {
+                Event::Update(n) if is_conversation_update(&n.update) => dropped += 1,
+                _ => kept.push(ev),
+            }
+        }
+        if dropped > 0 {
+            self.dim(&t!("· {n} updates of the loaded conversation's history skipped", n = dropped));
+        }
+        kept
     }
 
     /// initialize → session/new (or session/load); returns the initial prompt to send.
@@ -2864,6 +2894,20 @@ fn setup_failure_message(harness: &Harness, err: &str) -> String {
     let first = err.lines().next().unwrap_or(err).trim();
     let first: String = if first.chars().count() > 300 { format!("{}…", first.chars().take(300).collect::<String>()) } else { first.to_string() };
     t!("{harness} couldn't start: {reason}", harness = harness.label(), reason = first)
+}
+
+/// An update that is part of the conversation itself (what was said and
+/// done), as opposed to the session's state (commands, modes, usage).
+fn is_conversation_update(update: &acp::SessionUpdate) -> bool {
+    matches!(
+        update,
+        acp::SessionUpdate::UserMessageChunk(_)
+            | acp::SessionUpdate::AgentMessageChunk(_)
+            | acp::SessionUpdate::AgentThoughtChunk(_)
+            | acp::SessionUpdate::ToolCall(_)
+            | acp::SessionUpdate::ToolCallUpdate(_)
+            | acp::SessionUpdate::Plan(_)
+    )
 }
 
 #[cfg(test)]

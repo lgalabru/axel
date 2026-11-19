@@ -99,6 +99,17 @@ fn main() {
                     options.push(effort);
                     result["configOptions"] = json!(options);
                 }
+                // A loaded session replays its history first, as ACP has it.
+                if method == "session/load" && std::env::var_os("FAKE_AGENT_REPLAY").is_some() {
+                    let sid = params.get("sessionId").cloned().unwrap_or(json!("fake-session-1"));
+                    for u in [
+                        json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "earlier question" } }),
+                        json!({ "sessionUpdate": "tool_call", "toolCallId": "old-call", "title": "Read old.rs", "kind": "read", "status": "completed" }),
+                        json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "earlier answer" } }),
+                    ] {
+                        send(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": sid, "update": u } }));
+                    }
+                }
                 respond(id, result);
             }
             "session/set_config_option" if params["configId"] != "model-picker" && std::env::var("FAKE_AGENT_EFFORT").is_ok() => {

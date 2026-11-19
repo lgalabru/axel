@@ -1449,3 +1449,17 @@ fn an_agent_without_an_effort_sets_no_option_and_is_told_nothing() {
     assert!(config_options_set(&f).is_empty());
     assert!(errors(&f).is_empty());
 }
+
+#[test]
+fn a_loaded_sessions_replayed_history_is_not_recorded_as_its_first_turn() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("hello"));
+    f.cfg.env.push(("FAKE_AGENT_LOAD".into(), "1".into()));
+    f.cfg.env.push(("FAKE_AGENT_REPLAY".into(), "1".into()));
+    f.cfg.resume_native_id = Some("saved-session".into());
+    host_until_idle(&f);
+    let items = f.store.items(&f.session_id, 0, 1000).unwrap();
+    let texts: Vec<String> = items.iter().filter(|i| i.kind == ItemKind::AssistantMessage).map(|i| i.content["text"].as_str().unwrap_or_default().to_string()).collect();
+    assert!(!texts.iter().any(|t| t.contains("earlier answer")), "the replay stays out of the new turn: {texts:?}");
+    assert!(!items.iter().any(|i| i.ref_id.as_deref() == Some("old-call")), "nor its tool calls");
+    assert!(!texts.is_empty(), "the new turn is recorded: {items:?}");
+}
