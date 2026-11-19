@@ -1890,3 +1890,33 @@
   zh-Hans: "记录这个话题：现在重启 {agents}，让它也被记录？它的对话会在你的下一条消息时继续（n：仅新会话）"
 "stop recording: restart {agents} now so it stops too? Its conversation continues on your next message (n: only new sessions)":
   zh-Hans: "停止记录：现在重启 {agents}，让它也停止记录？它的对话会在你的下一条消息时继续（n：仅新会话）"
+"· {n} updates of the loaded conversation's history skipped":
+  zh-Hans: "· 已跳过所载入对话历史中的 {n} 条更新"
+"cancelling… (Ctrl+C again to leave it running)":
+  zh-Hans: "正在取消…（再按 Ctrl+C 让它继续运行并退出）"
+"could not cancel: {error}":
+  zh-Hans: "无法取消：{error}"
+"could not stop the session: {error}":
+  zh-Hans: "无法停止会话：{error}"
+"no agents yet: create one with `axel agent new <name> claude`":
+  zh-Hans: "还没有智能体：用 `axel agent new <name> claude` 创建一个"
+"no terminal to answer from: answer it in Axel (axel thread open)":
+  zh-Hans: "没有可作答的终端：请在 Axel 中回答（axel thread open）"
+"nothing to continue yet: run `axel expedite \"…\"` first":
+  zh-Hans: "还没有可继续的内容：请先运行 `axel expedite \"…\"`"
+"number:":
+  zh-Hans: "编号："
+"numbers, comma-separated:":
+  zh-Hans: "编号，用逗号分隔："
+"pick 1 to {n}":
+  zh-Hans: "请选择 1 到 {n}"
+"the last expedite thread is gone; start a new one":
+  zh-Hans: "上一个 expedite 话题已不存在；请新开一个"
+"the session didn't start; its log is in ~/.axel/logs/{session}.host.log":
+  zh-Hans: "会话没有启动；日志在 ~/.axel/logs/{session}.host.log"
+"what should the agent do? `axel expedite \"fix the failing test\"`":
+  zh-Hans: "要让智能体做什么？`axel expedite \"修复失败的测试\"`"
+"which agent? Pass --agent <name>":
+  zh-Hans: "哪个智能体？请传入 --agent <name>"
+"{glyph} {took} · {tokens} tokens · ~${cost} · more: axel expedite -c \"…\" · all of it: axel thread open {thread}":
+  zh-Hans: "{glyph} {took} · {tokens} token · ~${cost} · 继续：axel expedite -c \"…\" · 查看全部：axel thread open {thread}"

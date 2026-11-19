@@ -119,6 +119,22 @@ pub enum Command {
         #[arg(long, global = true)]
         thread: Option<String>,
     },
+    /// The quickest way through: one agent, a fresh context, the reply right
+    /// here, no window. The session stops when its turn ends; -c goes on.
+    Expedite {
+        /// What to do.
+        #[arg(required = true, trailing_var_arg = true)]
+        prompt: Vec<String>,
+        /// Agent (default: the one used last).
+        #[arg(long)]
+        agent: Option<String>,
+        /// Continue the last expedite conversation.
+        #[arg(short = 'c', long = "continue")]
+        resume_last: bool,
+        /// Continue this thread instead.
+        #[arg(long, conflicts_with = "resume_last")]
+        thread: Option<String>,
+    },
     /// Show the tokens each agent spent, in the top-right corner of this
     /// Rex window (again to hide it); outside Rex, right here.
     Usage {

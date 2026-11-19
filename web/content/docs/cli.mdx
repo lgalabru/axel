@@ -12,6 +12,15 @@ Commands answer to the names you'd reach for: the plurals (`axel threads`, `sess
 `add` for agents, `start` for threads), `rm` for `thread delete`, `settle` for `thread
 done`, and `msg` for `send`.
 
+## In a hurry
+
+`axel expedite "fix the failing test"` is the quickest way through: one agent, a fresh
+context, the reply streamed right here, no launcher, window or panes. The session stops
+when its turn ends, with its conversation kept; questions and permissions are asked
+inline. `-c` goes on with the last one, `--thread ID` with another thread, and
+`--agent NAME` picks the agent (default: the one used last). Ctrl+C cancels the turn;
+a second leaves it running. `axel thread open` shows the thread in full.
+
 ## Updates
 
 `axel update` runs `curl -fsSL https://axel.md/install | sh`, with installer output
