@@ -537,6 +537,11 @@ pub(crate) fn attachments_of(content: &Value) -> Vec<std::path::PathBuf> {
 }
 
 /// Decode the store's JSON `content` into an [`ItemBody`] for `kind`.
+/// [`decode_body`] for a stored item, its kind mapped.
+pub(crate) fn item_body(item: &axel_store::ConversationItem) -> crate::model::ItemBody {
+    decode_body(map_kind(item.kind), &item.content)
+}
+
 pub(crate) fn decode_body(kind: ItemKind, content: &Value) -> ItemBody {
     match kind {
         ItemKind::UserMessage | ItemKind::AssistantMessage | ItemKind::Thought => {
