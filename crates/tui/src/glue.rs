@@ -616,6 +616,11 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
         Some(s) => (s.thread.title.clone(), s.environments.clone(), s.usage.input_tokens + s.usage.output_tokens, s.usage.cost_usd_est),
         None => (thread_id.to_string(), Vec::new(), 0, 0.0),
     };
+    let projects: Vec<String> = summary
+        .iter()
+        .flat_map(|s| &s.projects)
+        .map(|p| p.path_hint.file_name().map_or_else(|| p.path_hint.display().to_string(), |n| n.to_string_lossy().into_owned()))
+        .collect();
 
     let mut sessions = store
         .list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })
@@ -640,7 +645,7 @@ pub fn load_thread(store: &Store, owner_pk: &str, thread_id: &str, _now: i64) ->
     }
 
     let known_agents = store.list_agents().map_err(se)?.into_iter().map(|a| (a.name, a.color)).collect();
-    Ok(ThreadData { thread_id: thread_id.to_string(), title, agents, environments, tokens, cost_usd, items, live_sessions, last_agent_name, known_agents })
+    Ok(ThreadData { thread_id: thread_id.to_string(), title, agents, projects, environments, tokens, cost_usd, items, live_sessions, last_agent_name, known_agents })
 }
 
 /// The agents of `sessions` (newest first), each once.

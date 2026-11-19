@@ -727,20 +727,44 @@ fn render_row(v: &ThreadView, row: &Row, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// The title, then who is on the thread, on one row of a pane `width` wide:
-/// the title gives up room first, so the agents stay in sight.
+/// What the thread is, then who is on it, on one row of a pane `width`
+/// wide.  The title when it says something the messages don't; when it is
+/// only the start of the first message (a new thread's), the projects stand
+/// in for it.  The left part gives up room first, so the agents stay in sight.
 fn header_line(v: &ThreadView, width: usize) -> Line<'static> {
     let mut agents: Vec<Span<'static>> = Vec::new();
     for (name, color, _) in &v.data.agents {
         agents.push(Span::styled("  ·  ", theme::dim()));
         agents.push(Span::styled(name.clone(), Style::default().fg(theme::agent_color(*color)).bold()));
     }
+    let lead: Span<'static> = if title_repeats_first_message(&v.data) {
+        Span::styled(v.data.projects.join(", "), theme::bold())
+    } else {
+        Span::styled(v.data.title.clone(), theme::accent_bold())
+    };
+    if lead.content.is_empty() {
+        // A scratch thread named by its first message: the agents alone.
+        if let Some(first) = agents.first_mut() {
+            *first = Span::raw("");
+        }
+        return Line::from(agents);
+    }
     let agents_width: usize = agents.iter().map(Span::width).sum();
     // One column spare: a row that fills the pane exactly may wrap.
     let room = width.saturating_sub(agents_width + 1).max(HEADER_TITLE_COLS_MIN);
-    let mut spans = vec![Span::styled(crate::util::ellipsize(&v.data.title, room), theme::accent_bold())];
+    let mut spans = vec![Span::styled(crate::util::ellipsize(&lead.content, room), lead.style)];
     spans.extend(agents);
     Line::from(spans)
+}
+
+/// Whether the thread's title is just its first message's first line (as a
+/// new thread is named), which the pane shows right under the header anyway.
+fn title_repeats_first_message(d: &crate::model::ThreadData) -> bool {
+    use crate::model::ItemKind as K;
+    let first = d.items.iter().find(|it| it.kind == K::UserMessage && it.agent.is_none() && it.author.is_none());
+    let Some(ItemBody::Text(text)) = first.map(|it| &it.body) else { return false };
+    let first_line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    d.title == crate::util::title_line(text) || d.title == first_line
 }
 
 /// The fewest columns the header's title keeps, however many agents there are.
@@ -962,6 +986,26 @@ mod tests {
             assert_eq!(screen_rows(&line, width), 1, "one row at {width}: {}", plain(&line));
             assert!(plain(&line).ends_with("Atlas") && plain(&line).contains('…'), "{}", plain(&line));
         }
+    }
+
+    #[test]
+    fn a_title_that_only_repeats_the_first_message_gives_way_to_the_projects() {
+        let mut d = fixtures::data();
+        let mut first = fixtures::item("u0", ItemKind::UserMessage, ItemBody::Text("can you help me refine https://github.com/o/pay-web-ui/pull/49, using our design skill stageshow and more words".into()), 1);
+        first.agent = None;
+        d.items.insert(0, first);
+        d.title = crate::util::title_line("can you help me refine https://github.com/o/pay-web-ui/pull/49, using our design skill stageshow and more words");
+        let v = ThreadView::new("T1", d.clone());
+        assert_eq!(plain(&to_ansi(&header_line(&v, 80))), "axel  ·  Atlas", "the project, not the message again");
+        // Renamed: the title says something of its own, so it shows.
+        d.title = "Polish the landing page".into();
+        let v = ThreadView::new("T1", d.clone());
+        assert_eq!(plain(&to_ansi(&header_line(&v, 80))), "Polish the landing page  ·  Atlas");
+        // A scratch thread named by its message: the agents alone.
+        d.title = crate::util::title_line("can you help me refine https://github.com/o/pay-web-ui/pull/49, using our design skill stageshow and more words");
+        d.projects.clear();
+        let v = ThreadView::new("T1", d);
+        assert_eq!(plain(&to_ansi(&header_line(&v, 80))), "Atlas");
     }
 
     #[test]

@@ -324,6 +324,8 @@ pub struct ThreadData {
     pub title: String,
     /// (name, colour, live state) per agent on the thread.
     pub agents: Vec<(String, Option<AgentColor>, StatusState)>,
+    /// The projects it works in, by directory name; none for a scratch thread.
+    pub projects: Vec<String>,
     pub environments: Vec<String>,
     pub tokens: i64,
     pub cost_usd: f64,

@@ -1409,6 +1409,7 @@ pub mod fixtures {
             thread_id: "T1".into(),
             title: "Fix login".into(),
             agents: vec![("Atlas".into(), Some(AgentColor::Purple), axel_store::StatusState::Blocked)],
+            projects: vec!["axel".into()],
             environments: vec!["macbook".into()],
             known_agents: Vec::new(),
             tokens: 12_400,
