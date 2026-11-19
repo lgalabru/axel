@@ -496,8 +496,16 @@ fn follow(ctx: &Ctx, session_id: &str, from_seq: i64) -> Result<Outcome> {
             return Ok(Outcome::Left);
         }
         let items = ctx.store.items(session_id, from_seq, ITEMS_PER_POLL_MAX)?;
-        if items.is_empty() && printed.is_empty() && started.elapsed() > Duration::from_secs(START_WAIT_MAX_SECS) {
-            bail!("{}", t!("the session didn't start; its log is in ~/.axel/logs/{session}.host.log", session = session_id));
+        if items.is_empty() && printed.is_empty() {
+            // A host that failed to start ends its session with why: say so at once.
+            let ended = ctx.store.get_session(session_id)?.filter(|s| s.ended_at.is_some());
+            if let Some(session) = ended {
+                let why = session.ended_reason.unwrap_or_default();
+                bail!("{}", t!("the session ended before it answered: {reason}", reason = why));
+            }
+            if started.elapsed() > Duration::from_secs(START_WAIT_MAX_SECS) {
+                bail!("{}", t!("the session didn't start; its log is in ~/.axel/logs/{session}.host.log", session = session_id));
+            }
         }
         // Items grow in place while they stream: read again from the first
         // one still open, past the ones that are done.

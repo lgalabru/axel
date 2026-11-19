@@ -421,17 +421,34 @@ fn forward_stderr(mut stderr_rx: mpsc::UnboundedReceiver<String>, tx: mpsc::Unbo
 }
 
 /// The command socket at `path`, in place of any left by a host that died.
+/// Its directory is this user's alone: whoever can open the socket can drive
+/// the session.
 fn bind_socket(path: &Path) -> Result<UnixListener> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
+        make_private(parent)?;
     }
     // A socket left by a host that died; none is the usual case, and a real
     // problem with the path shows in `bind` below.
     let _ = std::fs::remove_file(path);
     UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
+}
+
+/// Refuse a directory someone else owns (a planted /tmp/axel-<uid>, say), and
+/// close ours to group and others.
+fn make_private(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::symlink_metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
+    // SAFETY: getuid has no failure mode.
+    let uid = unsafe { libc::getuid() };
+    anyhow::ensure!(meta.is_dir() && meta.uid() == uid, "{} is not a directory of this user's", dir.display());
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).with_context(|| format!("making {} private", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Send `StdinClosed` when the host's pane closes (its stdin ends).
@@ -2956,6 +2973,20 @@ fn is_conversation_update(update: &acp::SessionUpdate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_directory_is_made_private_and_a_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private(&run).unwrap();
+        assert_eq!(std::fs::metadata(&run).unwrap().permissions().mode() & 0o777, 0o700);
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        assert!(make_private(&file).is_err(), "only a directory of ours");
+    }
 
     #[test]
     fn composite_answers_are_bounded_unique_and_never_permission_grants() {

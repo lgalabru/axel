@@ -1956,3 +1956,7 @@
   zh-Hans: "网络未限速：只有 Claude 和 Codex 会话经过代理"
 "network throttled":
   zh-Hans: "网络已限速"
+"the session ended before it answered: {reason}":
+  zh-Hans: "会话在回答之前就结束了：{reason}"
+"could not end the session: {error}":
+  zh-Hans: "无法结束会话：{error}"

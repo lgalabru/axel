@@ -58,6 +58,16 @@ def ms(seconds):
     return round(seconds * 1000, 1)
 
 
+def expedite(cmd, env, cwd):
+    """Time an `axel expedite` run; a failed run stops the benchmark rather
+    than be timed as if it had answered."""
+    took, proc = timed(cmd, env=env, cwd=cwd)
+    if proc.returncode != 0:
+        tail = proc.stderr.decode(errors="replace").strip().splitlines()[-3:]
+        raise SystemExit(f"{' '.join(cmd[1:])} failed ({proc.returncode}): " + " / ".join(tail))
+    return took
+
+
 def timed(cmd, env=None, cwd=None, stdin=subprocess.DEVNULL, timeout=MODEL_TIMEOUT_S, input_bytes=None):
     start = time.monotonic()
     kwargs = dict(env=env, cwd=cwd, capture_output=True, timeout=timeout)
@@ -202,25 +212,23 @@ def bench_model(axel, env, home, work, model, runs, throttle):
     keep = ["--keep", "0"] if has_flag(axel, env, ["expedite"], "--keep") else []
     cold = []
     for _ in range(runs):
-        took, _ = timed([axel, "expedite", *keep, prompt], env=dict(env, AXEL_INSPECT="1"), cwd=work)
-        cold.append(took)
+        cold.append(expedite([axel, "expedite", *keep, prompt], dict(env, AXEL_INSPECT="1"), work))
     out["axel expedite, cold"] = {"median_s": round(statistics.median(cold), 2), "runs_s": [round(s, 2) for s in cold]}
     sizes = axel_request_bytes(home)
     if sizes:
         out["axel expedite, first request bytes"] = sizes[0]
     if keep:
-        timed([axel, "expedite", "--keep", "5m", prompt], env=env, cwd=work)
-        warm = [timed([axel, "expedite", "--keep", "5m", "-c", "again: " + prompt], env=env, cwd=work)[0] for _ in range(runs)]
+        expedite([axel, "expedite", "--keep", "5m", prompt], env, work)
+        warm = [expedite([axel, "expedite", "--keep", "5m", "-c", "again: " + prompt], env, work) for _ in range(runs)]
         out["axel expedite -c, warm"] = {"median_s": round(statistics.median(warm), 2), "runs_s": [round(s, 2) for s in warm]}
     else:
-        resumed = [timed([axel, "expedite", "-c", "again: " + prompt], env=env, cwd=work)[0] for _ in range(runs)]
+        resumed = [expedite([axel, "expedite", "-c", "again: " + prompt], env, work) for _ in range(runs)]
         out["axel expedite -c, resumed"] = {"median_s": round(statistics.median(resumed), 2), "runs_s": [round(s, 2) for s in resumed]}
     if has_flag(axel, env, ["expedite"], "--warm"):
         spare = []
         for _ in range(runs):
-            timed([axel, "expedite", "--warm", "--keep", "5m"], env=env, cwd=work)
-            time.sleep(3)  # Let the spare finish starting, as it would between two uses.
-            spare.append(timed([axel, "expedite", "--keep", "0", prompt], env=env, cwd=work)[0])
+            expedite([axel, "expedite", "--warm", "--keep", "5m"], env, work)
+            spare.append(expedite([axel, "expedite", "--keep", "0", prompt], env, work))
         out["axel expedite, spare"] = {"median_s": round(statistics.median(spare), 2), "runs_s": [round(s, 2) for s in spare]}
     if throttle:
         took, proc = timed([axel, "expedite", *keep, prompt], env=dict(env, AXEL_THROTTLE=throttle), cwd=work)
