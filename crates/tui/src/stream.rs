@@ -128,18 +128,18 @@ fn print_tick(out: &mut impl Write, s: &mut Stream, width: &mut WidthWatch, view
     let tail_overflows = !s.tail_fits(h);
     let print = match width.on_tick(w) {
         Width::Same if tail_overflows => {
-            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view)))?;
+            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view, usize::from(w))))?;
             s.forget();
             true
         }
         Width::Wait => false,
         Width::First => {
             // The pane starts with the login banner (`Last login: …`): clear it.
-            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view)))?;
+            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view, usize::from(w))))?;
             true
         }
         Width::Reprint => {
-            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view)))?;
+            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view, usize::from(w))))?;
             s.forget();
             true
         }
@@ -727,14 +727,24 @@ fn render_row(v: &ThreadView, row: &Row, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn header_line(v: &ThreadView) -> Line<'static> {
-    let mut spans = vec![Span::styled(v.data.title.clone(), theme::accent_bold())];
+/// The title, then who is on the thread, on one row of a pane `width` wide:
+/// the title gives up room first, so the agents stay in sight.
+fn header_line(v: &ThreadView, width: usize) -> Line<'static> {
+    let mut agents: Vec<Span<'static>> = Vec::new();
     for (name, color, _) in &v.data.agents {
-        spans.push(Span::styled("  ·  ", theme::dim()));
-        spans.push(Span::styled(name.clone(), Style::default().fg(theme::agent_color(*color)).bold()));
+        agents.push(Span::styled("  ·  ", theme::dim()));
+        agents.push(Span::styled(name.clone(), Style::default().fg(theme::agent_color(*color)).bold()));
     }
+    let agents_width: usize = agents.iter().map(Span::width).sum();
+    // One column spare: a row that fills the pane exactly may wrap.
+    let room = width.saturating_sub(agents_width + 1).max(HEADER_TITLE_COLS_MIN);
+    let mut spans = vec![Span::styled(crate::util::ellipsize(&v.data.title, room), theme::accent_bold())];
+    spans.extend(agents);
     Line::from(spans)
 }
+
+/// The fewest columns the header's title keeps, however many agents there are.
+const HEADER_TITLE_COLS_MIN: usize = 12;
 
 /// A styled line as ANSI text (SGR per span, reset at the end).
 pub fn to_ansi(line: &Line) -> String {
@@ -940,6 +950,18 @@ mod tests {
         let blocked = root_report("t", &[rec("atlas", State::Working, None), rec("orion", State::Blocked, Some(Kind::Question))]);
         assert!(blocked.starts_with("\x1b]7501;state=blocked:kind=question"), "{blocked}");
         assert!(root_report("t", &[]).starts_with("\x1b]7501;state=idle:app=axel"));
+    }
+
+    #[test]
+    fn the_header_is_one_row_and_keeps_the_agents_in_sight() {
+        let mut d = fixtures::data();
+        d.title = "can you help me refine https://github.com/solana-foundation/pay-web-ui/pull/49, using our design skill stageshow. i want to polish the 2 first section of the website (big swith super polished, and the storyscroll). make it great, beautiful, slick.".into();
+        let v = ThreadView::new("T1", d);
+        for width in [40usize, 80, 140] {
+            let line = to_ansi(&header_line(&v, width));
+            assert_eq!(screen_rows(&line, width), 1, "one row at {width}: {}", plain(&line));
+            assert!(plain(&line).ends_with("Atlas") && plain(&line).contains('…'), "{}", plain(&line));
+        }
     }
 
     #[test]

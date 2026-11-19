@@ -278,11 +278,64 @@ pub fn restore_keys(enhanced: bool) {
 }
 
 
-/// A thread's title from what was typed: its first non-blank line (the
-/// whole text is the intent, the agent's first prompt). Labels can't hold
-/// line breaks.
+/// Most columns a thread's title takes: it names windows, dashboard rows and
+/// the messages pane's header, where a sentence of a prompt doesn't fit.
+pub const TITLE_COLS_MAX: usize = 60;
+
+/// A thread's title from what was typed: its first non-blank line, links
+/// shortened (`pay-web-ui#49`, `docs.rs`), cut at a word to
+/// [`TITLE_COLS_MAX`] columns.  The whole text stays the intent, the
+/// agent's first prompt.  Labels can't hold line breaks.
 pub fn title_line(text: &str) -> String {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string()
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let short: Vec<String> = line.split(' ').map(short_link).collect();
+    let title = cut_at_word(&short.join(" "), TITLE_COLS_MAX);
+    debug_assert!(text_width(&title) <= TITLE_COLS_MAX);
+    title
+}
+
+/// A link as a title shows it: a GitHub pull request or issue as
+/// `repo#49`, a GitHub repo as `owner/repo`, anything else as its host.
+/// Punctuation after it (`…/pull/49,`) stays.  Other words pass through.
+fn short_link(word: &str) -> String {
+    let Some(rest) = word.strip_prefix("https://").or_else(|| word.strip_prefix("http://")) else { return word.to_string() };
+    let trail_at = rest.trim_end_matches([',', '.', ';', ':', '!', '?', ')']).len();
+    let (url, trail) = rest.split_at(trail_at);
+    let mut parts = url.split('/').filter(|p| !p.is_empty());
+    let host = parts.next().unwrap_or("").trim_start_matches("www.");
+    let path: Vec<&str> = parts.collect();
+    let short = match (host, path.as_slice()) {
+        ("github.com", [_, repo, "pull" | "issues", number, ..]) => format!("{repo}#{number}"),
+        ("github.com", [owner, repo, ..]) => format!("{owner}/{repo}"),
+        _ if host.is_empty() => return word.to_string(),
+        _ => host.to_string(),
+    };
+    format!("{short}{trail}")
+}
+
+/// `text` cut to `max` columns at the last word that fits, with `…`; a
+/// single word longer than half of it is cut mid-word instead.
+fn cut_at_word(text: &str, max: usize) -> String {
+    if text_width(text) <= max {
+        return text.to_string();
+    }
+    let room = max.saturating_sub(1);
+    let mut cut = String::new();
+    let mut used = 0usize;
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        cut.push(c);
+        used += w;
+    }
+    if let Some(space) = cut.rfind(' ').filter(|&at| text_width(&cut[..at]) >= max / 2) {
+        cut.truncate(space);
+    }
+    let mut out = cut.trim_end_matches([' ', ',', ';', ':', '-']).to_string();
+    out.push('…');
+    out
 }
 
 /// A link to one run of tool calls (a fold) on a thread: what a click on a
@@ -565,6 +618,12 @@ mod tests {
     #[test]
     fn a_title_is_the_first_line_that_says_something() {
         assert_eq!(super::title_line("\n  fix the login bug  \nit fails on refresh"), "fix the login bug");
+        // A long first line: links shortened, cut at a word, within the limit.
+        let title = super::title_line("can you help me refine https://github.com/solana-foundation/pay-web-ui/pull/49, using our design skill stageshow. i want to polish the 2 first sections");
+        assert!(title.starts_with("can you help me refine pay-web-ui#49, using our design"), "{title}");
+        assert!(title.ends_with('…') && super::text_width(&title) <= super::TITLE_COLS_MAX, "{title}");
+        assert_eq!(super::title_line("read https://docs.rs/tokio/latest and https://github.com/tokio-rs/tokio"), "read docs.rs and tokio-rs/tokio");
+        assert_eq!(super::title_line(&"修".repeat(80)).chars().count(), super::TITLE_COLS_MAX / 2, "wide characters: half as many, ellipsis included");
         assert_eq!(super::title_line("one line"), "one line");
         assert_eq!(super::title_line(" \n "), "");
     }
