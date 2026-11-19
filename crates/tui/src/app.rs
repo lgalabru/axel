@@ -82,6 +82,9 @@ struct App<'a> {
     usage: crate::model::UsageData,
     /// The token inspector, once opened.
     inspect: Option<Inspector>,
+    /// A send or summon the thread asked for, carried out after the next
+    /// draw: the host may take a moment, and the composer shows cleared first.
+    pending_send: Option<ThreadAction>,
     /// Whether this terminal has focus (from focus reports).  The picker
     /// starts without it: the prompt above is focused first.
     focused: bool,
@@ -115,6 +118,7 @@ impl<'a> App<'a> {
             picker: ThreadPicker { can_manage: deps.manage_thread.is_some(), ..Default::default() },
             usage: Default::default(),
             inspect: None,
+            pending_send: None,
             focused,
             prompt_first,
             prompt_size: None,
@@ -593,7 +597,23 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Carry out a send or summon put off by [`Self::on_thread`].
+    fn send_now(&mut self, action: ThreadAction) -> Option<Outcome> {
+        debug_assert!(matches!(action, ThreadAction::Send { .. } | ThreadAction::Summon { .. }));
+        self.on_thread_now(action)
+    }
+
+    /// A thread's action: a send or summon waits for the next draw (one at a
+    /// time; a second carries out the first); the rest happen now.
     fn on_thread(&mut self, action: ThreadAction) -> Option<Outcome> {
+        if matches!(action, ThreadAction::Send { .. } | ThreadAction::Summon { .. }) {
+            let earlier = self.pending_send.replace(action);
+            return earlier.and_then(|a| self.on_thread_now(a));
+        }
+        self.on_thread_now(action)
+    }
+
+    fn on_thread_now(&mut self, action: ThreadAction) -> Option<Outcome> {
         match action {
             // The thread controls are a floating pane of the composer; inline, nothing opens.
             ThreadAction::Manage | ThreadAction::OpenTerminal => None,
@@ -668,6 +688,12 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, deps: &Deps, owner_pk: &s
                 == view::dashboard_view::Mode::Compact;
         app.settle_prompt(size.height);
         terminal.draw(|f| app.draw(f))?;
+        // Drawn with the composer cleared: now wait on the host.
+        if let Some(action) = app.pending_send.take()
+            && let Some(outcome) = app.send_now(action)
+        {
+            return Ok(outcome);
+        }
         if event::poll(POLL)? {
             let ev = event::read()?;
             if let Some(outcome) = app.handle(ev) {
