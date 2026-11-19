@@ -2558,6 +2558,36 @@ fn a_plans_windows_are_kept_per_harness_and_replaced() {
 }
 
 #[test]
+fn antigravitys_buckets_are_plans_of_their_own_and_a_disabled_window_is_cleared() {
+    let s = store();
+    let gemini = Harness::Custom("agy gemini".into());
+    let others = Harness::Custom("agy claude/gpt".into());
+    s.set_plan_limit(&Harness::Claude, LimitWindow::FiveHour, 13.0, Some(1_000)).unwrap();
+    s.set_plan_limit(&gemini, LimitWindow::Week, 100.0, Some(2_000)).unwrap();
+    s.set_plan_limit(&gemini, LimitWindow::FiveHour, 40.0, Some(1_500)).unwrap();
+    s.set_plan_limit(&others, LimitWindow::Week, 1.0, Some(3_000)).unwrap();
+    s.set_plan_limit(&others, LimitWindow::FiveHour, 1.0, Some(1_200)).unwrap();
+    let got = |s: &Store| -> Vec<(String, LimitWindow, f64)> {
+        s.plan_limits().unwrap().into_iter().map(|l| (l.harness.to_string(), l.window, l.used_pct)).collect()
+    };
+    assert_eq!(got(&s), vec![
+        ("agy claude/gpt".into(), LimitWindow::FiveHour, 1.0),
+        ("agy claude/gpt".into(), LimitWindow::Week, 1.0),
+        ("agy gemini".into(), LimitWindow::FiveHour, 40.0),
+        ("agy gemini".into(), LimitWindow::Week, 100.0),
+        ("claude".into(), LimitWindow::FiveHour, 13.0),
+    ], "two buckets, each with both windows, beside Claude's");
+    s.clear_plan_limit(&gemini, LimitWindow::FiveHour).unwrap();
+    s.clear_plan_limit(&gemini, LimitWindow::Month).unwrap(); // nothing there: no error
+    assert_eq!(got(&s), vec![
+        ("agy claude/gpt".into(), LimitWindow::FiveHour, 1.0),
+        ("agy claude/gpt".into(), LimitWindow::Week, 1.0),
+        ("agy gemini".into(), LimitWindow::Week, 100.0),
+        ("claude".into(), LimitWindow::FiveHour, 13.0),
+    ], "only that bucket's window goes");
+}
+
+#[test]
 fn removed_agents_leave_the_roster_without_losing_their_history() {
     let s = store();
     let owner = Keypair::generate();
@@ -2891,6 +2921,20 @@ fn each_harness_says_how_its_pane_takes_a_reasoning_effort() {
     assert_eq!("xhigh".parse::<Effort>().unwrap(), Effort::Xhigh);
     assert!("ultra".parse::<Effort>().is_err());
     assert_eq!(Effort::ALL.iter().map(|e| e.to_string()).collect::<Vec<_>>(), ["low", "medium", "high", "xhigh", "max"]);
+}
+
+#[test]
+fn a_harness_with_a_plan_limits_command_names_its_args_and_prefix() {
+    let agy = Some((&["--print", "/usage"][..], "agy"));
+    assert_eq!(Harness::Custom("agy acp".into()).plan_limits_command(), agy);
+    assert_eq!(Harness::Custom("/opt/bin/agy acp".into()).plan_limits_command(), agy);
+    assert_eq!(Harness::Custom("agy".into()).plan_limits_command(), agy);
+    assert_eq!(Harness::Custom("agyx acp".into()).plan_limits_command(), None);
+    assert_eq!(Harness::Custom("goose acp --agy".into()).plan_limits_command(), None);
+    assert_eq!(Harness::Custom("".into()).plan_limits_command(), None);
+    for h in Harness::BUILTIN {
+        assert_eq!(h.plan_limits_command(), None, "{h}");
+    }
 }
 
 #[test]

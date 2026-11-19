@@ -1444,6 +1444,8 @@
   zh-Hans: "存储：{error}"
 "usage: {error}":
   zh-Hans: "用量：{error}"
+"plan limits: {error}":
+  zh-Hans: "套餐限额：{error}"
 "status: {error}":
   zh-Hans: "状态：{error}"
 "permission: {error}":

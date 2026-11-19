@@ -8,12 +8,38 @@
 //! thought chunk.  Set `FAKE_AGENT_PERMISSION=0` to skip the permission request.
 //! `FAKE_AGENT_LOAD` makes it take `session/load`; `FAKE_AGENT_EFFORT` makes it
 //! advertise a reasoning-effort selector in its `configOptions`.
+//!
+//! Run as `--print /usage` it is Antigravity's quota report instead (linked
+//! as `agy`): it appends its working directory and how many entries it held
+//! to `FAKE_AGY_LOG`, prints `FAKE_AGY_USAGE` (by default what the real `agy`
+//! printed on 2026-11-12), and exits with `FAKE_AGY_EXIT` (0).
 
 use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
+/// What `agy --print /usage` printed on 2026-11-12.
+const AGY_USAGE: &str = "Gemini Models\tWeekly Limit Remaining\t0%\t2026-11-14T01:10:28Z\n\
+    Gemini Models\tFive Hour Limit Remaining\tdisabled\t\n\
+    Claude and GPT models\tWeekly Limit Remaining\t99%\t2026-11-20T03:10:01Z\n\
+    Claude and GPT models\tFive Hour Limit Remaining\t99%\t2026-11-13T08:10:01Z\n";
+
+fn agy_usage() -> ! {
+    if let Some(log) = std::env::var_os("FAKE_AGY_LOG") {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let entries = std::fs::read_dir(&cwd).map_or(0, |d| d.count());
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).expect("FAKE_AGY_LOG");
+        writeln!(f, "{}\t{entries}", cwd.display()).expect("FAKE_AGY_LOG");
+    }
+    print!("{}", std::env::var("FAKE_AGY_USAGE").unwrap_or_else(|_| AGY_USAGE.to_string()));
+    let _ = std::io::stdout().flush();
+    std::process::exit(std::env::var("FAKE_AGY_EXIT").ok().and_then(|c| c.parse().ok()).unwrap_or(0));
+}
+
 fn main() {
+    if std::env::args().skip(1).eq(["--print", "/usage"]) {
+        agy_usage();
+    }
     let mut prompts = 0u32;
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();

@@ -2,7 +2,7 @@
 //!
 //! Pubkeys are base58 strings; timestamps are Unix seconds.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -341,6 +341,19 @@ impl Harness {
             Harness::Grok => vec!["--reasoning-effort".into(), level.into()],
             _ => return None,
         })
+    }
+
+    /// Arguments to pass to [`Self::program`] to read this harness's plan
+    /// limits, and the prefix its plans are named with: Antigravity (a custom
+    /// harness whose program is `agy`) answers `agy --print /usage`, and its
+    /// buckets are kept as `agy <bucket>`. `None` for harnesses without a
+    /// plan-limits command of their own.
+    pub fn plan_limits_command(&self) -> Option<(&'static [&'static str], &'static str)> {
+        if !self.is_builtin() && Path::new(self.program()).file_name().is_some_and(|n| n == "agy") {
+            Some((&["--print", "/usage"], "agy"))
+        } else {
+            None
+        }
     }
 
     /// How to install it, in one line.

@@ -1430,3 +1430,101 @@ fn an_agent_without_an_effort_sets_no_option_and_is_told_nothing() {
     assert!(config_options_set(&f).is_empty());
     assert!(errors(&f).is_empty());
 }
+
+/// Antigravity: the fake agent, linked as `agy` (the program name Axel goes
+/// by), so it also answers `agy --print /usage`; and where it logs each
+/// read (its working directory and how many entries it held).
+struct Agy {
+    _dir: tempfile::TempDir,
+    harness: Harness,
+    log: PathBuf,
+}
+
+fn agy() -> Agy {
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("agy");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_fake_acp_agent"), &program).unwrap();
+    let log = dir.path().join("usage-reads.log");
+    Agy { harness: Harness::Custom(format!("{} acp", program.display())), log, _dir: dir }
+}
+
+fn plan_rows(f: &Fixture) -> Vec<(String, axel_store::LimitWindow, f64, Option<i64>)> {
+    f.store.plan_limits().unwrap().into_iter().map(|l| (l.harness.to_string(), l.window, l.used_pct, l.resets_at)).collect()
+}
+
+fn usage_reads(agy: &Agy) -> Vec<(PathBuf, usize)> {
+    std::fs::read_to_string(&agy.log)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| {
+            let (cwd, entries) = l.split_once('\t').unwrap();
+            (PathBuf::from(cwd), entries.parse().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn antigravitys_buckets_are_read_when_its_session_starts_and_kept_beside_claudes() {
+    use axel_store::LimitWindow::{FiveHour, Week};
+    let agy = agy();
+    let mut f = fixture(RuntimeMode::Autopilot, agy.harness.clone(), Some("hello"));
+    f.cfg.env.push(("FAKE_AGY_LOG".into(), agy.log.display().to_string()));
+    let gemini = Harness::Custom("agy gemini".into());
+    // The five-hour window was on before; `agy` now says it is disabled.
+    f.store.set_plan_limit(&gemini, FiveHour, 40.0, Some(1_500)).unwrap();
+    f.store.set_plan_limit(&Harness::Claude, FiveHour, 13.0, Some(1_000)).unwrap();
+    let host = spawn_host(&f);
+    wait_until("Antigravity's limits", Duration::from_secs(20), || plan_rows(&f).iter().any(|r| r.0 == "agy gemini" && r.1 == Week));
+    assert_eq!(plan_rows(&f), vec![
+        ("agy claude/gpt".into(), FiveHour, 1.0, Some(1794557401)),
+        ("agy claude/gpt".into(), Week, 1.0, Some(1795144201)),
+        ("agy gemini".into(), Week, 100.0, Some(1794618628)),
+        ("claude".into(), FiveHour, 13.0, Some(1_000)),
+    ], "percent used per bucket and window; the disabled window cleared; Claude's untouched");
+
+    // A turn ending within five minutes of the last read does not read again.
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    send_ok(&f.cfg.socket_path, Command::Prompt { text: "again".into(), attachments: vec![], steer: false, from: None });
+    wait_until("turn 2", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 2);
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+    let reads = usage_reads(&agy);
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    let (cwd, entries) = &reads[0];
+    assert_eq!(*entries, 0, "an empty directory");
+    assert!(cwd.canonicalize().is_err() && !cwd.starts_with(&f.cfg.cwd), "a temporary one, not the workspace, gone afterwards: {cwd:?}");
+}
+
+#[test]
+fn a_failed_antigravity_read_leaves_the_limits_as_they_were_and_the_session_goes_on() {
+    use axel_store::LimitWindow::Week;
+    let agy = agy();
+    let mut f = fixture(RuntimeMode::Autopilot, agy.harness.clone(), Some("hello"));
+    f.cfg.env.push(("FAKE_AGY_LOG".into(), agy.log.display().to_string()));
+    // It prints its usage and still fails: nothing it printed is taken.
+    f.cfg.env.push(("FAKE_AGY_EXIT".into(), "3".into()));
+    let gemini = Harness::Custom("agy gemini".into());
+    f.store.set_plan_limit(&gemini, Week, 50.0, Some(2_000)).unwrap();
+    let host = spawn_host(&f);
+    wait_until("the failed read", Duration::from_secs(20), || f.pane.text().contains("plan limits:"));
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    assert_eq!(f.store.turns(&f.thread_id).unwrap()[0].summary.stop_reason, "end_turn");
+    assert_eq!(plan_rows(&f), vec![("agy gemini".into(), Week, 50.0, Some(2_000))]);
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+    assert_eq!(usage_reads(&agy).len(), 1);
+}
+
+#[test]
+fn a_harness_that_is_not_antigravity_is_never_asked_for_its_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("usage-reads.log");
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("hello"));
+    f.cfg.env.push(("FAKE_AGY_LOG".into(), log.display().to_string()));
+    let host = spawn_host(&f);
+    wait_until("turn 1", Duration::from_secs(20), || f.store.turns(&f.thread_id).unwrap().len() == 1);
+    send_ok(&f.cfg.socket_path, Command::Stop);
+    host.join().unwrap().unwrap();
+    assert!(!log.exists());
+    assert!(f.store.plan_limits().unwrap().iter().all(|l| !l.harness.as_str().starts_with("agy ")));
+}

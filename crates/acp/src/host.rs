@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::adapter::{adapter_command, runs_builtin_adapter};
 use crate::agent_rpc::LineRead;
 use crate::checkpoint;
-use crate::usage::TurnUsage;
+use crate::usage::{AgyWindow, TurnUsage, agy_limits};
 use crate::attach::{self, PromptCaps};
 use crate::log::FrameLog;
 use crate::policy::{self, Decision, ToolKind};
@@ -244,6 +244,47 @@ const RAW_LIMIT_BYTES: usize = 16 * 1024;
 /// `TurnSummary.assistant_text` keeps this many chars.
 const ASSISTANT_HEAD_CHARS: usize = 2000;
 
+/// A harness's plan-limits command is run at most this often.
+const AGY_USAGE_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How long reading it may take.
+const AGY_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Whether the plan-limits command may be run again, last run at `last`.
+fn agy_usage_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= AGY_USAGE_EVERY)
+}
+
+/// What `program` with `args` prints, run in an empty temporary directory
+/// (it starts no agent turn and spends no quota). An error when it can't
+/// start, exits non-zero or outlasts `timeout`; then it and whatever it
+/// started are killed.
+async fn read_agy_usage(program: &str, args: &[&str], env: &[(String, String)], timeout: Duration) -> Result<String> {
+    let dir = tempfile::Builder::new().prefix("axel-agy-usage").tempdir().context("creating a temporary directory")?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .current_dir(dir.path())
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
+    let child = cmd.spawn().with_context(|| format!("starting {program}"))?;
+    let pid = child.id();
+    let display = if args.is_empty() { program.to_string() } else { format!("{program} {}", args.join(" ")) };
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(out) => {
+            let out = out.with_context(|| format!("reading {program}"))?;
+            anyhow::ensure!(out.status.success(), "{display} {}", out.status);
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        Err(_) => {
+            signal_process_group(pid, libc::SIGKILL);
+            anyhow::bail!("{display} took more than {}s", timeout.as_secs())
+        }
+    }
+}
+
 /// Host one managed session until it is stopped, the adapter exits, or the
 /// host's stdin (the pane) closes.  See the crate docs for what it does.
 pub async fn run_host(
@@ -259,7 +300,8 @@ pub async fn run_host(
     // Unbounded on purpose: the ACP connection's handlers must never wait on
     // the loop (it may be awaiting them), and what goes in is bounded by its
     // sources: one adapter's frames, socket commands (at most
-    // `CONNECTIONS_MAX` in flight) and the pane's EOF.
+    // `CONNECTIONS_MAX` in flight), Antigravity quota reads (at most one
+    // every `AGY_USAGE_EVERY`) and the pane's EOF.
     let (tx, rx) = mpsc::unbounded_channel::<Event>();
 
     // Adapter.
@@ -276,7 +318,7 @@ pub async fn run_host(
     }
 
     let socket_path = cfg.socket_path.clone();
-    let mut host = Host::new(cfg, store, signer, out, cmd);
+    let mut host = Host::new(cfg, store, signer, out, cmd, tx.clone());
     host.line(CYAN, "●", &t!("adapter: {command}", command = host.adapter.join(" ")));
     let reason = serve_agent(&mut host, transport_, rx, &tx).await;
 
@@ -409,11 +451,16 @@ fn watch_pane(tx: mpsc::UnboundedSender<Event>) {
 /// The adapter and everything it started (Claude, `npx` wrappers) share a
 /// process group: end the group, so no harness outlives its session.
 fn end_process_group(child: &tokio::process::Child) {
-    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+    signal_process_group(child.id(), libc::SIGTERM);
+}
+
+/// Send `signal` to a process group started with `process_group(0)`.
+fn signal_process_group(id: Option<u32>, signal: libc::c_int) {
+    if let Some(pid) = id.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
         // SAFETY: signalling a process group we created (`process_group(0)`).
         // It may be gone already (ESRCH): then there is nothing left to end.
         unsafe {
-            libc::killpg(pid, libc::SIGTERM);
+            libc::killpg(pid, signal);
         }
     }
 }
@@ -434,6 +481,8 @@ enum Event {
     StdinClosed,
     /// One of the adapter's own notifications (`_axel/…`).
     Ext { method: String, params: Value },
+    /// Antigravity's quota, read off the loop: its windows, or why not.
+    AgyUsage(std::result::Result<Vec<AgyWindow>, String>),
 }
 
 type PromptFuture = Pin<Box<dyn Future<Output = Result<acp::PromptResponse, acp::Error>> + Send>>;
@@ -701,10 +750,14 @@ struct Host<W: Write> {
     /// When this agent last started a turn (Unix ms): the thread after that is
     /// what it hasn't seen.  `None` before its first turn here.
     seen_through: Option<i64>,
+    /// The loop's own channel, for work done off it to report back.
+    events: mpsc::UnboundedSender<Event>,
+    /// When Antigravity's quota was last read (or a read started).
+    agy_usage_read: Option<Instant>,
 }
 
 impl<W: Write> Host<W> {
-    fn new(cfg: HostConfig, store: Store, signer: Keypair, out: W, adapter: Vec<String>) -> Self {
+    fn new(cfg: HostConfig, store: Store, signer: Keypair, out: W, adapter: Vec<String>, events: mpsc::UnboundedSender<Event>) -> Self {
         let mode_cell = Arc::new(std::sync::Mutex::new(cfg.runtime_mode));
         let mut session_cost = store.usage(&cfg.session_id).ok().flatten().map_or(0.0, |u| u.cost_usd_est);
         if let Some(native) = &cfg.resume_native_id {
@@ -753,6 +806,8 @@ impl<W: Write> Host<W> {
             turn_from: None,
             ended: false,
             seen_through: None,
+            events,
+            agy_usage_read: None,
         }
     }
 
@@ -839,6 +894,7 @@ impl<W: Write> Host<W> {
                 return format!("setup failed: {error}");
             }
         }
+        self.refresh_agy_limits();
         loop {
             tokio::select! {
                 ev = rx.recv() => {
@@ -1241,6 +1297,10 @@ impl<W: Write> Host<W> {
                 self.on_ext(&method, &params);
                 Action::None
             }
+            Event::AgyUsage(read) => {
+                self.store_agy_limits(read);
+                Action::None
+            }
             Event::Stderr(line) => {
                 let shown: String = line.chars().take(200).collect();
                 self.dim(&format!("‹adapter› {shown}"));
@@ -1573,6 +1633,51 @@ impl<W: Write> Host<W> {
         }
     }
 
+    /// Plan limits for a harness with a command of its own
+    /// ([`Harness::plan_limits_command`]), when the last read is five minutes
+    /// old: read on a task of its own, which reports back with
+    /// [`Event::AgyUsage`], so the session never waits for it.
+    fn refresh_agy_limits(&mut self) {
+        let Some((args, prefix)) = self.cfg.harness.plan_limits_command() else {
+            return;
+        };
+        let now = Instant::now();
+        if !agy_usage_due(self.agy_usage_read, now) {
+            return;
+        }
+        self.agy_usage_read = Some(now);
+        let program = self.cfg.harness.program().to_string();
+        let env = self.cfg.env.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let read = read_agy_usage(&program, args, &env, AGY_USAGE_TIMEOUT)
+                .await
+                .map(|out| agy_limits(&out, prefix))
+                .map_err(|e| format!("{e:#}"));
+            // The loop is gone only when the session has stopped, and the read is dropped.
+            let _ = events.send(Event::AgyUsage(read));
+        });
+    }
+
+    /// Keep what the harness said of each bucket's windows: percent used, or
+    /// a disabled window cleared. A failed read keeps what was there.
+    fn store_agy_limits(&mut self, read: std::result::Result<Vec<AgyWindow>, String>) {
+        debug_assert!(self.cfg.harness.plan_limits_command().is_some(), "only harnesses with a plan-limits command read usage this way");
+        let windows = match read {
+            Ok(w) => w,
+            Err(e) => return self.dim(&t!("plan limits: {error}", error = e)),
+        };
+        for w in windows {
+            let stored = match w.used_pct {
+                Some(used) => self.store.set_plan_limit(&w.plan, w.window, used, w.resets_at),
+                None => self.store.clear_plan_limit(&w.plan, w.window),
+            };
+            if let Err(e) = stored {
+                self.store_failed(&e);
+            }
+        }
+    }
+
     /// Merge `patch` into an item's content.
     fn patch_item(&mut self, item_id: &str, patch: Value) {
         if let Err(e) = self.store.update_item(item_id, None, Some(patch)) {
@@ -1865,6 +1970,7 @@ impl<W: Write> Host<W> {
             }
             (TurnOutcome::Failed, Ok(_)) => unreachable!("a turn fails only when its prompt request does"),
         }
+        self.refresh_agy_limits();
     }
 
     /// What a turn leaves open when it ends: its streamed text, pending
@@ -2976,6 +3082,58 @@ mod tests {
         assert!(msg.contains("pi auth login"), "{msg}");
         let other = super::setup_failure_message(&Harness::Goose, "initialize: connection closed\nmore detail");
         assert_eq!(other, "Goose couldn't start: initialize: connection closed");
+    }
+
+    #[test]
+    fn antigravitys_usage_is_read_at_most_every_five_minutes() {
+        let t = Instant::now();
+        assert!(super::agy_usage_due(None, t), "never read yet");
+        assert!(!super::agy_usage_due(Some(t), t + Duration::from_secs(299)));
+        assert!(super::agy_usage_due(Some(t), t + Duration::from_secs(300)));
+    }
+
+    /// A stand-in `agy` running `script` in `dir`.
+    fn script_agy(dir: &Path, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("agy");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_usage_read_that_hangs_is_given_up_and_killed_with_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let agy = script_agy(dir.path(), "sleep 30 &\necho $! > \"$PIDFILE\"\nwait");
+        let env = [("PIDFILE".to_string(), pidfile.display().to_string())];
+        let started = Instant::now();
+        let err = super::read_agy_usage(&agy, &["--print", "/usage"], &env, Duration::from_millis(500)).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(format!("{err:#}").contains("took more than"), "{err:#}");
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            // SAFETY: signal 0 only asks whether the process exists.
+            unsafe { libc::kill(pid, 0) != 0 }
+        });
+        assert!(gone, "the sleep it started outlived the read");
+    }
+
+    #[tokio::test]
+    async fn a_usage_read_fails_without_the_program_or_on_a_non_zero_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nowhere").join("agy");
+        assert!(super::read_agy_usage(&missing.display().to_string(), &["--print", "/usage"], &[], Duration::from_secs(5)).await.is_err());
+        let agy = script_agy(dir.path(), "echo 'Gemini Models\tWeekly Limit Remaining\t50%\t'\nexit 2");
+        let err = super::read_agy_usage(&agy, &["--print", "/usage"], &[], Duration::from_secs(5)).await.unwrap_err();
+        assert!(format!("{err:#}").contains("exit"), "{err:#}");
+        let agy = script_agy(dir.path(), "pwd; ls -A | wc -l");
+        let out = super::read_agy_usage(&agy, &["--print", "/usage"], &[], Duration::from_secs(5)).await.unwrap();
+        let mut lines = out.lines();
+        let cwd = Path::new(lines.next().unwrap());
+        assert!(!cwd.starts_with(dir.path()) && cwd.canonicalize().is_err(), "a temporary directory, gone afterwards: {cwd:?}");
+        assert_eq!(lines.next().unwrap().trim(), "0", "and empty");
     }
 }
 

@@ -35,6 +35,8 @@ const SPARK_MIN: usize = 6;
 const SPARK_MINUTES: usize = 60;
 /// Widest an agent's name gets.
 const NAME_MAX: usize = 10;
+/// Widest a plan's name gets in the plan limits section.
+const PLAN_NAME_MAX: usize = 16;
 
 /// A column after the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,12 +303,17 @@ fn thread_lines(out: &mut Vec<Line<'static>>, data: &UsageData, width: usize, le
 }
 
 /// The plan limits section (a gap, a label, a row per harness) when it all
-/// fits in `left` rows; the rows it took.
+/// fits in `left` rows; the rows it took. The names take `name_w`, the
+/// agents' column, or more for a longer plan name (`agy claude/gpt`), up to
+/// [`PLAN_NAME_MAX`].
 fn plans(out: &mut Vec<Line<'static>>, plans: &[PlanRow], width: usize, left: usize, name_w: usize) -> usize {
     const HEADING: usize = 2;
     if plans.is_empty() || left < plans.len() + HEADING {
         return 0;
     }
+    let longest = plans.iter().map(|p| text_width(&p.harness)).max().unwrap_or(0);
+    // Room for one window's share (`  5h 100%`) after the name.
+    let name_w = longest.min(PLAN_NAME_MAX).min(width.saturating_sub(9)).max(name_w);
     out.push(Line::raw(""));
     out.push(Line::styled(t!("plan limits"), theme::dim()));
     for p in plans {
@@ -672,6 +679,29 @@ mod tests {
         let narrow = screen(26, 12, &gone);
         let at = narrow.iter().position(|l| l.contains("plan limits")).unwrap();
         assert!(narrow[at + 1].contains("5h 100% ↻2h"), "{narrow:?}");
+    }
+
+    #[test]
+    fn antigravitys_buckets_are_named_in_full_beside_claude_and_codex() {
+        use axel_store::LimitWindow;
+        let mut d = with_limits(data());
+        let gemini = PlanRow { harness: "agy gemini".into(), windows: vec![LimitRow { window: LimitWindow::Week, used_pct: Some(100.0), resets_in: Some(86_400) }] };
+        let others = PlanRow { harness: "agy claude/gpt".into(), windows: vec![
+            LimitRow { window: LimitWindow::FiveHour, used_pct: Some(1.0), resets_in: Some(3 * 3600) },
+            LimitRow { window: LimitWindow::Week, used_pct: Some(1.0), resets_in: Some(7 * 86_400) },
+        ] };
+        d.limits.splice(0..0, [others, gemini]);
+        let s = screen(70, 16, &d);
+        let row = |l: &str| l.trim_start_matches(['│', ' ']).to_string();
+        let at = s.iter().position(|l| l.contains("plan limits")).expect("limits section");
+        assert!(row(&s[at + 1]).starts_with("agy claude/gpt  5h"), "{s:?}");
+        assert!(row(&s[at + 2]).starts_with("agy gemini      wk ▰▰▰▰▰ 100%"), "{s:?}");
+        assert!(row(&s[at + 3]).starts_with("claude          5h ▰▰▰▰▱  84%"), "{s:?}");
+        assert!(row(&s[at + 4]).starts_with("codex           5h  new"), "{s:?}");
+        assert!(s.iter().any(|l| row(l).starts_with("terra        310k")), "the agents' names keep their own width: {s:?}");
+        // Folded onto one line, each is named too.
+        let s = screen(150, 3, &d);
+        assert!(s[0].contains("agy claude/gpt 5h 1%  wk 1% · agy gemini wk 100% · claude 5h 84%"), "{s:?}");
     }
 
     #[test]

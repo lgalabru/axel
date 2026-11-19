@@ -367,6 +367,7 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // v7: plan limits (Claude's and Codex's five-hour and weekly windows),
     // as each harness last reported them for the account signed in here.
+    // Antigravity's quota buckets are plans of their own (`agy gemini`).
     // Local-only.
     r#"
     CREATE TABLE IF NOT EXISTS plan_limits (

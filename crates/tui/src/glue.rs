@@ -930,6 +930,23 @@ mod tests {
     }
 
     #[test]
+    fn antigravitys_buckets_reach_the_dashboard_as_plans_of_their_own() {
+        use axel_store::{Harness, LimitWindow};
+        let store = Store::open_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        store.set_plan_limit(&Harness::Claude, LimitWindow::Week, 9.0, Some(now + 3_600)).unwrap();
+        store.set_plan_limit(&Harness::Custom("agy gemini".into()), LimitWindow::Week, 100.0, Some(now + 86_400)).unwrap();
+        store.set_plan_limit(&Harness::Custom("agy claude/gpt".into()), LimitWindow::FiveHour, 1.0, Some(now + 7_200)).unwrap();
+        store.set_plan_limit(&Harness::Custom("agy claude/gpt".into()), LimitWindow::Week, 1.0, Some(now + 600_000)).unwrap();
+        let limits = load_usage(&store, now, None).unwrap().limits;
+        let got: Vec<String> = limits
+            .iter()
+            .map(|p| format!("{} {}", p.harness, p.windows.iter().map(|w| format!("{}={:?}", w.window.short(), w.used_pct)).collect::<Vec<_>>().join(" ")))
+            .collect();
+        assert_eq!(got, ["agy claude/gpt 5h=Some(1.0) wk=Some(1.0)", "agy gemini wk=Some(100.0)", "claude wk=Some(9.0)"]);
+    }
+
+    #[test]
     fn archived_usage_keeps_history_and_its_name_without_crowding_current_rows() {
         let store = Store::open_memory().unwrap();
         let owner = axel_identity::Keypair::generate();

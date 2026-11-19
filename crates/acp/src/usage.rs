@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use axel_store::LimitWindow;
+use axel_store::{Harness, LimitWindow};
 use serde_json::{Value, json};
 
 /// How often a running turn reports what it has spent so far.
@@ -483,6 +483,63 @@ pub fn codex_limits(params: &Value) -> Vec<Limit> {
     limits
 }
 
+/// One window of one of Antigravity's quota buckets, from `agy --print /usage`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AgyWindow {
+    /// The plan the bucket is kept as: `agy gemini`, `agy claude/gpt`.
+    pub(crate) plan: Harness,
+    pub(crate) window: LimitWindow,
+    /// 0–100; `None` when the window is disabled.
+    pub(crate) used_pct: Option<f64>,
+    /// When it starts over (Unix seconds); `None` when disabled.
+    pub(crate) resets_at: Option<i64>,
+}
+
+/// Output of a harness's plan-limits command (e.g. `agy --print /usage`): a
+/// line per window of each quota bucket, tab-separated: the bucket (`Gemini
+/// Models`), the window (`Weekly Limit Remaining`), the percent remaining
+/// (`99%`) or `disabled`, and when it starts over (RFC 3339; empty for a
+/// disabled window). Each bucket is a plan of its own under `prefix`,
+/// [`agy_plan`]. A line that does not read is skipped, so what was stored for
+/// it stays: an enabled window reads only with a share from 0 to 100% and a
+/// reset time.
+pub(crate) fn agy_limits(output: &str, prefix: &str) -> Vec<AgyWindow> {
+    output.lines().filter_map(|line| agy_line(line, prefix)).collect()
+}
+
+fn agy_line(line: &str, prefix: &str) -> Option<AgyWindow> {
+    let mut cols = line.split('\t').map(str::trim);
+    let (bucket, window, value, reset) = (cols.next()?, cols.next()?, cols.next()?, cols.next().unwrap_or(""));
+    let plan = agy_plan(prefix, bucket)?;
+    let window = window.to_ascii_lowercase();
+    let window = if window.contains("five hour") || window.contains("5 hour") {
+        LimitWindow::FiveHour
+    } else if window.contains("week") {
+        LimitWindow::Week
+    } else if window.contains("month") {
+        LimitWindow::Month
+    } else {
+        return None;
+    };
+    if value.eq_ignore_ascii_case("disabled") {
+        return Some(AgyWindow { plan, window, used_pct: None, resets_at: None });
+    }
+    let remaining: f64 = value.strip_suffix('%')?.trim().parse().ok().filter(|p| (0.0..=100.0).contains(p))?;
+    let resets_at = chrono::DateTime::parse_from_rfc3339(reset).ok()?.timestamp();
+    let used_pct = 100.0 - remaining;
+    debug_assert!((0.0..=100.0).contains(&used_pct));
+    Some(AgyWindow { plan, window, used_pct: Some(used_pct), resets_at: Some(resets_at) })
+}
+
+/// The plan a bucket is kept as, which the dashboard shows: `prefix`, then
+/// the bucket in lower case without "models", "and" as `/` (`Gemini Models`
+/// with `agy` is `agy gemini`, `Claude and GPT models` is `agy claude/gpt`).
+fn agy_plan(prefix: &str, bucket: &str) -> Option<Harness> {
+    let words: Vec<String> = bucket.split_whitespace().map(str::to_lowercase).filter(|w| w != "models" && w != "model").collect();
+    let name = words.split(|w| w == "and").filter(|g| !g.is_empty()).map(|g| g.join("-")).collect::<Vec<_>>().join("/");
+    (!name.is_empty()).then(|| Harness::Custom(format!("{prefix} {name}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +730,58 @@ mod tests {
     fn limits_travel_to_the_host() {
         let l = vec![Limit { window: LimitWindow::Week, used_pct: 9.0, resets_at: None }];
         assert_eq!(limits_from_params(&limits_params(&l)), l);
+    }
+
+    /// `agy --print "/usage"` as it printed on 2026-11-12.
+    const AGY_USAGE: &str = "Gemini Models\tWeekly Limit Remaining\t0%\t2026-11-14T01:10:28Z\n\
+        Gemini Models\tFive Hour Limit Remaining\tdisabled\t\n\
+        Claude and GPT models\tWeekly Limit Remaining\t99%\t2026-11-20T03:10:01Z\n\
+        Claude and GPT models\tFive Hour Limit Remaining\t99%\t2026-11-13T08:10:01Z\n";
+
+    fn agy(plan: &str, window: LimitWindow, used_pct: Option<f64>, resets_at: Option<i64>) -> AgyWindow {
+        AgyWindow { plan: Harness::Custom(plan.into()), window, used_pct, resets_at }
+    }
+
+    #[test]
+    fn antigravitys_usage_gives_each_buckets_windows_as_percent_used() {
+        assert_eq!(agy_limits(AGY_USAGE, "agy"), vec![
+            agy("agy gemini", LimitWindow::Week, Some(100.0), Some(1794618628)),
+            agy("agy gemini", LimitWindow::FiveHour, None, None),
+            agy("agy claude/gpt", LimitWindow::Week, Some(1.0), Some(1795144201)),
+            agy("agy claude/gpt", LimitWindow::FiveHour, Some(1.0), Some(1794557401)),
+        ]);
+    }
+
+    #[test]
+    fn a_line_antigravity_garbled_is_skipped_and_the_rest_kept() {
+        let out = "Usage\n\
+            Gemini Models\tWeekly Limit Remaining\t0%\t2026-11-14T01:10:28Z\n\
+            Gemini Models\tWeekly Limit Remaining\tlots\t2026-11-14T01:10:28Z\n\
+            Gemini Models\tFortnightly Limit Remaining\t50%\t2026-11-14T01:10:28Z\n\
+            Gemini Models\tFive Hour Limit Remaining\t40%\tsoon\n\
+            Claude and GPT models\tWeekly Limit Remaining\n\
+            \n\
+            Claude and GPT models\tFive Hour Limit Remaining\t99.5%\t2026-11-13T08:10:01Z\n";
+        assert_eq!(agy_limits(out, "agy"), vec![
+            agy("agy gemini", LimitWindow::Week, Some(100.0), Some(1794618628)),
+            agy("agy claude/gpt", LimitWindow::FiveHour, Some(0.5), Some(1794557401)),
+        ]);
+        assert!(agy_limits("", "agy").is_empty());
+    }
+
+    #[test]
+    fn an_enabled_window_without_a_reset_or_with_a_share_out_of_range_is_skipped() {
+        let out = "Gemini Models\tWeekly Limit Remaining\t0%\t2026-11-14T01:10:28Z\n\
+            Gemini Models\tFive Hour Limit Remaining\t40%\t\n\
+            Gemini Models\tFive Hour Limit Remaining\t40%\n\
+            Claude and GPT models\tWeekly Limit Remaining\t150%\t2026-11-20T03:10:01Z\n\
+            Claude and GPT models\tWeekly Limit Remaining\t-5%\t2026-11-20T03:10:01Z\n\
+            Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-11-13T08:10:01Z\n\
+            Claude and GPT models\tMonthly Limit Remaining\tdisabled\n";
+        assert_eq!(agy_limits(out, "agy"), vec![
+            agy("agy gemini", LimitWindow::Week, Some(100.0), Some(1794618628)),
+            agy("agy claude/gpt", LimitWindow::FiveHour, Some(0.0), Some(1794557401)),
+            agy("agy claude/gpt", LimitWindow::Month, None, None),
+        ]);
     }
 }

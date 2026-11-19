@@ -439,6 +439,13 @@ impl Store {
         Ok(())
     }
 
+    /// Forget a plan window `harness`'s account no longer has (Antigravity
+    /// reports a window `disabled`).  Nothing stored is no error.
+    pub fn clear_plan_limit(&self, harness: &Harness, window: LimitWindow) -> Result<(), Error> {
+        self.conn.execute("DELETE FROM plan_limits WHERE harness = ?1 AND window = ?2", params![harness.as_str(), window.as_str()])?;
+        Ok(())
+    }
+
     /// Share a completed turn of a managed session (kind 40).  Only the
     /// summary travels; conversation items stay on this machine.  The
     /// assistant text is cut to 2000 characters (`ASSISTANT_TEXT_CHARS_MAX`).
