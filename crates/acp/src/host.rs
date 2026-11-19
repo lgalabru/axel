@@ -968,6 +968,10 @@ impl<W: Write> Host<W> {
             Action::None => {}
             Action::StartPrompt(text, files, from) => {
                 assert!(in_flight.is_none(), "a prompt starts only between turns");
+                // The sender's reply is already given; let the socket task write
+                // it before the turn's setup (catch-up, the before snapshot)
+                // holds this thread, so the composer doesn't wait on Git.
+                tokio::task::yield_now().await;
                 *in_flight = Some(self.start_turn(cx, text, files, from));
             }
             Action::SetMode(mode) => self.set_mode(cx, mode).await,
