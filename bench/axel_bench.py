@@ -175,7 +175,7 @@ def bench_bytes(axel, env, work, model):
     plain = catch_first_request(lambda base: subprocess.Popen(
         ["claude", "-p", "--model", model, "say ok"], cwd=work, env=dict(env, ANTHROPIC_BASE_URL=base),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-    return {"plain claude, first request": plain}
+    return {"plain claude, first full request": plain}
 
 
 def has_flag(axel, env, sub, flag):
@@ -216,7 +216,8 @@ def bench_model(axel, env, home, work, model, runs, throttle):
     out["axel expedite, cold"] = {"median_s": round(statistics.median(cold), 2), "runs_s": [round(s, 2) for s in cold]}
     sizes = axel_request_bytes(home)
     if sizes:
-        out["axel expedite, first request bytes"] = sizes[0]
+        # Claude Code sends small side requests (titles) besides the real one.
+        out["axel expedite, largest request bytes"] = max(sizes)
     if keep:
         expedite([axel, "expedite", "--keep", "5m", prompt], env, work)
         warm = [expedite([axel, "expedite", "--keep", "5m", "-c", "again: " + prompt], env, work) for _ in range(runs)]
