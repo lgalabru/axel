@@ -315,7 +315,9 @@ usage extension or the prompt reply. Other currencies are not treated as USD.
 // Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
 pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
 
-pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort>, pub on_turn: Option<TurnHook> /* told each turn number as it starts */, pub notices: Vec<String> /* Error items pushed on the thread once the host is up */ }
+pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort>, pub on_turn: Option<TurnHook> /* told each turn number as it starts */, pub notices: Vec<String> /* Error items pushed on the thread once the host is up */, pub idle_exit_after: Option<Duration> /* end the session once idle this long; at most IDLE_EXIT_AFTER_MAX */ }
+pub const IDLE_EXIT_AFTER_MAX: Duration; // 24 h; run_host refuses a longer one
+pub const IDLE_EXIT_REASON: &str;        // "idle": the end reason of a session its idle timeout ended
 pub struct TurnHook(pub std::sync::Arc<dyn Fn(u32) + Send + Sync>);
 pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_identity::Keypair, out: impl std::io::Write + Send) -> anyhow::Result<()>;
 //   - spawns adapter, initialize (clientCapabilities fs read/write = true, terminal = false), session/new {cwd, mcpServers: []} (or session/load when resume_native_id and agent supports loadSession)
@@ -325,7 +327,8 @@ pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_id
 //   - session/request_permission → policy::decide(mode, tool_call, disallowed, guard) → Allow(option)/Deny(option)/Ask → Ask = Pending Permission item; wait for socket `answer`
 //   - fs/read_text_file and fs/write_text_file client methods implemented against cwd (write respects plan mode: deny)
 //   - prints one coloured line per event to `out`; appends {ts, dir, frame} JSON lines to log_path
-//   - exits when socket `stop`, adapter exits, or stdin closes; then store.end_session(reason)
+//   - exits when socket `stop`, adapter exits, stdin closes, or (idle_exit_after) it has been idle that long: no turn, nothing queued or steering, no pending question; then store.end_session(reason)
+//   - `axel session host` reads idle_exit_after from AXEL_IDLE_EXIT_SECS (whole seconds, at most 86400) and keeps it out of the harness env
 
 pub mod socket {  // JSON lines over a unix socket
     pub enum Command { Prompt { text: String, attachments, steer: bool, from: Option<Sender> }, Note { .. }, Steer { item_id }, Dequeue { item_id }, Edit { item_id, text }, SetMode { mode }, Cancel, Answer { item_id: String, option_id: String }, Status, Stop }

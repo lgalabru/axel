@@ -159,6 +159,11 @@ fn host(session_id: &str) -> Result<()> {
         .map(|v| v.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect())
         .unwrap_or_default();
     let disallowed: Vec<String> = Vec::new();
+    // Read, then dropped before `harness_env` copies `AXEL_*` into the
+    // harness: a session the agent summons gets no timeout it didn't ask for.
+    let idle_exit_after = idle_exit_after()?;
+    // SAFETY: single-threaded here, before any runtime starts.
+    unsafe { std::env::remove_var(IDLE_EXIT_ENV) };
 
     if let Some(profile) = ClaudeProfile::load(&agent.pubkey)? {
         profile.configure_host()?;
@@ -207,6 +212,7 @@ fn host(session_id: &str) -> Result<()> {
         // The inspector proxy stamps each model request with its turn.
         on_turn,
         notices,
+        idle_exit_after,
     };
     std::fs::create_dir_all(cfg.socket_path.parent().expect("socket_path joins onto the run directory"))?;
     std::fs::create_dir_all(cfg.log_path.parent().expect("log_path joins onto the logs directory"))?;
@@ -219,6 +225,28 @@ fn host(session_id: &str) -> Result<()> {
         inspector.stop();
     }
     hosted
+}
+
+/// The session's idle timeout, in whole seconds: once idle this long, its
+/// host ends it (`axel expedite` keeps sessions warm with it).
+pub const IDLE_EXIT_ENV: &str = "AXEL_IDLE_EXIT_SECS";
+
+/// [`IDLE_EXIT_ENV`], when set: at most a day; anything else is refused, so a
+/// typo never leaves a session running for good.
+fn idle_exit_after() -> Result<Option<std::time::Duration>> {
+    let Ok(text) = std::env::var(IDLE_EXIT_ENV) else { return Ok(None) };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let Ok(secs) = text.parse::<u64>() else {
+        bail!("{}", t!("{name} must be a number of seconds, not {value}", name = IDLE_EXIT_ENV, value = format!("{text:?}")));
+    };
+    let after = std::time::Duration::from_secs(secs);
+    if after > axel_acp::IDLE_EXIT_AFTER_MAX {
+        bail!("{}", t!("{name} is at most {max} seconds (a day), not {value}", name = IDLE_EXIT_ENV, max = axel_acp::IDLE_EXIT_AFTER_MAX.as_secs(), value = secs));
+    }
+    Ok(Some(after))
 }
 
 /// The environment the adapter and harness run with: credentials, PATH and

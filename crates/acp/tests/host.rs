@@ -92,6 +92,7 @@ fn fixture(mode: RuntimeMode, harness: Harness, initial_prompt: Option<&str>) ->
         effort: None,
         on_turn: None,
         notices: Vec::new(),
+        idle_exit_after: None,
         mcp_servers: Vec::new(),
         session_meta: None,
         model: None,
@@ -1462,4 +1463,51 @@ fn a_loaded_sessions_replayed_history_is_not_recorded_as_its_first_turn() {
     assert!(!texts.iter().any(|t| t.contains("earlier answer")), "the replay stays out of the new turn: {texts:?}");
     assert!(!items.iter().any(|i| i.ref_id.as_deref() == Some("old-call")), "nor its tool calls");
     assert!(!texts.is_empty(), "the new turn is recorded: {items:?}");
+}
+
+#[test]
+fn an_idle_session_ends_itself_after_its_timeout_but_never_mid_turn() {
+    let idle = Duration::from_millis(300);
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), Some("sleep"));
+    f.cfg.idle_exit_after = Some(idle);
+    let host = spawn_host(&f);
+    let sock = f.cfg.socket_path.clone();
+    wait_until("running", Duration::from_secs(10), || {
+        matches!(socket::send(&sock, &Command::Status), Ok(Reply::Status { state: SessionState::Running, turn: 1, .. }))
+    });
+    // A turn that outlasts the timeout keeps its session.
+    std::thread::sleep(idle * 3);
+    assert!(f.store.get_session(&f.session_id).unwrap().unwrap().ended_at.is_none(), "ended mid-turn");
+    assert!(matches!(socket::send(&sock, &Command::Status), Ok(Reply::Status { state: SessionState::Running, .. })));
+
+    send_ok(&sock, Command::Cancel);
+    let cancelled = Instant::now();
+    wait_until("the session to end", Duration::from_secs(10), || f.store.get_session(&f.session_id).unwrap().unwrap().ended_at.is_some());
+    assert!(cancelled.elapsed() >= idle, "ended {:?} after the turn, before its timeout", cancelled.elapsed());
+    host.join().unwrap().unwrap();
+    let session = f.store.get_session(&f.session_id).unwrap().unwrap();
+    assert_eq!(session.state, SessionState::Ended);
+    assert_eq!(session.ended_reason.as_deref(), Some(axel_acp::IDLE_EXIT_REASON));
+    assert!(session.socket_path.is_none());
+    assert!(!sock.exists(), "the socket goes with the host");
+    assert_eq!(f.store.turns(&f.thread_id).unwrap().len(), 1, "the turn was recorded before the end");
+}
+
+#[test]
+fn a_session_started_without_a_prompt_ends_after_its_timeout() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.idle_exit_after = Some(Duration::from_millis(200));
+    spawn_host(&f).join().unwrap().unwrap();
+    let session = f.store.get_session(&f.session_id).unwrap().unwrap();
+    assert_eq!(session.ended_reason.as_deref(), Some(axel_acp::IDLE_EXIT_REASON));
+    assert!(f.store.turns(&f.thread_id).unwrap().is_empty());
+}
+
+#[test]
+fn an_idle_timeout_past_the_maximum_is_refused() {
+    let mut f = fixture(RuntimeMode::Autopilot, fake_harness(), None);
+    f.cfg.idle_exit_after = Some(axel_acp::IDLE_EXIT_AFTER_MAX + Duration::from_secs(1));
+    let err = spawn_host(&f).join().unwrap().unwrap_err();
+    assert!(err.to_string().contains("idle timeout"), "{err}");
+    assert!(f.store.get_session(&f.session_id).unwrap().unwrap().ended_at.is_none(), "refused before it started anything");
 }

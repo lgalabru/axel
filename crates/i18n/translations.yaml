@@ -1920,3 +1920,9 @@
   zh-Hans: "哪个智能体？请传入 --agent <name>"
 "{glyph} {took} · {tokens} tokens · ~${cost} · more: axel expedite -c \"…\" · all of it: axel thread open {thread}":
   zh-Hans: "{glyph} {took} · {tokens} token · ~${cost} · 继续：axel expedite -c \"…\" · 查看全部：axel thread open {thread}"
+"idle for {seconds}s: ending the session":
+  zh-Hans: "已空闲 {seconds} 秒：结束会话"
+"{name} must be a number of seconds, not {value}":
+  zh-Hans: "{name} 必须是秒数，而不是 {value}"
+"{name} is at most {max} seconds (a day), not {value}":
+  zh-Hans: "{name} 最多为 {max} 秒（一天），而不是 {value}"

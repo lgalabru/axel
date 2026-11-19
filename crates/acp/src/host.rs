@@ -82,7 +82,20 @@ pub struct HostConfig {
     /// Problems from before the host ran (the inspector proxy would not
     /// start) for the thread: each becomes an item there once the host is up.
     pub notices: Vec<String>,
+    /// End the session once it has been idle this long (no turn running,
+    /// nothing queued, no question waiting), as a stop would, with the reason
+    /// [`IDLE_EXIT_REASON`]: the next message resumes its conversation.
+    /// At most [`IDLE_EXIT_AFTER_MAX`]. `None` waits for a stop.
+    pub idle_exit_after: Option<Duration>,
 }
+
+/// The longest idle timeout a host takes: a day, past which a session kept
+/// warm is one nobody is coming back to, so it is refused as a mistake.
+pub const IDLE_EXIT_AFTER_MAX: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The end reason of a session its idle timeout ended (stored in English,
+/// like the other end reasons).
+pub const IDLE_EXIT_REASON: &str = "idle";
 
 /// A callback for each turn's number as it starts.
 #[derive(Clone)]
@@ -268,6 +281,14 @@ pub async fn run_host(
     signer: Keypair,
     out: impl Write + Send,
 ) -> Result<()> {
+    if let Some(after) = cfg.idle_exit_after {
+        anyhow::ensure!(
+            after <= IDLE_EXIT_AFTER_MAX,
+            "an idle timeout of {}s is longer than the {}s a host takes",
+            after.as_secs(),
+            IDLE_EXIT_AFTER_MAX.as_secs()
+        );
+    }
     let log = Arc::new(
         FrameLog::open(&cfg.log_path)
             .with_context(|| format!("opening frame log {}", cfg.log_path.display()))?,
@@ -869,8 +890,19 @@ impl<W: Write> Host<W> {
                 return format!("setup failed: {error}");
             }
         }
+        // When the session last fell idle: the idle timeout counts from there.
+        let mut idle_since: Option<Instant> = None;
         loop {
+            idle_since = match (self.is_idle(in_flight.is_some()), idle_since) {
+                (true, Some(since)) => Some(since),
+                (true, None) => Some(Instant::now()),
+                (false, _) => None,
+            };
+            let idle_deadline = self.cfg.idle_exit_after.zip(idle_since).map(|(after, since)| since + after);
             tokio::select! {
+                // Events first: a prompt that arrives as the timeout fires
+                // keeps the session, rather than finding its host gone.
+                biased;
                 ev = rx.recv() => {
                     let Some(ev) = ev else { return "host channel closed".into() };
                     let action = self.handle_event(cx, ev, in_flight.is_some());
@@ -897,8 +929,19 @@ impl<W: Write> Host<W> {
                     }
                     return "adapter exited".into();
                 }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(idle_deadline.unwrap_or_else(Instant::now))), if idle_deadline.is_some() => {
+                    assert!(self.is_idle(in_flight.is_some()), "the idle timeout fires only while idle");
+                    self.line(CYAN, "○", &t!("idle for {seconds}s: ending the session", seconds = idle_since.map_or(0, |s| s.elapsed().as_secs())));
+                    return IDLE_EXIT_REASON.into();
+                }
             }
         }
+    }
+
+    /// Nothing for the session to do: no turn running, nothing queued or
+    /// sent into a turn, no question waiting for the owner.
+    fn is_idle(&self, in_turn: bool) -> bool {
+        !in_turn && self.queue.is_empty() && self.steering.is_empty() && self.pending.is_empty()
     }
 
     /// Carry out what handling an event asked for.  `Some` with the reason
