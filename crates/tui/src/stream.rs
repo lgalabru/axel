@@ -25,6 +25,9 @@ use crate::view::thread_view::row_lines;
 
 const TICK: Duration = Duration::from_millis(250);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// The busy mark in the terminal's title: the braille spinner Codex animates
+/// in its own, one frame a tick.
+const TITLE_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// What the read-only stream passes on: typing for its composer, or one of
 /// the composer's pane shortcuts, so they work with the message pane focused.
@@ -60,7 +63,7 @@ pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, re
     // panes are minimized, so this is where Rex (and its Activity) sees them.
     let mut reports = Reported::default();
     loop {
-        reports.write(&mut out, &view)?;
+        reports.write(&mut out, &view, s.tick)?;
         print_tick(&mut out, &mut s, &mut width, &view)?;
         out.flush()?;
         if let Some(redirect) = redirect_input {
@@ -83,11 +86,12 @@ pub fn run_stream(store: &axel_store::Store, owner_pk: &str, thread_id: &str, re
 struct Reported {
     agents: Vec<AgentRecord>,
     root: Option<String>,
+    title: Option<String>,
 }
 
 impl Reported {
     /// Write the records that changed since the last tick.
-    fn write(&mut self, out: &mut impl Write, view: &ThreadView) -> Result<()> {
+    fn write(&mut self, out: &mut impl Write, view: &ThreadView, tick: usize) -> Result<()> {
         let now = agent_records(&view.data);
         let reports = status_reports(&self.agents, &now);
         if !reports.is_empty() {
@@ -104,6 +108,12 @@ impl Reported {
         if self.root.as_ref() != Some(&root) {
             out.write_all(root.as_bytes())?;
             self.root = Some(root);
+        }
+        // The terminal's title, which a tab shows: it spins while an agent works.
+        let title = terminal_title(&view.data.title, &self.agents, tick);
+        if self.title.as_ref() != Some(&title) {
+            out.write_all(title.as_bytes())?;
+            self.title = Some(title);
         }
         Ok(())
     }
@@ -355,6 +365,23 @@ pub fn root_report(title: &str, agents: &[AgentRecord]) -> String {
     let kind = top.and_then(|r| r.kind);
     let msg = agents.iter().map(|r| format!("{} {}", r.id, r.state.as_str())).collect::<Vec<_>>().join(" · ");
     encode(&Report { state, id: None, kind, progress: None, app: Some("axel"), title: Some(title), msg: (!msg.is_empty()).then_some(msg.as_str()) })
+}
+
+/// The pane's terminal title (OSC 2): the thread's title, behind a spinner
+/// frame while an agent works. OSC 7501 has no animation of its own, so this
+/// is how a tab shows work going on, as Codex's does. A thread that is
+/// blocked or idle gets the bare title: it would be wrong to look busy then.
+pub fn terminal_title(title: &str, agents: &[AgentRecord], tick: usize) -> String {
+    use axel_rex::osc::{State, TITLE_MAX_BYTES, sanitize};
+    // Sanitised: a control character in the thread's title would end the sequence early.
+    let title = sanitize(title, TITLE_MAX_BYTES);
+    let is_blocked = agents.iter().any(|r| r.state == State::Blocked);
+    let is_working = agents.iter().any(|r| r.state == State::Working);
+    if is_working && !is_blocked {
+        let frame = TITLE_SPINNER[tick % TITLE_SPINNER.len()];
+        return format!("\x1b]2;{frame} {title}\x1b\\");
+    }
+    format!("\x1b]2;{title}\x1b\\")
 }
 
 /// What the pane's width says to do this tick.
@@ -872,6 +899,25 @@ mod tests {
         let blocked = root_report("t", &[rec("atlas", State::Working, None), rec("orion", State::Blocked, Some(Kind::Question))]);
         assert!(blocked.starts_with("\x1b]7501;state=blocked:kind=question"), "{blocked}");
         assert!(root_report("t", &[]).starts_with("\x1b]7501;state=idle:app=axel"));
+    }
+
+    #[test]
+    fn the_terminal_title_spins_only_while_an_agent_works() {
+        use axel_rex::osc::{Kind, State};
+        let rec = |id: &str, state, kind| AgentRecord { id: id.into(), state, kind };
+        let working = [rec("atlas", State::Idle, None), rec("orion", State::Working, None)];
+        assert_eq!(terminal_title("Fix the install", &working, 0), "\x1b]2;⠋ Fix the install\x1b\\");
+        assert_eq!(terminal_title("Fix the install", &working, 1), "\x1b]2;⠙ Fix the install\x1b\\", "a frame a tick");
+        assert_eq!(terminal_title("t", &working, TITLE_SPINNER.len()), terminal_title("t", &working, 0), "the frames come round");
+        // Idle, done and blocked threads are not busy: the bare title.
+        assert_eq!(terminal_title("t", &[], 3), "\x1b]2;t\x1b\\");
+        assert_eq!(terminal_title("t", &[rec("atlas", State::Done, None)], 3), "\x1b]2;t\x1b\\");
+        let blocked = [rec("atlas", State::Working, None), rec("orion", State::Blocked, Some(Kind::Question))];
+        assert_eq!(terminal_title("t", &blocked, 3), "\x1b]2;t\x1b\\", "waiting on the owner is not working");
+        // A title can't end the sequence early or run past the terminal's limit.
+        assert_eq!(terminal_title("a\x1b\\b\x07\nc", &[], 0), "\x1b]2;a\\b c\x1b\\");
+        let long = terminal_title(&"é".repeat(500), &working, 0);
+        assert!(long.len() <= axel_rex::osc::TITLE_MAX_BYTES + 16 && long.ends_with("\x1b\\"), "{}", long.len());
     }
 
     #[test]
