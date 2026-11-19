@@ -25,6 +25,12 @@ use crate::view::thread_view::row_lines;
 
 const TICK: Duration = Duration::from_millis(250);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// In place of `> ` on the message waiting for its reply.
+const SENDING: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A message older than this, still without a reply, is printed as it is:
+/// whatever was to answer it isn't coming, and the highlight would only hold
+/// the tail.
+const AWAITING_MAX_MS: i64 = 10 * 60 * 1000;
 
 /// What the read-only stream passes on: typing for its composer, or one of
 /// the composer's pane shortcuts, so they work with the message pane focused.
@@ -478,6 +484,36 @@ impl Stream {
         lines
     }
 
+    /// The message waiting for its reply: a braille spinner in place of its
+    /// `> `, its rows on the accent colour across the pane.
+    fn awaiting_ansi(&self, v: &ThreadView, row: &Row, width: usize) -> Vec<String> {
+        let frame = SENDING[self.tick % SENDING.len()];
+        let on_accent = Style::default().fg(ratatui::style::Color::Black).bg(theme::ACCENT);
+        let mut lines = render_row(v, row, width);
+        let mut first = true;
+        for line in &mut lines {
+            // The blank rows around your messages (the margin column only) stay plain.
+            if line.spans.iter().all(|span| span.content.trim().is_empty()) {
+                continue;
+            }
+            // Span 0 is the margin column the stream adds; the rest is the message.
+            for (n, span) in line.spans.iter_mut().enumerate().skip(1) {
+                if first && n == 1 && span.content == crate::view::thread_view::YOU_MARK {
+                    span.content = format!("{frame} ").into();
+                }
+                span.style = span.style.patch(on_accent);
+            }
+            first = false;
+            let room = width.saturating_add(1).saturating_sub(line.width());
+            line.spans.push(Span::styled(" ".repeat(room), on_accent));
+        }
+        let mut out: Vec<String> = lines.iter().map(to_ansi).collect();
+        if let Row::Prose(i) = row {
+            link_chips(&mut out, &v.data.items[*i], width);
+        }
+        out
+    }
+
     /// The bytes to write this tick: erase the old tail, print newly finished
     /// rows, draw the new tail.  Empty when nothing changed.
     fn frame(&mut self, v: &ThreadView, width: usize, height: usize) -> String {
@@ -486,6 +522,7 @@ impl Stream {
         let rows = v.rows();
         let items = &v.data.items;
         let working = v.is_working();
+        let awaiting = awaiting_reply(&rows, items, chrono::Utc::now().timestamp_millis());
         let mut commit: Vec<String> = Vec::new();
         let mut live_rows: Vec<&Row> = Vec::new();
         let mut blocked = false;
@@ -495,7 +532,8 @@ impl Stream {
                 continue;
             }
             // Commit in order: once one row is still moving, the rest wait.
-            if !blocked && is_settled(row, items, i + 1 == rows.len(), working) {
+            // The message waiting for its reply stays live, highlighted.
+            if !blocked && awaiting != Some(i) && is_settled(row, items, i + 1 == rows.len(), working) {
                 commit.extend(self.row_ansi(v, row, width));
                 self.committed.insert(key);
             } else {
@@ -503,8 +541,17 @@ impl Stream {
                 live_rows.push(row);
             }
         }
-        let mut live: Vec<String> = live_rows.iter().flat_map(|r| self.row_ansi(v, r, width)).collect();
-        if working {
+        let awaiting_row = awaiting.map(|i| &rows[i]);
+        let mut live: Vec<String> = Vec::new();
+        for r in &live_rows {
+            if awaiting_row.is_some_and(|a| std::ptr::eq(a, *r)) {
+                live.extend(self.awaiting_ansi(v, r, width));
+            } else {
+                live.extend(self.row_ansi(v, r, width));
+            }
+        }
+        // The highlighted message says it's waiting: no second spinner under it.
+        if working && awaiting.is_none() {
             let who = v.data.agents.iter().find(|a| a.2 == crate::model::StatusState::Working).map(|a| a.0.clone()).unwrap_or_else(|| t!("agent").into());
             let frame = SPINNER[self.tick % SPINNER.len()];
             live.push(to_ansi(&Line::from(vec![
@@ -605,6 +652,24 @@ fn is_settled(row: &Row, items: &[ThreadItem], last: bool, working: bool) -> boo
         Row::Fold(v) => !v.iter().any(|i| moving(*i)),
         Row::Changes(_) => true,
     }
+}
+
+/// The row of the owner's last message while nothing has come back after it
+/// (no text, thought, tool call, error or turn end), sent within
+/// [`AWAITING_MAX_MS`] of `now_ms`.
+fn awaiting_reply(rows: &[Row], items: &[ThreadItem], now_ms: i64) -> Option<usize> {
+    use crate::model::ItemKind as K;
+    let mine = |it: &ThreadItem| it.kind == K::UserMessage && it.agent.is_none() && it.author.is_none() && it.relay_to.is_none();
+    let i = items.iter().rposition(mine)?;
+    let it = &items[i];
+    if it.status != Some(ItemStatus::Completed) || now_ms.saturating_sub(it.at_ms) > AWAITING_MAX_MS {
+        return None;
+    }
+    let answered = items[i + 1..].iter().any(|later| matches!(later.kind, K::AssistantMessage | K::Thought | K::ToolCall | K::Error | K::TurnEnd));
+    if answered {
+        return None;
+    }
+    rows.iter().position(|r| matches!(r, Row::Prose(p) if *p == i))
 }
 
 /// The thread has moved on past item `i`, so the stream prints it as it
@@ -931,6 +996,33 @@ mod tests {
         let f4 = plain(&s.frame(&v, 80, 3));
         assert_eq!(s.live_lines, 1);
         assert!(f4.contains("Atlas is working…"), "{f4}");
+    }
+
+    #[test]
+    fn the_message_waiting_for_its_reply_is_highlighted_until_the_agent_answers() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut d = fixtures::data();
+        d.items[7].status = Some(ItemStatus::Allowed);
+        d.agents[0].2 = crate::model::StatusState::Working;
+        let mut sent = fixtures::item("u2", ItemKind::UserMessage, ItemBody::Text("ship it".into()), now);
+        sent.agent = None;
+        d.items.push(sent);
+        let mut v = ThreadView::new("T1", d.clone());
+        let mut s = Stream::default();
+        let raw = s.frame(&v, 80, 40);
+        assert!(raw.contains("48;2;255;117;101"), "on the accent colour: {raw:?}");
+        assert!(SENDING.iter().any(|f| plain(&raw).contains(&format!("{f} ship it"))), "a braille spinner for its `> `: {}", plain(&raw));
+        assert!(!plain(&raw).contains("Atlas is working…"), "one spinner, on the message");
+        // The spinner moves.
+        s.tick += 1;
+        assert_ne!(s.frame(&v, 80, 40), "");
+        // The agent answers: the message prints plain, once, with its `> `.
+        d.items.push(fixtures::item("a3", ItemKind::AssistantMessage, ItemBody::Text("On it.".into()), now + 1));
+        v.set_data(d);
+        let after = s.frame(&v, 80, 40);
+        assert!(plain(&after).contains("> ship it") && plain(&after).contains("On it."), "{}", plain(&after));
+        let message_line = after.lines().find(|l| plain(l).contains("ship it")).unwrap();
+        assert!(!message_line.contains("48;2;255;117;101"), "no background once answered: {message_line:?}");
     }
 
     #[test]
