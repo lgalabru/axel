@@ -178,6 +178,10 @@ pub struct ModelRequest {
     /// A short reason when the request failed: never a body or a header.
     pub error: Option<String>,
     pub breakdown: Option<ContextBreakdown>,
+    /// The proxy slowed this request on purpose (`AXEL_THROTTLE`): its
+    /// timings, and a loss, are the throttle's doing.
+    #[serde(default)]
+    pub throttled: bool,
 }
 
 impl ModelRequest {
@@ -241,8 +245,8 @@ impl Store {
             "INSERT INTO model_requests (id, session_id, thread_id, agent_pubkey, turn, provider, endpoint, model,
                  started_at_ms, first_byte_ms, duration_ms, http_status, streamed, outcome,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
-                 request_bytes, response_bytes, stop_reason, error, breakdown_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                 request_bytes, response_bytes, stop_reason, error, breakdown_json, throttled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
              ON CONFLICT(id) DO UPDATE SET
                  turn = excluded.turn, model = excluded.model, first_byte_ms = excluded.first_byte_ms,
                  duration_ms = excluded.duration_ms, http_status = excluded.http_status, streamed = excluded.streamed,
@@ -250,7 +254,7 @@ impl Store {
                  cache_read_tokens = excluded.cache_read_tokens, cache_write_tokens = excluded.cache_write_tokens,
                  reasoning_tokens = excluded.reasoning_tokens, request_bytes = excluded.request_bytes,
                  response_bytes = excluded.response_bytes, stop_reason = excluded.stop_reason, error = excluded.error,
-                 breakdown_json = excluded.breakdown_json",
+                 breakdown_json = excluded.breakdown_json, throttled = excluded.throttled",
             params![
                 request.id,
                 request.session_id,
@@ -276,6 +280,7 @@ impl Store {
                 request.stop_reason,
                 request.error,
                 breakdown,
+                request.throttled,
             ],
         )?;
         Ok(())
@@ -351,6 +356,7 @@ fn row_model_request(row: &Row<'_>) -> rusqlite::Result<ModelRequest> {
         error: row.get("error")?,
         // A breakdown that no longer parses (an older build's shape) reads as none.
         breakdown: breakdown.and_then(|json| serde_json::from_str(&json).ok()),
+        throttled: row.get("throttled")?,
     })
 }
 
@@ -388,6 +394,7 @@ mod tests {
                 messages: 1,
                 tools: 1,
             }),
+            throttled: false,
         }
     }
 

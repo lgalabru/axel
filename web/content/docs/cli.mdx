@@ -12,6 +12,29 @@ Commands answer to the names you'd reach for: the plurals (`axel threads`, `sess
 `add` for agents, `start` for threads), `rm` for `thread delete`, `settle` for `thread
 done`, and `msg` for `send`.
 
+## In a hurry
+
+`axel expedite "fix the failing test"` is the quickest way through: one agent, a fresh
+context, the reply streamed right here, no launcher, window or panes. Questions and
+permissions are asked inline. `-c` goes on with the last one, `--thread ID` with another
+thread, and `--agent NAME` picks the agent (default: the one used last). Ctrl+C cancels
+the turn; a second leaves it running. `axel thread open` shows the thread in full.
+
+When the turn ends, the session stays up, idle, for 10 minutes (the summary says `kept
+warm for 10m`), then ends itself with its conversation kept. `--keep DURATION` sets how
+long (`90s`, `30m`, `2h`, at most `24h`); `--keep 0` stops it as soon as the turn ends.
+`-c` while the session is still warm sends the prompt straight to it, which skips the
+start-up and answers in about a second. Once it has ended, `-c` resumes the
+conversation in a new session, a few seconds slower. A session's timeout is set when it
+starts: `--keep` on a `-c` that reuses a warm session doesn't change it.
+
+`axel expedite --warm` starts a spare session ahead of time: idle, with no prompt, for
+the default agent (or `--agent NAME`) in the current directory. It waits 30 minutes (or
+`--keep`). The next `axel expedite "…"` in that directory, with that agent, takes it,
+names its thread after the prompt and sends the prompt. A spare is used once and there
+is one at a time; a new `--warm` replaces it. A spare that has ended or is busy, or one
+started for another directory or agent, is left alone and the expedite starts cold.
+
 ## Updates
 
 `axel update` runs `curl -fsSL https://axel.md/install | sh`, with installer output

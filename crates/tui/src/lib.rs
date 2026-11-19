@@ -45,6 +45,12 @@ pub use stream::{RedirectInputFn, StreamInput, run_stream};
 pub use thread::{SendCommand, SendReply};
 pub use util::{relative_time, slugify};
 
+/// A stored conversation item's body, decoded as the thread view reads it:
+/// for callers that show a session without the TUI (`axel expedite`).
+pub fn item_body(item: &axel_store::ConversationItem) -> model::ItemBody {
+    glue::item_body(item)
+}
+
 /// Which screen the UI opens on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {

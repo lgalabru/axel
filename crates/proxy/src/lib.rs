@@ -12,12 +12,17 @@
 //! a path without the session's secret or outside the allowlist, `CONNECT`
 //! and absolute-form URIs, requests carrying `Origin` or a foreign `Host`,
 //! and bodies over 32 MiB.
+//!
+//! For testing, a session's network can be made bad on purpose: a
+//! [`Throttle`] adds latency, paces both directions and loses a share of
+//! requests (`AXEL_THROTTLE`).  It applies only after every refusal above.
 
 mod analyze;
 mod observe;
 mod record;
 mod route;
 mod server;
+mod throttle;
 mod upstream;
 #[cfg(test)]
 mod tests;
@@ -30,11 +35,16 @@ use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 
+pub use throttle::{Throttle, ThrottlePreset};
 pub use upstream::OpenAiUpstream;
 
 use route::Secret;
 use server::{CONNECTIONS_MAX, NO_TURN, Shared};
+use throttle::Loss;
 use upstream::{Transport, Upstreams};
+
+#[cfg(test)]
+const TEST_LOSS_SEED: u64 = 0x5eed;
 
 /// What a session's proxy serves, fixed when it starts.
 #[derive(Clone, Debug)]
@@ -46,6 +56,9 @@ pub struct ProxyConfig {
     /// `ANTHROPIC_BASE_URL`, which must be `https`.
     pub anthropic_upstream: Option<String>,
     pub openai_upstream: OpenAiUpstream,
+    /// A bad network to replay, for testing; `None` (always, unless asked):
+    /// requests go through as fast as they can.
+    pub throttle: Option<Throttle>,
 }
 
 /// Where request rows go.  Called when each request starts and again when it
@@ -69,16 +82,23 @@ impl Proxy {
     /// Fails if an upstream isn't `https`, or nothing can be bound.
     pub async fn start(config: ProxyConfig, sink: Arc<dyn RequestSink>) -> anyhow::Result<Proxy> {
         let upstreams = Upstreams::new(config.anthropic_upstream.as_deref(), config.openai_upstream)?;
-        Proxy::start_with(config, upstreams, Transport::HttpsOnly, sink).await
+        // Which requests a throttle loses varies run to run, as on a real network.
+        let mut seed = [0u8; 8];
+        getrandom::fill(&mut seed).map_err(|e| anyhow::anyhow!("no randomness for the throttle: {e}"))?;
+        Proxy::start_with(config, upstreams, Transport::HttpsOnly, u64::from_le_bytes(seed), sink).await
     }
 
     /// Against plain-HTTP upstreams: only tests, with a fake provider.
     #[cfg(test)]
     pub(crate) async fn start_for_test(config: ProxyConfig, upstreams: Upstreams, sink: Arc<dyn RequestSink>) -> anyhow::Result<Proxy> {
-        Proxy::start_with(config, upstreams, Transport::PlainAllowed, sink).await
+        // A fixed seed: a test's losses are the same every run.
+        Proxy::start_with(config, upstreams, Transport::PlainAllowed, TEST_LOSS_SEED, sink).await
     }
 
-    async fn start_with(config: ProxyConfig, upstreams: Upstreams, transport: Transport, sink: Arc<dyn RequestSink>) -> anyhow::Result<Proxy> {
+    async fn start_with(config: ProxyConfig, upstreams: Upstreams, transport: Transport, loss_seed: u64, sink: Arc<dyn RequestSink>) -> anyhow::Result<Proxy> {
+        if let Some(throttle) = &config.throttle {
+            throttle.validate()?;
+        }
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
         let address = listener.local_addr()?;
         assert!(address.ip().is_loopback(), "the proxy listens on loopback only");
@@ -95,6 +115,8 @@ impl Proxy {
             thread_id: config.thread_id,
             agent_pubkey: config.agent_pubkey,
             turn: turn.clone(),
+            loss: Loss::new(loss_seed, config.throttle.map_or(0, |t| t.loss_pct)),
+            throttle: config.throttle,
             connections: Arc::new(Semaphore::new(CONNECTIONS_MAX)),
         });
         let (shutdown, shutdown_rx) = watch::channel(());

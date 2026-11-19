@@ -290,6 +290,9 @@ only: no header, body or prompt text is stored. It is off until the owner turns 
 for a thread, `axel inspect on` in it or `r` in the pane (`off` and `status` too;
 `AXEL_INSPECT=1` or `0` for one session); a
 proxy that can't start leaves the session direct, with a notice on the thread.
+`AXEL_THROTTLE=airport` (or `train`, `3g`, `up=1mbit,down=5mbit,rtt=300ms,loss=2`)
+runs one session through the proxy over a deliberately bad network, to test how
+agents cope; see ADR 0011.
 
 ## Dashboard (the main screen)
 

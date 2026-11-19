@@ -74,6 +74,11 @@ pub fn run_compose(deps: Deps, thread_id: &str, fit: &dyn Fn(u16, u16), on_quest
                 match ev {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         let action = v.handle_compose_key(key);
+                        // A send waits on the host: show the cleared composer
+                        // and its "sending…" first, not the text already sent.
+                        if matches!(action, ThreadAction::Send { .. } | ThreadAction::Summon { .. }) {
+                            terminal.draw(|f| render(f, &v))?;
+                        }
                         match carry_out(&deps, thread_id, &mut v, action, toggle_log) {
                             Next::Wait => {}
                             // What was sent shows sooner.

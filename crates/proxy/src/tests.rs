@@ -4,7 +4,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axel_store::{ContextKind, ModelProvider, ModelRequest, RequestOutcome};
 use bytes::Bytes;
@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::upstream::{Upstream, Upstreams};
-use crate::{OpenAiUpstream, Proxy, ProxyConfig, RequestSink};
+use crate::{OpenAiUpstream, Proxy, ProxyConfig, RequestSink, Throttle};
 
 /// Values that must never reach the sink.
 const TOKEN: &str = "sk-ant-oat01-TOKEN-NEVER-STORED";
@@ -143,16 +143,21 @@ async fn fake_provider(base_path: &str, canned: Canned) -> Fake {
 }
 
 fn config() -> ProxyConfig {
-    ProxyConfig { session_id: "S1".into(), thread_id: "T1".into(), agent_pubkey: "PK1".into(), anthropic_upstream: None, openai_upstream: OpenAiUpstream::ChatGpt }
+    ProxyConfig { session_id: "S1".into(), thread_id: "T1".into(), agent_pubkey: "PK1".into(), anthropic_upstream: None, openai_upstream: OpenAiUpstream::ChatGpt, throttle: None }
 }
 
 async fn proxy_to(fake: &Fake, sink: &Arc<Sink>) -> Proxy {
+    proxy_throttled(fake, sink, None).await
+}
+
+async fn proxy_throttled(fake: &Fake, sink: &Arc<Sink>, throttle: Option<Throttle>) -> Proxy {
+    let config = ProxyConfig { throttle, ..config() };
     let upstreams = Upstreams {
         anthropic: Upstream::plain_for_test(&fake.url),
         openai: Upstream::plain_for_test(&fake.url),
         openai_provider: ModelProvider::ChatGpt,
     };
-    Proxy::start_for_test(config(), upstreams, sink.clone()).await.unwrap()
+    Proxy::start_for_test(config, upstreams, sink.clone()).await.unwrap()
 }
 
 type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
@@ -393,9 +398,22 @@ async fn raw(port: u16, what: &str, request: &[u8]) -> String {
 
 #[tokio::test]
 async fn requests_the_proxy_refuses_never_reach_the_provider() {
+    refusals_never_reach_the_provider(None).await;
+}
+
+#[tokio::test]
+async fn a_throttled_proxy_refuses_the_same_requests_at_once() {
+    // A throttle applies after the checks: refusals neither wait nor count as lost.
+    let throttle = Throttle { up_bits_per_sec: Some(1_000), down_bits_per_sec: Some(1_000), latency_ms: 10_000, loss_pct: 100 };
+    let started = Instant::now();
+    refusals_never_reach_the_provider(Some(throttle)).await;
+    assert!(started.elapsed() < Duration::from_millis(WAIT_MS), "no refusal waited for the throttle");
+}
+
+async fn refusals_never_reach_the_provider(throttle: Option<Throttle>) {
     let fake = fake_provider("", Canned::sse(&ANTHROPIC_EVENTS)).await;
     let sink = Arc::new(Sink::default());
-    let proxy = proxy_to(&fake, &sink).await;
+    let proxy = proxy_throttled(&fake, &sink, throttle).await;
     let (port, secret) = (proxy.port(), proxy.secret().to_string());
     let host = format!("127.0.0.1:{port}");
     let post = |path: &str, extra: &str| format!("POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Length: 2\r\nConnection: close\r\n\r\n{{}}");
@@ -496,6 +514,15 @@ async fn a_plain_http_upstream_is_refused_at_start() {
 }
 
 #[tokio::test]
+async fn a_throttle_out_of_bounds_is_refused_at_start() {
+    let sink: Arc<dyn RequestSink> = Arc::new(Sink::default());
+    let unlimited = Throttle { up_bits_per_sec: None, down_bits_per_sec: None, latency_ms: 0, loss_pct: 0 };
+    for bad in [Throttle { loss_pct: 101, ..unlimited }, Throttle { up_bits_per_sec: Some(0), ..unlimited }, Throttle { latency_ms: u32::MAX, ..unlimited }] {
+        assert!(Proxy::start(ProxyConfig { throttle: Some(bad), ..config() }, sink.clone()).await.is_err(), "{bad:?}");
+    }
+}
+
+#[tokio::test]
 async fn shutdown_stops_the_listener() {
     let fake = fake_provider("", Canned::sse(&ANTHROPIC_EVENTS)).await;
     let sink = Arc::new(Sink::default());
@@ -503,4 +530,112 @@ async fn shutdown_stops_the_listener() {
     let port = proxy.port();
     proxy.shutdown().await;
     assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+}
+
+/// No throttle but the one under test.
+const UNLIMITED: Throttle = Throttle { up_bits_per_sec: None, down_bits_per_sec: None, latency_ms: 0, loss_pct: 0 };
+/// 1 Mbit/s: 25 kB take 200 ms, long enough to measure, short enough to wait.
+const RATE_BITS_PER_SEC: u64 = 1_000_000;
+const PACED_BYTES: usize = 25_000;
+/// What scheduling and loopback may add on top of the throttle's own time.
+const SLACK_MS: u64 = 600;
+
+fn expected_ms(bytes: usize, bits_per_sec: u64) -> u64 {
+    bytes as u64 * 8 * 1_000 / bits_per_sec
+}
+
+fn assert_took(elapsed: Duration, at_least_ms: u64, what: &str) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    assert!(elapsed_ms >= at_least_ms, "{what}: {elapsed_ms} ms, expected at least {at_least_ms}");
+    assert!(elapsed_ms < at_least_ms + SLACK_MS, "{what}: {elapsed_ms} ms, expected about {at_least_ms}");
+}
+
+#[tokio::test]
+async fn an_upload_is_paced_to_the_up_rate() {
+    let fake = fake_provider("", Canned::sse(&ANTHROPIC_EVENTS)).await;
+    let sink = Arc::new(Sink::default());
+    let proxy = proxy_throttled(&fake, &sink, Some(Throttle { up_bits_per_sec: Some(RATE_BITS_PER_SEC), ..UNLIMITED })).await;
+    let filler = "x".repeat(PACED_BYTES);
+    let body = serde_json::json!({"model": "claude-haiku-5", "messages": [{"role": "user", "content": filler}]}).to_string();
+    let started = Instant::now();
+    let (status, received) = send(&proxy, request(&proxy, Method::POST, "anthropic/v1/messages", &body)).await;
+    assert_took(started.elapsed(), expected_ms(body.len(), RATE_BITS_PER_SEC), "upload");
+    assert_eq!((status, received.as_ref()), (StatusCode::OK, ANTHROPIC_EVENTS.concat().as_bytes()));
+    assert_eq!(fake.seen.lock().unwrap()[0].body, body.as_bytes(), "the paced body goes up whole and unchanged");
+    let rows = sink.wait_for(2).await;
+    assert!(rows.iter().all(|r| r.throttled), "every row says it was throttled");
+    assert_eq!(rows[1].outcome, RequestOutcome::Completed);
+}
+
+#[tokio::test]
+async fn a_download_is_paced_to_the_down_rate_as_it_streams() {
+    let big = format!("event: ping\ndata: {}\n\n", "y".repeat(PACED_BYTES));
+    let chunks = [ANTHROPIC_EVENTS[0], big.as_str(), ANTHROPIC_EVENTS[2]];
+    let fake = fake_provider("", Canned::sse(&chunks)).await;
+    let sink = Arc::new(Sink::default());
+    let proxy = proxy_throttled(&fake, &sink, Some(Throttle { down_bits_per_sec: Some(RATE_BITS_PER_SEC), ..UNLIMITED })).await;
+    let started = Instant::now();
+    let mut sender = connect(proxy.port()).await;
+    let response = sender.send_request(request(&proxy, Method::POST, "anthropic/v1/messages", &anthropic_body())).await.unwrap();
+    let mut body = response.into_body();
+    let (mut received, mut frames) = (Vec::new(), 0u32);
+    while let Some(frame) = body.frame().await {
+        let data = frame.unwrap().into_data().unwrap();
+        assert!(data.len() <= 16 * 1024, "paced in bounded chunks");
+        received.extend_from_slice(&data);
+        frames += 1;
+    }
+    let total = chunks.concat();
+    assert_took(started.elapsed(), expected_ms(total.len(), RATE_BITS_PER_SEC), "download");
+    assert_eq!(received, total.as_bytes(), "byte for byte");
+    assert!(frames >= 4, "the large event arrived in pieces: {frames} frames");
+    let rows = sink.wait_for(2).await;
+    assert_eq!((rows[1].outcome, rows[1].output_tokens, rows[1].throttled), (RequestOutcome::Completed, Some(7), true));
+    assert_eq!(rows[1].response_bytes, total.len() as u64);
+}
+
+#[tokio::test]
+async fn latency_is_added_each_way() {
+    let fake = fake_provider("", Canned::sse(&ANTHROPIC_EVENTS)).await;
+    let sink = Arc::new(Sink::default());
+    let throttle = Throttle::parse("rtt=300ms").unwrap();
+    assert_eq!(throttle.latency_ms, 150);
+    let proxy = proxy_throttled(&fake, &sink, Some(throttle)).await;
+    let started = Instant::now();
+    let (status, _) = send(&proxy, request(&proxy, Method::POST, "anthropic/v1/messages", &anthropic_body())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_took(started.elapsed(), 300, "a round trip");
+    let rows = sink.wait_for(2).await;
+    assert!(rows[1].first_byte_ms.is_some_and(|ms| ms >= 300), "the row's timings include the latency: {:?}", rows[1].first_byte_ms);
+}
+
+#[tokio::test]
+async fn full_loss_breaks_every_request_and_none_breaks_none() {
+    const REQUESTS: usize = 5;
+    let fake = fake_provider("", Canned::sse(&ANTHROPIC_EVENTS)).await;
+    let sink = Arc::new(Sink::default());
+    let proxy = proxy_throttled(&fake, &sink, Some(Throttle { loss_pct: 100, ..UNLIMITED })).await;
+    for _ in 0..REQUESTS {
+        let mut sender = connect(proxy.port()).await;
+        let sent = sender.send_request(request(&proxy, Method::POST, "anthropic/v1/messages", &anthropic_body())).await;
+        let error = sent.expect_err("a lost request gets no response");
+        assert!(error.is_incomplete_message() || error.is_closed(), "the connection broke: {error:?}");
+    }
+    assert!(fake.seen.lock().unwrap().is_empty(), "a lost request never reaches the provider");
+    let rows = sink.wait_for(2 * REQUESTS).await;
+    let ends: Vec<&ModelRequest> = rows.iter().filter(|r| r.outcome != RequestOutcome::InFlight).collect();
+    assert_eq!(ends.len(), REQUESTS);
+    for end in ends {
+        assert_eq!((end.outcome, end.error.as_deref(), end.throttled), (RequestOutcome::Failed, Some("lost by the network throttle"), true));
+    }
+    assert_nothing_secret(&rows);
+
+    let fake = fake_provider("", Canned::sse(&ANTHROPIC_EVENTS)).await;
+    let sink = Arc::new(Sink::default());
+    let proxy = proxy_throttled(&fake, &sink, Some(UNLIMITED)).await;
+    for _ in 0..REQUESTS {
+        let (status, received) = send(&proxy, request(&proxy, Method::POST, "anthropic/v1/messages", &anthropic_body())).await;
+        assert_eq!((status, received.as_ref()), (StatusCode::OK, ANTHROPIC_EVENTS.concat().as_bytes()));
+    }
+    assert_eq!(fake.seen.lock().unwrap().len(), REQUESTS);
 }

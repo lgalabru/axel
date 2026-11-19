@@ -82,7 +82,20 @@ pub struct HostConfig {
     /// Problems from before the host ran (the inspector proxy would not
     /// start) for the thread: each becomes an item there once the host is up.
     pub notices: Vec<String>,
+    /// End the session once it has been idle this long (no turn running,
+    /// nothing queued, no question waiting), as a stop would, with the reason
+    /// [`IDLE_EXIT_REASON`]: the next message resumes its conversation.
+    /// At most [`IDLE_EXIT_AFTER_MAX`]. `None` waits for a stop.
+    pub idle_exit_after: Option<Duration>,
 }
+
+/// The longest idle timeout a host takes: a day, past which a session kept
+/// warm is one nobody is coming back to, so it is refused as a mistake.
+pub const IDLE_EXIT_AFTER_MAX: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The end reason of a session its idle timeout ended (stored in English,
+/// like the other end reasons).
+pub const IDLE_EXIT_REASON: &str = "idle";
 
 /// A callback for each turn's number as it starts.
 #[derive(Clone)]
@@ -268,6 +281,14 @@ pub async fn run_host(
     signer: Keypair,
     out: impl Write + Send,
 ) -> Result<()> {
+    if let Some(after) = cfg.idle_exit_after {
+        anyhow::ensure!(
+            after <= IDLE_EXIT_AFTER_MAX,
+            "an idle timeout of {}s is longer than the {}s a host takes",
+            after.as_secs(),
+            IDLE_EXIT_AFTER_MAX.as_secs()
+        );
+    }
     let log = Arc::new(
         FrameLog::open(&cfg.log_path)
             .with_context(|| format!("opening frame log {}", cfg.log_path.display()))?,
@@ -400,17 +421,34 @@ fn forward_stderr(mut stderr_rx: mpsc::UnboundedReceiver<String>, tx: mpsc::Unbo
 }
 
 /// The command socket at `path`, in place of any left by a host that died.
+/// Its directory is this user's alone: whoever can open the socket can drive
+/// the session.
 fn bind_socket(path: &Path) -> Result<UnixListener> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
+        make_private(parent)?;
     }
     // A socket left by a host that died; none is the usual case, and a real
     // problem with the path shows in `bind` below.
     let _ = std::fs::remove_file(path);
     UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))
+}
+
+/// Refuse a directory someone else owns (a planted /tmp/axel-<uid>, say), and
+/// close ours to group and others.
+fn make_private(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::symlink_metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
+    // SAFETY: getuid has no failure mode.
+    let uid = unsafe { libc::getuid() };
+    anyhow::ensure!(meta.is_dir() && meta.uid() == uid, "{} is not a directory of this user's", dir.display());
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).with_context(|| format!("making {} private", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Send `StdinClosed` when the host's pane closes (its stdin ends).
@@ -843,11 +881,22 @@ impl<W: Write> Host<W> {
     ) -> String {
         let mut in_flight: Option<PromptFuture> = None;
         match self.setup(cx).await {
-            Ok(Some((text, files))) => {
-                let from = self.cfg.initial_from.clone();
-                in_flight = Some(self.start_turn(cx, text, files, from));
+            Ok(initial) => {
+                // A loaded session's history arrives as updates before
+                // `session/load` answers: it is the old conversation, already
+                // on the thread, not this turn's.
+                let early = self.drop_replayed_history(&mut rx).await;
+                if let Some((text, files)) = initial {
+                    let from = self.cfg.initial_from.clone();
+                    in_flight = Some(self.start_turn(cx, text, files, from));
+                }
+                for ev in early {
+                    let action = self.handle_event(cx, ev, in_flight.is_some());
+                    if let Some(reason) = self.act(cx, action, &mut in_flight).await {
+                        return reason;
+                    }
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 let error = format!("{e:#}");
                 self.line(RED, "✖", &t!("setup failed: {error}", error = error));
@@ -858,8 +907,19 @@ impl<W: Write> Host<W> {
                 return format!("setup failed: {error}");
             }
         }
+        // When the session last fell idle: the idle timeout counts from there.
+        let mut idle_since: Option<Instant> = None;
         loop {
+            idle_since = match (self.is_idle(in_flight.is_some()), idle_since) {
+                (true, Some(since)) => Some(since),
+                (true, None) => Some(Instant::now()),
+                (false, _) => None,
+            };
+            let idle_deadline = self.cfg.idle_exit_after.zip(idle_since).map(|(after, since)| since + after);
             tokio::select! {
+                // Events first: a prompt that arrives as the timeout fires
+                // keeps the session, rather than finding its host gone.
+                biased;
                 ev = rx.recv() => {
                     let Some(ev) = ev else { return "host channel closed".into() };
                     let action = self.handle_event(cx, ev, in_flight.is_some());
@@ -886,8 +946,19 @@ impl<W: Write> Host<W> {
                     }
                     return "adapter exited".into();
                 }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(idle_deadline.unwrap_or_else(Instant::now))), if idle_deadline.is_some() => {
+                    assert!(self.is_idle(in_flight.is_some()), "the idle timeout fires only while idle");
+                    self.line(CYAN, "○", &t!("idle for {seconds}s: ending the session", seconds = idle_since.map_or(0, |s| s.elapsed().as_secs())));
+                    return IDLE_EXIT_REASON.into();
+                }
             }
         }
+    }
+
+    /// Nothing for the session to do: no turn running, nothing queued or
+    /// sent into a turn, no question waiting for the owner.
+    fn is_idle(&self, in_turn: bool) -> bool {
+        !in_turn && self.queue.is_empty() && self.steering.is_empty() && self.pending.is_empty()
     }
 
     /// Carry out what handling an event asked for.  `Some` with the reason
@@ -897,6 +968,10 @@ impl<W: Write> Host<W> {
             Action::None => {}
             Action::StartPrompt(text, files, from) => {
                 assert!(in_flight.is_none(), "a prompt starts only between turns");
+                // The sender's reply is already given; let the socket task write
+                // it before the turn's setup (catch-up, the before snapshot)
+                // holds this thread, so the composer doesn't wait on Git.
+                tokio::task::yield_now().await;
                 *in_flight = Some(self.start_turn(cx, text, files, from));
             }
             Action::SetMode(mode) => self.set_mode(cx, mode).await,
@@ -941,6 +1016,25 @@ impl<W: Write> Host<W> {
             }
         }
         deferred
+    }
+
+    /// The conversation updates waiting before the first prompt starts, which
+    /// can only be a loaded session replaying its history: dropped.  Anything
+    /// else waiting (commands, usage, modes) is returned, to handle as usual.
+    async fn drop_replayed_history(&mut self, rx: &mut mpsc::UnboundedReceiver<Event>) -> Vec<Event> {
+        tokio::task::yield_now().await;
+        let mut kept = Vec::new();
+        let mut dropped = 0usize;
+        while let Ok(ev) = rx.try_recv() {
+            match &ev {
+                Event::Update(n) if is_conversation_update(&n.update) => dropped += 1,
+                _ => kept.push(ev),
+            }
+        }
+        if dropped > 0 {
+            self.dim(&t!("· {n} updates of the loaded conversation's history skipped", n = dropped));
+        }
+        kept
     }
 
     /// initialize → session/new (or session/load); returns the initial prompt to send.
@@ -2866,9 +2960,37 @@ fn setup_failure_message(harness: &Harness, err: &str) -> String {
     t!("{harness} couldn't start: {reason}", harness = harness.label(), reason = first)
 }
 
+/// An update that is part of the conversation itself (what was said and
+/// done), as opposed to the session's state (commands, modes, usage).
+fn is_conversation_update(update: &acp::SessionUpdate) -> bool {
+    matches!(
+        update,
+        acp::SessionUpdate::UserMessageChunk(_)
+            | acp::SessionUpdate::AgentMessageChunk(_)
+            | acp::SessionUpdate::AgentThoughtChunk(_)
+            | acp::SessionUpdate::ToolCall(_)
+            | acp::SessionUpdate::ToolCallUpdate(_)
+            | acp::SessionUpdate::Plan(_)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_directory_is_made_private_and_a_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_private(&run).unwrap();
+        assert_eq!(std::fs::metadata(&run).unwrap().permissions().mode() & 0o777, 0o700);
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        assert!(make_private(&file).is_err(), "only a directory of ours");
+    }
 
     #[test]
     fn composite_answers_are_bounded_unique_and_never_permission_grants() {

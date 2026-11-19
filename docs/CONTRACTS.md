@@ -315,7 +315,9 @@ usage extension or the prompt reply. Other currencies are not treated as USD.
 // Adapter resolution (overridable by env AXEL_ACP_<HARNESS>=<command line>)
 pub fn adapter_command(harness: &axel_store::Harness) -> Vec<String>;  // claude → [axel, "claude-acp"], codex → [axel, "codex-acp"], custom "goose" → ["goose","acp"], Custom(cmd) → split(cmd)
 
-pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort>, pub on_turn: Option<TurnHook> /* told each turn number as it starts */, pub notices: Vec<String> /* Error items pushed on the thread once the host is up */ }
+pub struct HostConfig { pub session_id: String, pub thread_id: String, pub agent_pubkey: String, pub cwd: PathBuf, pub harness: Harness, pub runtime_mode: RuntimeMode, pub disallowed_tools: Vec<String>, pub log_path: PathBuf, pub socket_path: PathBuf, pub env: Vec<(String,String)>, pub initial_prompt: Option<String>, pub resume_native_id: Option<String>, pub effort: Option<axel_store::Effort>, pub on_turn: Option<TurnHook> /* told each turn number as it starts */, pub notices: Vec<String> /* Error items pushed on the thread once the host is up */, pub idle_exit_after: Option<Duration> /* end the session once idle this long; at most IDLE_EXIT_AFTER_MAX */ }
+pub const IDLE_EXIT_AFTER_MAX: Duration; // 24 h; run_host refuses a longer one
+pub const IDLE_EXIT_REASON: &str;        // "idle": the end reason of a session its idle timeout ended
 pub struct TurnHook(pub std::sync::Arc<dyn Fn(u32) + Send + Sync>);
 pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_identity::Keypair, out: impl std::io::Write + Send) -> anyhow::Result<()>;
 //   - spawns adapter, initialize (clientCapabilities fs read/write = true, terminal = false), session/new {cwd, mcpServers: []} (or session/load when resume_native_id and agent supports loadSession)
@@ -325,7 +327,8 @@ pub async fn run_host(cfg: HostConfig, store: axel_store::Store, signer: axel_id
 //   - session/request_permission → policy::decide(mode, tool_call, disallowed, guard) → Allow(option)/Deny(option)/Ask → Ask = Pending Permission item; wait for socket `answer`
 //   - fs/read_text_file and fs/write_text_file client methods implemented against cwd (write respects plan mode: deny)
 //   - prints one coloured line per event to `out`; appends {ts, dir, frame} JSON lines to log_path
-//   - exits when socket `stop`, adapter exits, or stdin closes; then store.end_session(reason)
+//   - exits when socket `stop`, adapter exits, stdin closes, or (idle_exit_after) it has been idle that long: no turn, nothing queued or steering, no pending question; then store.end_session(reason)
+//   - `axel session host` reads idle_exit_after from AXEL_IDLE_EXIT_SECS (whole seconds, at most 86400) and keeps it out of the harness env
 
 pub mod socket {  // JSON lines over a unix socket
     pub enum Command { Prompt { text: String, attachments, steer: bool, from: Option<Sender> }, Note { .. }, Steer { item_id }, Dequeue { item_id }, Edit { item_id, text }, SetMode { mode }, Cancel, Answer { item_id: String, option_id: String }, Status, Stop }
@@ -520,7 +523,7 @@ Thread view: header (title · agents with state glyphs · env · tokens · $), t
 
 ## Token inspector (ADR 0011)
 
-### axel-store additions (local-only table `model_requests`, migration v11)
+### axel-store additions (local-only table `model_requests`, migration v11; `throttled` column, v12)
 
 ```rust
 pub enum ModelProvider { Anthropic, OpenAi, ChatGpt }                 // as_str/parse: "anthropic" | "openai" | "chatgpt"
@@ -537,6 +540,7 @@ pub struct ModelRequest {
     pub cache_write_tokens: Option<u64>, pub reasoning_tokens: Option<u64>,
     pub request_bytes: u64, pub response_bytes: u64, pub stop_reason: Option<String>, pub error: Option<String> /* ≤ 500 bytes, never a body or header */,
     pub breakdown: Option<ContextBreakdown>,
+    pub throttled: bool /* slowed on purpose by AXEL_THROTTLE; serde default false */,
 }
 impl ModelRequest { pub fn context_tokens(&self) -> u64; pub fn cost_usd_est(&self) -> f64; }
 pub struct ModelRequestFilter { pub thread_id: Option<String>, pub session_id: Option<String>, pub agent_pubkey: Option<String>, pub since_ms: i64, pub limit: usize /* ≤ MODEL_REQUESTS_LIMIT_MAX = 5000 */ }
@@ -556,7 +560,12 @@ pub struct ProxyConfig {
     pub session_id: String, pub thread_id: String, pub agent_pubkey: String,
     pub anthropic_upstream: Option<url-ish String> /* None: https://api.anthropic.com; Some: the user's own ANTHROPIC_BASE_URL, https only */,
     pub openai_upstream: OpenAiUpstream,
+    pub throttle: Option<Throttle> /* None unless AXEL_THROTTLE: a testing aid */,
 }
+pub struct Throttle { pub up_bits_per_sec: Option<u64>, pub down_bits_per_sec: Option<u64>, pub latency_ms: u32 /* added each way */, pub loss_pct: u8 /* per request, 0–100 */ }
+impl Throttle { pub fn parse(spec: &str) -> anyhow::Result<Throttle>; }   // "airport" | "up=1mbit,down=5mbit,rtt=300ms,loss=2" | "airport,loss=0"; malformed is an error
+impl std::fmt::Display for Throttle;   // "1 Mbit/s up, 3 Mbit/s down, 400 ms RTT, 3% loss"
+pub enum ThrottlePreset { Airport, Train, ThreeG }   // as_str/parse: "airport" | "train" | "3g"; fn throttle(self) -> Throttle
 pub trait RequestSink: Send + Sync + 'static { fn record(&self, request: &axel_store::ModelRequest); }   // called at start and at end of each request; must not block for long
 pub struct Proxy;   // dropping it (or shutdown) stops the listener
 impl Proxy {
@@ -569,7 +578,7 @@ impl Proxy {
 ```
 `Store::thread_inspected(thread_id) -> Result<bool>`, `Store::set_thread_inspected(thread_id, on: bool)`, `Store::inspected_threads() -> Result<Vec<String>>` (≤ `INSPECTED_THREADS_MAX` = 1000; local-only table `inspected_threads`; a thread never turned on is off). `axel inspect on|off|status [--thread]` sets and reads it; `r` in the pane toggles the scoped thread.
 Session host: proxy only when the session's thread is inspected (or `AXEL_INSPECT=1`; `AXEL_INSPECT=0` forces it off); Claude gets `ANTHROPIC_BASE_URL`; the Codex adapter gets `AXEL_CODEX_BASE_URL` and adds `-c model_provider=axel -c model_providers.axel.{name,base_url,wire_api="responses",requires_openai_auth=true}` to `codex app-server`. A proxy that can't start leaves the session direct, with a notice on the thread.
-The host runs the proxy on its own two-thread runtime and feeds `set_turn` through `HostConfig::on_turn`; rows go to the store through a dedicated writer thread (its own connection) behind a bounded channel that drops rows when full. A user's own `ANTHROPIC_BASE_URL` becomes the Anthropic upstream (https only); an inherited proxy URL from a parent session is dropped. Allowlist: `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` (Anthropic), `/responses`, `/responses/compact`, `/models` (OpenAI). `axel gc` prunes rows older than 30 days.
+The host runs the proxy on its own two-thread runtime and feeds `set_turn` through `HostConfig::on_turn`; rows go to the store through a dedicated writer thread (its own connection) behind a bounded channel that drops rows when full. `AXEL_THROTTLE=<preset or spec>` in `axel session host`'s environment throttles that session's proxy (and implies it, over `AXEL_INSPECT=0` too): half the RTT before forwarding and half before the response starts, request bodies and responses paced to the rates in ≤ 16 KiB chunks, and `loss_pct` of requests lost (the connection closes before any response byte; never forwarded). Spec keys: `up`, `down` (`kbit`/`mbit`/`gbit`, 1 kbit to 100 gbit), `rtt` (`ms`/`s`, ≤ 60 s), `loss` (0–100, optional `%`). A malformed value refuses the session; an active one prints `network throttled: <name> (<profile>)` on the thread. Refusals are checked before any throttling. A user's own `ANTHROPIC_BASE_URL` becomes the Anthropic upstream (https only); an inherited proxy URL from a parent session is dropped. Allowlist: `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` (Anthropic), `/responses`, `/responses/compact`, `/models` (OpenAI). `axel gc` prunes rows older than 30 days.
 
 ### axel (bin) and axel-tui additions
 

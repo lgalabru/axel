@@ -130,6 +130,9 @@ pub fn spawn_detached(spec: &cfg_launch::LaunchSpec, session_id: &str) -> Result
 
 pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Launched> {
     let resume = opts.resume.clone().or_else(|| std::env::var("AXEL_RESUME").ok()).filter(|r| !r.trim().is_empty());
+    // The session host inherits AXEL_THROTTLE and refuses a malformed one;
+    // say so here, before a thread or a session exists to wait on.
+    super::inspector::throttle_from_env()?;
     let owner = ctx.owner()?;
     let env = ctx.store.local_environment()?;
     record_rex_host(ctx, &env);

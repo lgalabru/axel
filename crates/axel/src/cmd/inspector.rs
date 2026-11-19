@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axel_i18n::t;
-use axel_proxy::{OpenAiUpstream, Proxy, ProxyConfig, RequestSink};
+use axel_proxy::{OpenAiUpstream, Proxy, ProxyConfig, RequestSink, Throttle};
 use axel_store::{Harness, ModelRequest, Store};
 
 /// Rows waiting for the writer.  Each request makes two, a harness makes a
@@ -71,17 +71,46 @@ fn wanted_with(switched_on: bool, variable: Option<&str>) -> bool {
     }
 }
 
-/// Start the proxy for `session` when `wanted`, and point the harness's
-/// environment `env` at it.  Never fails: a proxy that can't start leaves
-/// `env` as it was.
-pub fn start(session: &Session<'_>, wanted: bool, env: &mut Vec<(String, String)>) -> Inspection {
+/// A bad network the session replays, from `AXEL_THROTTLE`: a testing aid,
+/// never on by default.  It implies the proxy, like `AXEL_INSPECT=1`.
+pub struct NetworkThrottle {
+    /// The profile as it was asked for (`airport`, `up=1mbit,rtt=300ms`).
+    pub label: String,
+    pub throttle: Throttle,
+}
+
+impl NetworkThrottle {
+    /// What the thread is told: `network throttled: airport (1 Mbit/s up, …)`.
+    pub fn notice(&self) -> String {
+        t!("network throttled: {name} ({profile})", name = self.label, profile = self.throttle)
+    }
+}
+
+/// The session's throttle, if `AXEL_THROTTLE` asks for one.  A malformed
+/// profile is an error: a typo must never run the session unthrottled
+/// while the owner believes otherwise.
+pub fn throttle_from_env() -> Result<Option<NetworkThrottle>> {
+    throttle_from(std::env::var("AXEL_THROTTLE").ok().as_deref())
+}
+
+fn throttle_from(variable: Option<&str>) -> Result<Option<NetworkThrottle>> {
+    let Some(spec) = variable.map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None) };
+    let throttle = Throttle::parse(spec).with_context(|| t!("AXEL_THROTTLE is not a network profile"))?;
+    Ok(Some(NetworkThrottle { label: spec.to_string(), throttle }))
+}
+
+/// Start the proxy for `session` when `wanted` or throttled, and point the
+/// harness's environment `env` at it.  Never fails: a proxy that can't
+/// start leaves `env` as it was.
+pub fn start(session: &Session<'_>, wanted: bool, throttle: Option<Throttle>, env: &mut Vec<(String, String)>) -> Inspection {
     let is_proxied = matches!(session.harness, Harness::Claude | Harness::Codex);
-    if !wanted || !is_proxied {
+    let is_wanted = wanted || throttle.is_some();
+    if !is_wanted || !is_proxied {
         return Inspection::Off;
     }
     // The user's own Anthropic endpoint is Claude's business only.
     let anthropic_upstream = if *session.harness == Harness::Claude { user_anthropic_base_url(env) } else { None };
-    match Inspector::start(session, anthropic_upstream) {
+    match Inspector::start(session, anthropic_upstream, throttle) {
         Ok(inspector) => {
             inspector.point(session.harness, env);
             Inspection::On(inspector)
@@ -93,7 +122,7 @@ pub fn start(session: &Session<'_>, wanted: bool, env: &mut Vec<(String, String)
 }
 
 impl Inspector {
-    fn start(session: &Session<'_>, anthropic_upstream: Option<String>) -> Result<Inspector> {
+    fn start(session: &Session<'_>, anthropic_upstream: Option<String>, throttle: Option<Throttle>) -> Result<Inspector> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(PROXY_THREADS)
             .thread_name("axel-inspector")
@@ -107,6 +136,7 @@ impl Inspector {
             agent_pubkey: session.agent_pubkey.to_string(),
             anthropic_upstream,
             openai_upstream: codex_upstream(),
+            throttle,
         };
         // On failure the sink drops with the error, which ends the writer.
         let proxy = runtime.block_on(Proxy::start(config, Arc::new(sink)))?;
@@ -329,6 +359,17 @@ mod tests {
     }
 
     #[test]
+    fn a_throttle_comes_only_from_a_valid_profile() {
+        assert!(throttle_from(None).unwrap().is_none(), "off by default");
+        assert!(throttle_from(Some("  ")).unwrap().is_none(), "empty is unset");
+        let airport = throttle_from(Some(" airport ")).unwrap().unwrap();
+        assert_eq!((airport.label.as_str(), airport.throttle), ("airport", axel_proxy::ThrottlePreset::Airport.throttle()));
+        assert!(airport.notice().contains("1 Mbit/s up"), "{}", airport.notice());
+        assert!(throttle_from(Some("airprot")).is_err(), "a typo is an error, not unthrottled");
+        assert!(throttle_from(Some("up=1")).is_err());
+    }
+
+    #[test]
     fn the_codex_login_picks_the_upstream() {
         assert_eq!(parse_auth_mode("chatgpt"), OpenAiUpstream::ChatGpt);
         assert_eq!(parse_auth_mode("chatgptAuthTokens"), OpenAiUpstream::ChatGpt);
@@ -391,6 +432,7 @@ mod tests {
             stop_reason: None,
             error: None,
             breakdown: None,
+            throttled: true,
         };
         sink.record(&row);
         drop(sink);

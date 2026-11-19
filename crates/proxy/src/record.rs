@@ -16,6 +16,7 @@ use crate::RequestSink;
 use crate::analyze::Analysis;
 use crate::observe::{Observer, Shape};
 use crate::route::Endpoint;
+use crate::throttle::Paced;
 
 /// Why a request failed, as the short fixed text the row keeps: never a
 /// body, a header, or an error's own text (which can quote either).
@@ -27,6 +28,9 @@ pub(crate) enum Failure {
     Request,
     /// The response stream broke partway.
     Stream,
+    /// The network throttle lost it on purpose (`AXEL_THROTTLE`): the
+    /// connection broke before the provider saw it.
+    Lost,
 }
 
 impl Failure {
@@ -35,6 +39,7 @@ impl Failure {
             Failure::Connect => "could not connect to the provider",
             Failure::Request => "the provider connection failed before it answered",
             Failure::Stream => "the response stream broke",
+            Failure::Lost => "lost by the network throttle",
         }
     }
 }
@@ -58,6 +63,7 @@ pub(crate) struct Recording {
 
 impl Recording {
     /// The row for a request that is about to go upstream, recorded `InFlight`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         sink: Arc<dyn RequestSink>,
         owner: Owner,
@@ -66,6 +72,7 @@ impl Recording {
         analysis: Analysis,
         request_bytes: u64,
         started: Instant,
+        is_throttled: bool,
     ) -> Recording {
         let request = ModelRequest {
             id: ulid::Ulid::new().to_string(),
@@ -92,6 +99,7 @@ impl Recording {
             stop_reason: None,
             error: None,
             breakdown: analysis.breakdown,
+            throttled: is_throttled,
         };
         sink.record(&request);
         Recording { sink, request, started, is_finished: false }
@@ -164,7 +172,9 @@ pub(crate) enum ProxyBody {
 }
 
 pub(crate) struct ObservedBody {
-    inner: Incoming,
+    /// The provider's body, slowed to the throttle's down rate if any: what
+    /// is observed is what the harness receives, when it receives it.
+    inner: Paced<Incoming>,
     observer: Observer,
     recording: Option<Recording>,
     status: StatusCode,
@@ -172,7 +182,7 @@ pub(crate) struct ObservedBody {
 }
 
 impl ObservedBody {
-    pub(crate) fn new(inner: Incoming, observer: Observer, mut recording: Recording, status: StatusCode) -> ObservedBody {
+    pub(crate) fn new(inner: Paced<Incoming>, observer: Observer, mut recording: Recording, status: StatusCode) -> ObservedBody {
         recording.answered(status);
         let mut body = ObservedBody { inner, observer, recording: Some(recording), status, response_bytes: 0 };
         // An empty body is never polled: it ends here.

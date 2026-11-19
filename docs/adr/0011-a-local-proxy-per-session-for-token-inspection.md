@@ -89,6 +89,19 @@ every model call: a bug there breaks agents, so it is kept small, streams
 without buffering, and has its own tests against a fake upstream. Requests
 are pruned after 30 days by `axel gc`.
 
+## Network throttling (2026-11-19)
+
+To replay a bad network at a desk, without sudo or system tools, a session's
+proxy can be throttled: `AXEL_THROTTLE=airport` (or `train`, `3g`, or a spec
+such as `up=1mbit,down=5mbit,rtt=300ms,loss=2`) in the environment of
+`axel session host` turns the proxy on for that session and adds half the
+round trip each way, paces request bodies and responses to the given rates,
+and loses a share of requests by closing the connection before any response
+byte, so the harness retries as it would on a real network. It is a testing
+aid, never on by default, and changes nothing above: refusals are checked
+first, a lost request never reaches the provider, and rows say
+`throttled` so slow requests read as what they were.
+
 ## Possible future improvements
 
 Opt-in full capture of bodies to files under `~/.axel/inspect/` (mode 0600)
