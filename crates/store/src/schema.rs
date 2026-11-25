@@ -2,8 +2,11 @@
 //!
 //! The schema version lives in SQLite's `user_version` pragma, and every applied
 //! migration is also recorded in `schema_migrations` so `SELECT * FROM
-//! schema_migrations` tells the story of a database file.  Migrations are
-//! append-only: never edit an entry in `MIGRATIONS`, add a new one.
+//! schema_migrations` tells the story of a database file, with a fingerprint
+//! of each migration's SQL so a database migrated by another branch's build
+//! is refused instead of half-understood.  Migrations are append-only: never
+//! edit an entry in `MIGRATIONS`, add a new one.  `Store::open` copies a
+//! database aside before it upgrades it (see `crate::guard`).
 //!
 //! Tables fall in three groups (docs/DESIGN.md "Multiplayer"):
 //! - **the log**: `events`, every envelope ever received;
@@ -455,19 +458,21 @@ fn add_column_if_missing(
     column: &str,
     ddl: &str,
 ) -> Result<(), Error> {
-    let exists = tx
-        .prepare(&format!("PRAGMA table_info({table})"))?
-        .query_map([], |r| r.get::<_, String>("name"))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|c| c == column);
-    if !exists {
+    if !has_column(tx, table, column)? {
         tx.execute(
             &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl}"),
             [],
         )?;
     }
     Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Error> {
+    let columns = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>("name"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|c| c == column))
 }
 
 /// Rust work that a migration needs after its SQL, inside the same transaction.
@@ -547,7 +552,8 @@ pub fn current_version(conn: &Connection) -> Result<i64, Error> {
 
 /// Bring the database up to [`SCHEMA_VERSION`].  Idempotent: a database that is
 /// already current is left untouched.  A database from a newer build fails with
-/// [`Error::SchemaTooNew`] rather than being modified.
+/// [`Error::SchemaTooNew`], and one whose applied migrations differ from this
+/// build's fails with [`Error::SchemaDiverged`]; neither is modified.
 pub fn migrate(conn: &mut Connection) -> Result<(), Error> {
     migrate_to(conn, SCHEMA_VERSION)
 }
@@ -555,32 +561,118 @@ pub fn migrate(conn: &mut Connection) -> Result<(), Error> {
 /// Apply migrations up to `target` (≤ [`SCHEMA_VERSION`]).  Tests use it to
 /// stage an older database; production code always goes to the latest.
 pub(crate) fn migrate_to(conn: &mut Connection, target: i64) -> Result<(), Error> {
+    assert!(target >= 0, "migration target {target} is negative");
+    let goal = target.min(SCHEMA_VERSION);
     let mut version = current_version(conn)?;
+    refuse_too_new(version)?;
+    verify_applied(conn, version)?;
+    // One step per migration at most: each pass applies one, or finds that
+    // another process already did.
+    for _ in 0..MIGRATIONS.len() {
+        if version >= goal {
+            break;
+        }
+        version = apply_next(conn, version)?;
+    }
+    assert!(version >= goal);
+    debug_assert_eq!(current_version(conn)?, version);
+    Ok(())
+}
+
+/// Apply the migration after `version`, unless another process got there
+/// first.  Returns the version the database is at afterwards.
+///
+/// The transaction is `IMMEDIATE` so it holds the write lock before it reads
+/// `user_version`: two processes upgrading the same file at once then run
+/// each step exactly once, instead of both trying to create the same table.
+fn apply_next(conn: &mut Connection, version: i64) -> Result<i64, Error> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let found = current_version(&tx)?;
+    if found != version {
+        // Another process migrated while we waited for the lock.
+        assert!(found > version, "schema version went back from {version} to {found}");
+        refuse_too_new(found)?;
+        tx.commit()?;
+        return Ok(found);
+    }
+    let next = version + 1;
+    let Ok(index) = usize::try_from(version) else {
+        return Err(Error::Corrupt(format!("negative schema version {version}")));
+    };
+    tx.execute_batch(MIGRATIONS[index])?;
+    post_migrate(&tx, next)?;
+    add_column_if_missing(&tx, "schema_migrations", "checksum", "TEXT")?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?1, ?2, ?3)",
+        rusqlite::params![next, crate::now(), fingerprint(MIGRATIONS[index])],
+    )?;
+    tx.pragma_update(None, "user_version", next)?;
+    tx.commit()?;
+    Ok(next)
+}
+
+fn refuse_too_new(version: i64) -> Result<(), Error> {
     if version > SCHEMA_VERSION {
         return Err(Error::SchemaTooNew {
             found: version,
             supported: SCHEMA_VERSION,
+            backup: None,
         });
     }
-    // `user_version` is a signed 32-bit pragma; only this module writes it.
-    let Ok(mut index) = usize::try_from(version) else {
+    if version < 0 {
         return Err(Error::Corrupt(format!("negative schema version {version}")));
-    };
-    while version < target.min(SCHEMA_VERSION) {
-        let next = version + 1;
-        let tx = conn.transaction()?;
-        tx.execute_batch(MIGRATIONS[index])?;
-        post_migrate(&tx, next)?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-            rusqlite::params![next, crate::now()],
-        )?;
-        tx.pragma_update(None, "user_version", next)?;
-        tx.commit()?;
-        version = next;
-        index += 1;
     }
-    assert!(version >= target.min(SCHEMA_VERSION));
-    debug_assert_eq!(current_version(conn)?, version);
     Ok(())
+}
+
+/// Check that every migration this database records as applied is the one
+/// this build would have applied at that version.
+///
+/// Two branches that each add "migration 11" produce databases that agree on
+/// the number and disagree on the tables.  Without this check a build from
+/// one branch would open the other's database as current and fail later, in
+/// whatever query first touches a table that isn't there.  Rows recorded
+/// before checksums existed have none and are trusted.
+fn verify_applied(conn: &Connection, version: i64) -> Result<(), Error> {
+    if version == 0 {
+        return Ok(());
+    }
+    if !has_column(conn, "schema_migrations", "checksum")? {
+        return Ok(());
+    }
+    let mut statement = conn.prepare(
+        "SELECT version, checksum FROM schema_migrations \
+         WHERE checksum IS NOT NULL AND version BETWEEN 1 AND ?1 ORDER BY version",
+    )?;
+    let rows = statement.query_map([version], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (applied, found) = row?;
+        let index = usize::try_from(applied - 1).expect("version is at least 1 by the query");
+        let expected = fingerprint(MIGRATIONS[index]);
+        if found != expected {
+            return Err(Error::SchemaDiverged {
+                version: applied,
+                found,
+                expected,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A short, stable fingerprint of a migration's SQL: FNV-1a (64-bit) over its
+/// statements, with `--` comment lines and runs of whitespace ignored so that
+/// rewording a comment never locks anyone out of their database.
+pub(crate) fn fingerprint(sql: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    let statements = sql.lines().filter(|line| !line.trim_start().starts_with("--"));
+    for word in statements.flat_map(str::split_whitespace) {
+        for byte in word.bytes().chain(std::iter::once(b' ')) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    format!("{hash:016x}")
 }

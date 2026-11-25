@@ -21,9 +21,28 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// The database is newer than this build understands.
-    #[error("database schema version {found} is newer than supported version {supported}")]
-    SchemaTooNew { found: i64, supported: i64 },
+    /// The database is newer than this build understands.  It was left
+    /// untouched; `backup` is the copy taken before it was upgraded past
+    /// `supported`, when one exists.
+    #[error("{}", too_new_message(*.found, *.supported, .backup.as_deref()))]
+    SchemaTooNew {
+        found: i64,
+        supported: i64,
+        backup: Option<PathBuf>,
+    },
+
+    /// Migration `version` in the database is not the one this build would
+    /// apply (another branch's build migrated it).  It was left untouched.
+    #[error(
+        "database migration {version} has fingerprint {found}, but this build's migration {version} is {expected}: \
+         the database was upgraded by a different build of axel. Run that build, or one that includes its \
+         migrations. The database was not changed; do not delete it."
+    )]
+    SchemaDiverged {
+        version: i64,
+        found: String,
+        expected: String,
+    },
 
     /// A uniqueness rule was violated (for example an agent name already in use).
     #[error("conflict: {0}")]
@@ -52,6 +71,22 @@ pub enum Error {
     /// A caller-side argument problem.
     #[error("invalid argument: {0}")]
     Invalid(String),
+}
+
+/// The `SchemaTooNew` message: what happened, what to do, and never "delete
+/// the database", which is the fix that loses every thread.
+fn too_new_message(found: i64, supported: i64, backup: Option<&std::path::Path>) -> String {
+    let mut message = format!(
+        "database schema version {found} is newer than this build of axel supports ({supported}). \
+         Install the newer axel that upgraded it. The database was not changed; do not delete it."
+    );
+    if let Some(backup) = backup {
+        message.push_str(&format!(
+            " A copy taken at schema version {supported}, before that upgrade, is at {}.",
+            backup.display()
+        ));
+    }
+    message
 }
 
 impl Error {

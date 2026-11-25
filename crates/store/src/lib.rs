@@ -20,6 +20,7 @@
 //! ```
 
 mod error;
+mod guard;
 mod items;
 mod local;
 mod native_usage;
@@ -48,6 +49,7 @@ pub use remote::{ItemChange, SyncStream};
 pub use policy::{
     AgentPolicy, Budget, DEFAULT_MAX_DEPTH, Reach, Refusal, SpendLimit, SummonCheck, local_day_start, narrower,
 };
+pub use guard::{SCHEMA_BACKUPS_KEPT_MAX, schema_backup_path};
 pub use schema::SCHEMA_VERSION;
 pub use types::{
     Agent, AgentColor, Appended, BlockedKind, ConversationItem, Effort, Environment, Harness, ItemKind, parse_harness_model,
@@ -142,6 +144,11 @@ impl Store {
     }
 
     /// Open (creating if needed) the database at `path`, set pragmas and run migrations.
+    ///
+    /// Opening never loses data: a database this build is about to upgrade is
+    /// first copied to [`schema_backup_path`]; one from a newer or a different
+    /// build is refused untouched; and a `-wal`/`-shm` left behind by a deleted
+    /// database is moved aside rather than read into the new one.
     pub fn open(path: &Path) -> Result<Store, Error> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -151,8 +158,16 @@ impl Store {
                 source,
             })?;
         }
+        guard::set_aside_orphaned_sidecars(path)?;
         let conn = Connection::open(path)?;
-        Store::init(conn, true)
+        Store::init(conn, Some(path)).map_err(|error| match error {
+            Error::SchemaTooNew { found, supported, backup: None } => {
+                let candidate = schema_backup_path(path, supported);
+                let backup = candidate.try_exists().unwrap_or(false).then_some(candidate);
+                Error::SchemaTooNew { found, supported, backup }
+            }
+            other => other,
+        })
     }
 
     /// [`Store::open`] at [`Store::default_path`].
@@ -162,12 +177,13 @@ impl Store {
 
     /// A private in-memory database with the full schema.  Used by tests and dry runs.
     pub fn open_memory() -> Result<Store, Error> {
-        Store::init(Connection::open_in_memory()?, false)
+        Store::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(mut conn: Connection, on_disk: bool) -> Result<Store, Error> {
+    /// `disk` is the file `conn` was opened from, or `None` in memory.
+    fn init(mut conn: Connection, disk: Option<&Path>) -> Result<Store, Error> {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
-        if on_disk {
+        if disk.is_some() {
             // Returns the resulting mode; "wal" on success, something else on
             // filesystems that cannot do WAL — not an error for us.
             let _: String =
@@ -175,6 +191,11 @@ impl Store {
             conn.pragma_update(None, "synchronous", "NORMAL")?;
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        if let Some(path) = disk {
+            // A failed copy stops the upgrade: better an error today than a
+            // migration that can't be undone.
+            guard::backup_before_upgrade(&conn, path)?;
+        }
         schema::migrate(&mut conn)?;
         Ok(Store { conn })
     }

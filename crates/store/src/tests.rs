@@ -148,6 +148,258 @@ fn open_on_disk_sets_wal_and_reopens() {
     assert!(Store::default_path().ends_with("axel.db"));
 }
 
+// --- schema upgrades never lose data ------------------------------------------
+
+/// A database file at `version`, holding one row of our own so a copy can be
+/// told apart from a fresh database.
+fn stage_on_disk(path: &Path, version: i64) {
+    let mut conn = Connection::open(path).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    schema::migrate_to(&mut conn, version).unwrap();
+    conn.execute_batch("CREATE TABLE marker (note TEXT); INSERT INTO marker VALUES ('mine');")
+        .unwrap();
+    assert_eq!(schema::current_version(&conn).unwrap(), version);
+}
+
+fn marker(path: &Path) -> String {
+    let conn = Connection::open(path).unwrap();
+    conn.query_row("SELECT note FROM marker", [], |r| r.get(0)).unwrap()
+}
+
+fn backups_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".bak"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn upgrade_copies_the_old_database_aside_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    let old = SCHEMA_VERSION - 1;
+    stage_on_disk(&path, old);
+
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+
+    let backup = schema_backup_path(&path, old);
+    assert_eq!(backups_in(dir.path()), vec![format!("axel.db.v{old}.bak")]);
+    let copy = Connection::open(&backup).unwrap();
+    assert_eq!(schema::current_version(&copy).unwrap(), old);
+    assert_eq!(marker(&backup), "mine");
+    // The upgrade itself kept the data too.
+    assert_eq!(marker(&path), "mine");
+}
+
+#[test]
+fn new_and_current_databases_are_not_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    drop(Store::open(&path).unwrap());
+    drop(Store::open(&path).unwrap());
+    assert!(backups_in(dir.path()).is_empty());
+}
+
+#[test]
+fn only_the_newest_copies_are_kept_and_others_are_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    let old = SCHEMA_VERSION - 1;
+    stage_on_disk(&path, old);
+    for version in 1..old {
+        std::fs::write(schema_backup_path(&path, version), b"old copy").unwrap();
+    }
+    // Not ours: the owner's own backups, and another database's copies.
+    std::fs::write(dir.path().join("axel.db.pre-v2.bak"), b"owner").unwrap();
+    std::fs::write(dir.path().join("other.db.v1.bak"), b"other").unwrap();
+
+    drop(Store::open(&path).unwrap());
+
+    let mut expected = vec![
+        "axel.db.pre-v2.bak".to_string(),
+        format!("axel.db.v{}.bak", old - 1),
+        format!("axel.db.v{old}.bak"),
+        "other.db.v1.bak".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(SCHEMA_BACKUPS_KEPT_MAX, 2);
+    assert_eq!(backups_in(dir.path()), expected);
+}
+
+#[test]
+fn a_newer_database_is_refused_untouched_and_names_its_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    stage_on_disk(&path, SCHEMA_VERSION);
+    // What a newer build leaves: its copy at our version, then its upgrade.
+    std::fs::copy(&path, schema_backup_path(&path, SCHEMA_VERSION)).unwrap();
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 2).unwrap();
+    }
+
+    let error = Store::open(&path).unwrap_err();
+    let Error::SchemaTooNew { found, supported, backup } = &error else {
+        panic!("expected SchemaTooNew, got {error}");
+    };
+    assert_eq!((*found, *supported), (SCHEMA_VERSION + 2, SCHEMA_VERSION));
+    assert_eq!(backup.as_deref(), Some(schema_backup_path(&path, SCHEMA_VERSION).as_path()));
+    let message = error.to_string();
+    assert!(message.contains("do not delete it"), "{message}");
+    assert!(message.contains(".bak"), "{message}");
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(schema::current_version(&conn).unwrap(), SCHEMA_VERSION + 2);
+    assert_eq!(marker(&path), "mine");
+}
+
+#[test]
+fn a_newer_database_without_a_copy_says_so_plainly() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+    let error = schema::migrate(&mut conn).unwrap_err();
+    assert!(matches!(error, Error::SchemaTooNew { backup: None, .. }));
+    assert!(!error.to_string().contains(".bak"));
+}
+
+#[test]
+fn every_applied_migration_records_its_fingerprint() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    schema::migrate(&mut conn).unwrap();
+    let recorded: Vec<(i64, String)> = conn
+        .prepare("SELECT version, checksum FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(recorded.len() as i64, SCHEMA_VERSION);
+    for (version, checksum) in recorded {
+        assert_eq!(checksum, schema::fingerprint(schema::migration_sql(version)));
+    }
+}
+
+#[test]
+fn a_database_migrated_by_another_branch_is_refused_untouched() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    schema::migrate(&mut conn).unwrap();
+    conn.execute(
+        "UPDATE schema_migrations SET checksum = 'from-another-branch' WHERE version = ?1",
+        [SCHEMA_VERSION],
+    )
+    .unwrap();
+
+    let error = schema::migrate(&mut conn).unwrap_err();
+    let Error::SchemaDiverged { version, found, expected } = &error else {
+        panic!("expected SchemaDiverged, got {error}");
+    };
+    assert_eq!(*version, SCHEMA_VERSION);
+    assert_eq!(found, "from-another-branch");
+    assert_eq!(expected, &schema::fingerprint(schema::migration_sql(SCHEMA_VERSION)));
+    assert!(error.to_string().contains("do not delete it"));
+    assert_eq!(schema::current_version(&conn).unwrap(), SCHEMA_VERSION);
+}
+
+#[test]
+fn migrations_recorded_before_fingerprints_are_trusted() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    schema::migrate_to(&mut conn, SCHEMA_VERSION - 1).unwrap();
+    // What every database migrated before fingerprints looks like.
+    conn.execute_batch("ALTER TABLE schema_migrations DROP COLUMN checksum").unwrap();
+    schema::migrate(&mut conn).unwrap();
+    let unknown: i64 = conn
+        .query_row("SELECT COUNT(*) FROM schema_migrations WHERE checksum IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(unknown, SCHEMA_VERSION - 1);
+    schema::migrate(&mut conn).unwrap();
+}
+
+#[test]
+fn fingerprints_ignore_comments_and_layout_but_not_statements() {
+    let base = schema::fingerprint("CREATE TABLE t (a INTEGER);\nCREATE INDEX i ON t(a);");
+    let reworded = schema::fingerprint(
+        "  -- a comment, reworded later\nCREATE TABLE t (a   INTEGER);\n\n    CREATE INDEX i ON t(a);",
+    );
+    let changed = schema::fingerprint("CREATE TABLE t (a TEXT);\nCREATE INDEX i ON t(a);");
+    assert_eq!(base, reworded);
+    assert_ne!(base, changed);
+    assert_eq!(base.len(), 16);
+}
+
+#[test]
+fn concurrent_opens_upgrade_once() {
+    const OPENERS: usize = 4;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    stage_on_disk(&path, 1);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(OPENERS));
+    let handles: Vec<_> = (0..OPENERS)
+        .map(|_| {
+            let barrier = barrier.clone();
+            let path = path.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                Store::open(&path).map(|s| s.schema_version().unwrap())
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert_eq!(handle.join().unwrap().unwrap(), SCHEMA_VERSION);
+    }
+
+    let conn = Connection::open(&path).unwrap();
+    let applied: i64 = conn
+        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(applied, SCHEMA_VERSION);
+    assert_eq!(marker(&path), "mine");
+    let backup = schema_backup_path(&path, 1);
+    assert_eq!(schema::current_version(&Connection::open(&backup).unwrap()).unwrap(), 1);
+    assert_eq!(marker(&backup), "mine");
+}
+
+#[test]
+fn sidecars_of_a_deleted_database_are_set_aside_not_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    std::fs::write(dir.path().join("axel.db-wal"), b"the deleted database's last writes").unwrap();
+    std::fs::write(dir.path().join("axel.db-shm"), b"stale index").unwrap();
+
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+
+    let orphans: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains(".orphan-"))
+        .collect();
+    assert_eq!(orphans.len(), 2);
+    let wal = orphans.iter().find(|p| p.to_string_lossy().contains("-wal.orphan-")).unwrap();
+    assert_eq!(std::fs::read(wal).unwrap(), b"the deleted database's last writes");
+}
+
+#[test]
+fn sidecars_of_a_live_database_are_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("axel.db");
+    let first = Store::open(&path).unwrap();
+    first
+        .create_thread(&Keypair::generate(), "in flight", "keep me", None)
+        .unwrap();
+    // A second opener while the first still holds the WAL open.
+    let second = Store::open(&path).unwrap();
+    assert_eq!(second.list_threads(ThreadFilter::default()).unwrap().len(), 1);
+    let orphaned = std::fs::read_dir(dir.path())
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().contains(".orphan-"));
+    assert!(!orphaned);
+}
+
 // --- local-only ---------------------------------------------------------------
 
 #[test]

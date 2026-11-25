@@ -116,9 +116,14 @@ pub mod git { pub fn repo_root(dir: &Path) -> Option<PathBuf>; pub fn current_br
 
 ```rust
 pub struct Store { conn: rusqlite::Connection }
+pub fn schema_backup_path(db: &Path, version: i64) -> PathBuf;   // <db>.v<version>.bak
+pub const SCHEMA_BACKUPS_KEPT_MAX: usize;                       // 2
 impl Store {
     pub fn default_path() -> PathBuf;                       // $AXEL_DB, $AXEL_HOME/axel.db, ~/.axel/axel.db
     pub fn open(path: &Path) -> Result<Store, Error>; pub fn open_default() -> Result<Store, Error>; pub fn open_memory() -> Result<Store, Error>;
+    // open never loses data (ADR 0011): copies to schema_backup_path(path, v) before upgrading from v;
+    // a newer database → SchemaTooNew { found, supported, backup } untouched; a migration recorded with
+    // another build's fingerprint → SchemaDiverged untouched; orphaned -wal/-shm are renamed, not reused.
 
     // ---- the log ----
     pub fn append(&self, env: &Envelope) -> Result<Appended, Error>;   // verify sig; INSERT OR IGNORE into events; authorize; project. Idempotent.
