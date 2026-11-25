@@ -53,3 +53,4 @@ or a plan with open questions (an RFD).
 | [0008](0008-autopilot-with-a-guard.md) | Autopilot by default, with a guard hook for the irreversible | accepted |
 | [0009](0009-rebuild-by-importing-not-trimming.md) | Rebuild from scratch, importing modules one by one with provenance | accepted |
 | [0010](0010-native-scrollback-for-diff-reading.md) | Native terminal scrollback for reading diffs, explicit line review | accepted |
+| [0011](0011-schema-upgrades-never-lose-data.md) | Opening the database never loses data: copy before upgrading, refuse what we don't understand | accepted |
