@@ -15,7 +15,7 @@
 //!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
 //!   `session_context`, `plan_limits`, `turn_marks`, `native_usage_sources`,
-//!   `native_usage`,
+//!   `native_usage`, `model_requests`, `inspected_threads`,
 //!   plus the `sessions.transcript_offset` column.
 
 use rusqlite::Connection;
@@ -443,6 +443,53 @@ const MIGRATIONS: &[&str] = &[
     r#"
     -- agents.effort: see post_migrate.
     "#,
+    // v11: what the inspector proxy saw, one row per request a harness sent to
+    // its model provider.  Local-only and metadata only: sizes, tokens,
+    // timings and a context breakdown, never a body, a header or a credential.
+    r#"
+    CREATE TABLE model_requests (
+        id                  TEXT PRIMARY KEY,
+        session_id          TEXT NOT NULL,
+        thread_id           TEXT NOT NULL,
+        agent_pubkey        TEXT NOT NULL,
+        turn                INTEGER,
+        provider            TEXT NOT NULL,
+        endpoint            TEXT NOT NULL,
+        model               TEXT,
+        started_at_ms       INTEGER NOT NULL,
+        first_byte_ms       INTEGER,
+        duration_ms         INTEGER,
+        http_status         INTEGER,
+        streamed            INTEGER NOT NULL,
+        outcome             TEXT NOT NULL,
+        input_tokens        INTEGER,
+        output_tokens       INTEGER,
+        cache_read_tokens   INTEGER,
+        cache_write_tokens  INTEGER,
+        reasoning_tokens    INTEGER,
+        request_bytes       INTEGER NOT NULL,
+        response_bytes      INTEGER NOT NULL,
+        stop_reason         TEXT,
+        error               TEXT,
+        breakdown_json      TEXT
+    );
+    CREATE INDEX model_requests_at      ON model_requests(started_at_ms);
+    CREATE INDEX model_requests_thread  ON model_requests(thread_id, started_at_ms);
+    CREATE INDEX model_requests_session ON model_requests(session_id, started_at_ms);
+
+    -- Threads the owner asked to inspect (`axel inspect on`): only their new
+    -- managed sessions run through the proxy.
+    CREATE TABLE inspected_threads (
+        thread_id  TEXT PRIMARY KEY,
+        since_ms   INTEGER NOT NULL
+    );
+    "#,
+    // v12: whether the proxy throttled a request on purpose (`AXEL_THROTTLE`,
+    // a testing aid), so slow or lost requests read as what they were.
+    // The column is added by `post_migrate`.
+    r#"
+    -- model_requests.throttled: see post_migrate.
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.
@@ -485,6 +532,7 @@ fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
         6 => replay_threads_holding(tx, crate::kind::USAGE),
         8 => add_column_if_missing(tx, "turns", "changes_json", "TEXT"),
         10 => add_column_if_missing(tx, "agents", "effort", "TEXT"),
+        12 => add_column_if_missing(tx, "model_requests", "throttled", "INTEGER NOT NULL DEFAULT 0"),
         _ => Ok(()),
     }
 }
