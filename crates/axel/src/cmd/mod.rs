@@ -16,6 +16,7 @@ mod manage;
 mod policy;
 mod process_control;
 mod reconcile;
+mod resume;
 mod rex_link;
 mod session;
 mod setup;

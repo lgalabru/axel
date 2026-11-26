@@ -48,6 +48,11 @@ pub enum Target {
     /// Right here: the calling pane execs the harness (the floating launcher
     /// turns into the agent's pane).
     Here,
+    /// This pane runs the session whatever its runtime: a pane harness execs
+    /// here, and a managed session's host runs here instead of in a new
+    /// detached pane.  What `axel session resume` uses, in the pane Rex
+    /// brought back.
+    ThisPane,
 }
 
 /// Stable key for "the same repository on another machine": the origin URL,
@@ -204,11 +209,14 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     // the thread view wherever it likes.
     if runtime == SessionRuntime::Managed {
         let attachments: Vec<PathBuf> = opts.attachments.iter().chain(req.attachments.iter()).cloned().collect();
-        return start_managed(ctx, started, &spec, &prompt, &attachments, resume);
+        // Resuming with nothing new to say: the conversation picks up where it
+        // was, without the thread's intent sent again.
+        let first = if resume.is_some() && opts.prompt.is_none() { None } else { Some(prompt.as_str()) };
+        return start_managed(ctx, started, &spec, first, &attachments, resume, opts.target);
     }
     match (&ctx.rex, opts.target) {
         (None, _) => start_inline(ctx, started, spec, None),
-        (Some(rex), Target::Here) => start_inline(ctx, started, spec, Some(rex)),
+        (Some(rex), Target::Here | Target::ThisPane) => start_inline(ctx, started, spec, Some(rex)),
         (Some(rex), Target::NewWindow) => start_window(ctx, started, &spec, rex),
     }
 }
@@ -469,9 +477,10 @@ fn start_managed(
     ctx: &Ctx,
     started: Started,
     spec: &cfg_launch::LaunchSpec,
-    prompt: &str,
+    prompt: Option<&str>,
     attachments: &[PathBuf],
     resume: Option<String>,
+    target: Target,
 ) -> Result<Launched> {
     let Started { thread, session, agent, agent_kp, work_dir, label } = started;
     // Resuming: the host loads this conversation (`session/load`).
@@ -485,7 +494,9 @@ fn start_managed(
     for (k, v) in spec.env.iter().filter(|(k, _)| host_keeps_env(k)) {
         host_spec.env.push((k.clone(), v.clone()));
     }
-    host_spec.env.push(("AXEL_PROMPT".into(), prompt.to_string()));
+    if let Some(prompt) = prompt {
+        host_spec.env.push(("AXEL_PROMPT".into(), prompt.to_string()));
+    }
     // Summoned by another agent: the first message is from it, not the owner.
     if let Some(from) = super::policy::caller_agent().filter(|pk| *pk != agent.pubkey) {
         host_spec.env.push(("AXEL_PROMPT_FROM".into(), from));
@@ -498,6 +509,14 @@ fn start_managed(
     let Some(rex) = &ctx.rex else {
         return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: None, host_spec: Some(host_spec) });
     };
+    if target == Target::ThisPane {
+        // The caller execs the host here; the session's pane is this one.
+        let block = rex.env().block.clone();
+        let window = super::ui::window_of_block(rex, &block).ok().flatten();
+        let ids = (Some(rex.env().session.clone()), window.clone(), Some(block));
+        ctx.store.update_session(&agent_kp, &session.id, &SessionUpdate { rex: Some(ids), ..Default::default() })?;
+        return Ok(Launched::Managed { thread_id: thread.id, session_id: session.id, host_window: window, host_spec: Some(host_spec) });
+    }
     let mut command = vec![host_spec.program.clone()];
     command.extend(host_spec.args.iter().cloned());
     let pane_label = format!("{label}{}", super::ui::AGENT_PANE_SUFFIX);
@@ -530,6 +549,9 @@ fn start_inline(ctx: &Ctx, started: Started, mut spec: cfg_launch::LaunchSpec, r
     });
     ctx.store.update_session(&agent_kp, &session.id, &SessionUpdate { state: Some(SessionState::Running), rex: rex_ids, ..Default::default() })?;
     record_starting(ctx, &agent_kp, &session.id, &thread.title)?;
+    // This process becomes the harness (same pid), so it tells Rex now how to
+    // bring the session back; the harness itself never sees the token.
+    super::resume::come_back_as(&["session", "resume", &session.id], Some(&work_dir));
     // cwd for the exec'd harness.
     spec.env.push(("AXEL_CWD".into(), work_dir.to_string_lossy().into_owned()));
     Ok(Launched::Inline { spec, label, thread_id: thread.id, session_id: session.id })
@@ -647,6 +669,11 @@ pub fn exec_inline(spec: cfg_launch::LaunchSpec) -> Result<()> {
     unsafe { libc::tcflush(0, libc::TCIFLUSH) };
     let mut cmd = std::process::Command::new(&spec.program);
     cmd.args(&spec.args);
+    // Axel taking over its own pane (a session host) reports in turn, so it
+    // gets the token back; a harness never does.
+    if let Some(token) = super::resume::token_for_axel(&spec.program) {
+        cmd.env(axel_rex::resume::TOKEN_ENV, token);
+    }
     for (k, v) in &spec.env {
         cmd.env(k, v);
         if k == "AXEL_CWD" {

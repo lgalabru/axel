@@ -198,8 +198,15 @@ pub fn run_inline(screen: Option<ScreenArg>, thread: Option<String>) -> Result<(
     // Remote hosts still working for us (e.g. after a reboot) resume syncing.
     super::host::resume_followers(&ctx);
 
-    let initial = resolve_initial(&ctx, screen, thread)?;
-    if matches!(initial, Screen::Usage(_)) { super::usage::start_reconciliation(); }
+    let initial = resolve_initial(&ctx, screen, thread.clone())?;
+    if matches!(initial, Screen::Usage(_)) {
+        super::usage::start_reconciliation();
+        // A thread's tokens pane comes back with the rest of its window; the
+        // floating corner pane (`axel usage`, no thread) is summoned, not kept.
+        if let Some(t) = &thread {
+            super::resume::come_back_as(&["ui", "--screen", "usage", "--thread", t], std::env::current_dir().ok().as_deref());
+        }
+    }
 
     let cwd = std::env::current_dir().context(t!("reading the current directory"))?;
     let send = |session_id: &str, cmd: SendCommand| -> Result<SendReply> { send_to_session(&ctx, session_id, cmd) };
@@ -808,6 +815,8 @@ fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
 /// `axel thread stream`: the top pane.
 pub fn run_stream(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
+    // After a Rex restart this pane streams the thread again.
+    super::resume::come_back_as(&["thread", "stream", thread_id], std::env::current_dir().ok().as_deref());
     // Its runs of tool calls are `axel-links://` links: make sure something opens them.
     super::links::ensure_installed();
     if let Some(rex) = &ctx.rex {
@@ -879,6 +888,9 @@ pub(crate) fn label_renames_thread(label: &str, window_id: &str, title: &str) ->
 /// the stream above goes with it.
 pub fn run_compose(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
+    // After a Rex restart this pane is the thread's composer again; it finds
+    // its stream as the pane above, as it does without `$AXEL_STREAM_BLOCK`.
+    super::resume::come_back_as(&["thread", "compose", thread_id], std::env::current_dir().ok().as_deref());
     // Rex's palette reaches this thread through the composer's own connection.
     super::rex_link::spawn(thread_id.to_string());
     let cwd = std::env::current_dir().context(t!("reading the current directory"))?;
@@ -948,6 +960,9 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
         }
     };
     let res = axel_tui::run_compose(deps, thread_id, &fit, &ask, &toggle_log);
+    // Leaving the composer is the user ending the thread view: it doesn't
+    // come back.
+    super::resume::forget();
     if let Some(rex) = &ctx.rex {
         leave(rex, stream.as_deref());
     }

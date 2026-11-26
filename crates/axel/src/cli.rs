@@ -450,6 +450,9 @@ pub enum ThreadCommand {
 pub enum SessionCommand {
     /// Host a managed (ACP) session: runs in its own pane and prints the raw log.
     Host { session: String },
+    /// Bring an agent's session back in this pane, continuing its
+    /// conversation (what Rex runs after it restarts).
+    Resume { session: String },
     /// End a session (and close its pane).
     Stop { session: String },
     /// Move a running Claude session to a host, or back (`--to local`): it
