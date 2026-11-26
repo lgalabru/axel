@@ -1732,3 +1732,7 @@
   zh-Hans: "{label} 不是由本机的密钥关联的；请在关联它的那台机器上撤销"
 "{name} was removed":
   zh-Hans: "{name} 已被删除"
+"this machine":
+  zh-Hans: "本机"
+"instance {key} on {place}":
+  zh-Hans: "实例 {key}，位于 {place}"

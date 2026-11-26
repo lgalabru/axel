@@ -199,6 +199,8 @@ fn a_profile_first_run_on_a_device_gets_its_own_instance_there() {
     let here = w.store_here();
     let seen = here.agent_on_device("reviewer", &linux_key).unwrap().expect("reviewer@linux is known here");
     assert_eq!(seen.pubkey, linux_instance.pubkey);
+    let shown = w.ok_here(&["agent", "show", "reviewer"]);
+    assert!(shown.contains("on this machine") && shown.contains(&format!("instance {} on linux", linux_instance.pubkey)), "{shown}");
     let threads = here.list_threads(axel_store::ThreadFilter::default()).unwrap();
     assert!(threads.iter().any(|t| t.title == "review it"), "linux's thread is the owner's: {threads:?}");
 }

@@ -214,6 +214,18 @@ fn show(ctx: &Ctx, name: &str) -> Result<()> {
         let line = if ok { t!("owner attestation: valid (owner {owner})", owner = tag.owner) } else { t!("owner attestation: INVALID (owner {owner})", owner = tag.owner) };
         println!("{line}");
     }
+    print_instances(ctx, &a)
+}
+
+/// Where the agent's profile runs: one line per instance (RFD 0004).
+fn print_instances(ctx: &Ctx, a: &axel_store::Agent) -> Result<()> {
+    for instance in ctx.store.profile_instances(&a.profile_id)? {
+        let place = match &instance.device {
+            None => t!("this machine").to_string(),
+            Some(device) => ctx.store.device(device)?.map_or_else(|| device.clone(), |d| d.label),
+        };
+        println!("{}", t!("instance {key} on {place}", key = instance.pubkey, place = place));
+    }
     Ok(())
 }
 
