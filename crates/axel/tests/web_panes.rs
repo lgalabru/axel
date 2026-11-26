@@ -86,13 +86,15 @@ fn a_web_pane_serves_its_thread_to_ladybird_and_only_to_it() {
     let home = Home::new();
     home.browser(FAKE_BROWSER);
     let thread = home.thread();
-    let o = home.run(&["web", "pane", &thread], None);
+    let o = home.run(&["web", "pane", &thread, "--view", "composer"], None);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 
     let argv: Vec<String> = home.read("browser.argv").lines().map(String::from).collect();
-    assert_eq!(argv[..2], ["--headless=terminal", "--temporary-profile"], "drawn in this pane, with a profile of its own: {argv:?}");
-    assert!(argv[2].starts_with("http://127.0.0.1:") && argv[2].contains("/?k="), "{argv:?}");
-    assert!(home.read("page.html").contains("<title>Axel</title>"), "the page loaded");
+    assert_eq!(argv[..3], ["--headless=terminal", "--temporary-profile", "--device-pixel-ratio"], "drawn in this pane, with a profile of its own: {argv:?}");
+    assert_eq!(argv[3], "1", "no pixel size to read outside a terminal: CSS pixels as they are");
+    assert!(argv[4].starts_with("http://127.0.0.1:") && argv[4].contains("/?k="), "{argv:?}");
+    let page = home.read("page.html");
+    assert!(page.contains("<title>Axel</title>") && page.contains(r#"data-view="composer""#), "the composer's page loaded: {page}");
     let view: serde_json::Value = serde_json::from_str(&home.read("thread.json")).unwrap();
     assert_eq!(view["title"], "add retries");
     assert_eq!(view["id"], thread.as_str());
@@ -103,14 +105,17 @@ fn a_web_pane_serves_its_thread_to_ladybird_and_only_to_it() {
 fn a_pane_without_ladybird_or_where_it_cant_draw_falls_back_to_text() {
     let home = Home::new();
     let thread = home.thread();
-    let missing = home.run(&["web", "pane", &thread], None);
+    // The composer's fallback, the terminal composer, needs a terminal and
+    // says so at once; the conversation's would follow the thread for good.
+    let missing = home.run(&["web", "pane", &thread, "--view", "composer"], None);
     let said = String::from_utf8_lossy(&missing.stderr);
-    assert!(said.contains("Ladybird isn't installed; showing the thread as terminal text"), "{said}");
+    assert!(said.contains("Ladybird isn't installed; showing it as terminal text"), "{said}");
 
     home.browser(REFUSING_BROWSER);
-    let refused = home.run(&["web", "pane", &thread], None);
+    let refused = home.run(&["web", "pane", &thread, "--view", "composer"], None);
     let said = String::from_utf8_lossy(&refused.stderr);
-    assert!(said.contains("Ladybird couldn't draw here") && said.contains("showing the thread as terminal text"), "{said}");
+    assert!(said.contains("Ladybird couldn't draw here") && said.contains("showing it as terminal text"), "{said}");
+    assert!(!home.run(&["web", "pane", &thread, "--view", "sideways"], None).status.success(), "only the three views");
 }
 
 #[test]

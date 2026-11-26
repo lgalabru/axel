@@ -6,26 +6,39 @@
 <title>Axel</title>
 <link rel="stylesheet" href="/app.css">
 </head>
-<body>
-<header id="top">
-  <div class="title"><span class="mark" aria-hidden="true">a</span><h1 id="title">Loading…</h1></div>
-  <div id="agents" class="agents"></div>
-  <div id="spend" class="spend"></div>
-</header>
-<main id="timeline" aria-live="polite"></main>
-<button id="jump" class="jump" hidden>↓ New messages</button>
-<footer id="composer">
-  <div id="status" class="status"></div>
-  <form id="form" autocomplete="off">
-    <div id="suggest" class="suggest" hidden></div>
-    <textarea id="input" rows="1" placeholder="Message the thread · @name to ask an agent" spellcheck="true"></textarea>
-    <div class="actions">
-      <button type="button" id="stop" class="ghost" hidden title="Stop the running turn (Esc)">Stop</button>
-      <button type="submit" id="send" title="Send (Enter) · interrupt and send (⌘/Ctrl+Enter)">Send</button>
+<body data-view="{{view}}">
+
+<section id="messages" class="view messages">
+  <header class="bar">
+    <span class="mark" aria-hidden="true"></span>
+    <h1 id="title">Loading…</h1>
+    <span id="live" class="live"></span>
+  </header>
+  <main id="timeline" class="timeline" aria-live="polite"></main>
+  <button id="jump" class="jump" hidden>Jump to latest ↓</button>
+</section>
+
+<section id="composer" class="view composer">
+  <div class="field">
+    <div class="meta">
+      <span id="target" class="target"></span>
+      <span id="mode" class="mode"></span>
+      <span id="status" class="status"></span>
     </div>
-  </form>
-  <div class="hint">Enter sends · Shift+Enter new line · ⌘/Ctrl+Enter interrupts and sends · Esc stops</div>
-</footer>
+    <div id="suggest" class="suggest" hidden></div>
+    <textarea id="input" placeholder="Write to the thread · @name to ask an agent" spellcheck="true"></textarea>
+    <div class="controls">
+      <span class="keys"><kbd>Enter</kbd> send <kbd>Shift Enter</kbd> new line <kbd>Ctrl Enter</kbd> interrupt <kbd>Esc</kbd> stop</span>
+      <button type="button" id="stop" class="ghost" hidden>Stop</button>
+      <button type="button" id="send" class="primary">Send</button>
+    </div>
+  </div>
+</section>
+
+<section id="activity" class="view activity">
+  <div id="activity-body"></div>
+</section>
+
 <script src="/app.js"></script>
 </body>
 </html>

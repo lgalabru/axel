@@ -166,10 +166,18 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum WebCommand {
-    /// This pane shows the thread as a web page (what a web pane runs).
-    Pane { thread: String },
-    /// Serve the thread's page and print its address, for a desktop browser.
-    Serve { thread: String },
+    /// This pane shows one of a thread view's panes as a web page (what a web pane runs).
+    Pane {
+        thread: String,
+        #[arg(long, default_value = "messages", value_name = "messages|composer|activity")]
+        view: String,
+    },
+    /// Serve a thread view's page and print its address, for a desktop browser.
+    Serve {
+        thread: String,
+        #[arg(long, default_value = "messages", value_name = "messages|composer|activity")]
+        view: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

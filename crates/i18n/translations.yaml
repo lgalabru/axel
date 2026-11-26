@@ -1728,5 +1728,7 @@
   zh-Hans: "哪个问题？"
 "which session?":
   zh-Hans: "哪个会话？"
-"{why}; showing the thread as terminal text":
-  zh-Hans: "{why}；以终端文本显示该话题"
+"{why}; showing it as terminal text":
+  zh-Hans: "{why}；以终端文本显示"
+"a view is messages, composer or activity":
+  zh-Hans: "视图可以是 messages、composer 或 activity"

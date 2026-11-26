@@ -122,11 +122,88 @@ pub fn web_panes() -> bool {
     pane_choice() == PaneChoice::Web && ladybird().is_some()
 }
 
-/// What a thread's pane runs when it is a web pane.
-pub fn pane_command(thread_id: &str) -> Vec<String> {
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    vec![exe, "web".into(), "pane".into(), thread_id.to_string()]
+/// Which of a thread view's three panes a web pane is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebView {
+    /// The conversation.
+    Messages,
+    /// Where you write to the thread's agents.
+    Composer,
+    /// Who is working, what they did, and what it cost.
+    Activity,
 }
+
+impl WebView {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebView::Messages => "messages",
+            WebView::Composer => "composer",
+            WebView::Activity => "activity",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<WebView> {
+        [WebView::Messages, WebView::Composer, WebView::Activity].into_iter().find(|v| v.as_str() == text.trim())
+    }
+}
+
+/// The `--view` argument, refused when it names no pane.
+pub fn parse_view(text: &str) -> Result<WebView> {
+    WebView::parse(text).with_context(|| t!("a view is messages, composer or activity"))
+}
+
+/// What a thread's pane runs when it is a web pane.
+pub fn pane_command(thread_id: &str, view: WebView) -> Vec<String> {
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+    vec![exe, "web".into(), "pane".into(), thread_id.to_string(), "--view".into(), view.as_str().into()]
+}
+
+/// Device pixels per CSS pixel: a Retina display reports twice the pixels per
+/// cell, so without this the page is drawn at half size.  Read from the
+/// pane's size in cells and pixels; `$AXEL_WEB_SCALE` overrides it.
+fn device_pixel_ratio() -> f64 {
+    if let Some(scale) = std::env::var("AXEL_WEB_SCALE").ok().and_then(|v| v.parse::<f64>().ok()) {
+        return scale.clamp(DEVICE_PIXEL_RATIO_MIN, DEVICE_PIXEL_RATIO_MAX);
+    }
+    let mut size = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    // SAFETY: TIOCGWINSZ fills the struct we pass; a failed call leaves it zeroed.
+    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
+    if !ok || size.ws_row == 0 || size.ws_ypixel == 0 {
+        return DEVICE_PIXEL_RATIO_MIN;
+    }
+    ratio_for_cell_height(f64::from(size.ws_ypixel) / f64::from(size.ws_row))
+}
+
+/// The ratio a terminal cell `cell_height` device pixels tall implies.  A
+/// terminal's 13–14 point font makes cells about 17 CSS pixels tall, so the
+/// ratio is how many of those fit, to the nearest half.
+fn ratio_for_cell_height(cell_height: f64) -> f64 {
+    const CSS_CELL_HEIGHT: f64 = 17.0;
+    ((cell_height / CSS_CELL_HEIGHT * 2.0).round() / 2.0).clamp(DEVICE_PIXEL_RATIO_MIN, DEVICE_PIXEL_RATIO_MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_retina_pane_draws_at_twice_the_pixels() {
+        assert_eq!(ratio_for_cell_height(17.0), 1.0, "a 1x display, a 13-point font");
+        assert_eq!(ratio_for_cell_height(34.0), 2.0, "the same on Retina");
+        assert_eq!(ratio_for_cell_height(26.0), 1.5, "a 1.5x display");
+        assert_eq!(ratio_for_cell_height(3.0), DEVICE_PIXEL_RATIO_MIN, "a terminal reporting nonsense");
+        assert_eq!(ratio_for_cell_height(400.0), DEVICE_PIXEL_RATIO_MAX);
+        for view in [WebView::Messages, WebView::Composer, WebView::Activity] {
+            assert_eq!(WebView::parse(view.as_str()), Some(view));
+        }
+        assert_eq!(WebView::parse("sideways"), None);
+    }
+}
+
+/// No display draws fewer device pixels than CSS pixels, and none we know
+/// more than three.
+const DEVICE_PIXEL_RATIO_MIN: f64 = 1.0;
+const DEVICE_PIXEL_RATIO_MAX: f64 = 3.0;
 
 /// `axel panes [CHOICE]`: show or set how thread views are drawn.
 pub fn panes(choice: Option<&str>) -> Result<()> {
@@ -151,40 +228,81 @@ pub fn panes(choice: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `axel web pane THREAD`: this pane shows the thread as a web page.
-pub fn pane(thread_id: &str) -> Result<()> {
+/// `axel web pane THREAD --view VIEW`: this pane shows one of the thread
+/// view's three panes as a web page.
+pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
     let backend = ThreadBackend::open(thread_id)?;
     let Some(browser) = ladybird() else {
-        return fall_back(thread_id, t!("Ladybird isn't installed"));
+        return fall_back(thread_id, view, t!("Ladybird isn't installed"));
     };
-    // After a Rex restart this pane comes back as a web pane again.
-    super::resume::come_back_as(&["web", "pane", thread_id], std::env::current_dir().ok().as_deref());
-    let running = server::start(Arc::new(backend))?;
+    // After a Rex restart this pane comes back as the same web pane.
+    super::resume::come_back_as(&["web", "pane", thread_id, "--view", view.as_str()], std::env::current_dir().ok().as_deref());
+    // The composer closes the whole thread view, as the terminal one does.
+    let undock = (view == WebView::Composer).then(Undock::find).flatten();
+    if let Some(u) = &undock {
+        let u = u.clone();
+        super::ui::on_hangup(move || u.run());
+    }
+    let running = server::start(Arc::new(backend), view)?;
     let started = Instant::now();
     // Terminal mode draws in this pane.  A temporary profile keeps each pane
     // apart from the owner's Ladybird (cookies, history) and from each other.
+    let ratio = device_pixel_ratio().to_string();
     let status = std::process::Command::new(&browser)
-        .args(["--headless=terminal", "--temporary-profile", &running.url()])
+        .args(["--headless=terminal", "--temporary-profile", "--device-pixel-ratio", &ratio, &running.url()])
         .status()
         .with_context(|| t!("starting {program}", program = browser.display()))?;
     let gave_up = !status.success() && started.elapsed() < Duration::from_secs(FALLBACK_WINDOW_SECS) && running.served() == 0;
     if gave_up {
-        return fall_back(thread_id, &t!("Ladybird couldn't draw here ({status})", status = status));
+        return fall_back(thread_id, view, &t!("Ladybird couldn't draw here ({status})", status = status));
+    }
+    if let Some(u) = undock {
+        u.run();
     }
     Ok(())
 }
 
-/// The terminal view in this pane instead, saying why.
-fn fall_back(thread_id: &str, why: &str) -> Result<()> {
-    eprintln!("axel: {}", t!("{why}; showing the thread as terminal text", why = why));
-    super::ui::open_here_as_text(thread_id)
+/// What closing a web composer closes with it, found when it starts.
+///
+/// Rex's address for this pane is kept from then too: once the pane is
+/// closing, Rex no longer says which session its block belongs to.
+#[derive(Clone, Debug)]
+struct Undock {
+    rex: axel_rex::RexEnv,
+    stream: Option<String>,
+    usage: Option<String>,
+    origin: Option<String>,
 }
 
-/// `axel web serve THREAD`: the pane's server alone, with its address on
+impl Undock {
+    fn find() -> Option<Undock> {
+        let env = axel_rex::detect()?;
+        let (stream, usage) = super::ui::composer_neighbours(&axel_rex::Rex::new(env.clone()));
+        let origin = std::env::var(super::ui::ORIGIN_BLOCK_ENV).ok().filter(|o| !o.is_empty());
+        Some(Undock { rex: env, stream, usage, origin })
+    }
+
+    fn run(&self) {
+        let rex = axel_rex::Rex::new(self.rex.clone());
+        super::ui::undock(&rex, self.stream.as_deref(), self.usage.as_deref(), self.origin.as_deref());
+    }
+}
+
+/// This pane's terminal counterpart instead, saying why.
+fn fall_back(thread_id: &str, view: WebView, why: &str) -> Result<()> {
+    eprintln!("axel: {}", t!("{why}; showing it as terminal text", why = why));
+    match view {
+        WebView::Messages => super::ui::run_stream(thread_id),
+        WebView::Composer => super::ui::run_compose(thread_id),
+        WebView::Activity => super::ui::run_inline(Some(crate::cli::ScreenArg::Usage), Some(thread_id.to_string())),
+    }
+}
+
+/// `axel web serve THREAD --view VIEW`: the pane's server alone, with its address on
 /// stdout, until interrupted.  For a desktop browser, and for tests.
-pub fn serve(thread_id: &str) -> Result<()> {
+pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
     let backend = ThreadBackend::open(thread_id)?;
-    let running = server::start(Arc::new(backend))?;
+    let running = server::start(Arc::new(backend), view)?;
     println!("{}", running.url());
     // Flushing makes the address readable by whoever started us; if stdout
     // is gone there is no one to read it either.
@@ -262,7 +380,8 @@ impl server::Backend for ThreadBackend {
     fn load(&self) -> Result<Value> {
         let store = self.reader.lock().map_err(|_| anyhow::anyhow!("the reader was poisoned"))?;
         let data = axel_tui::load_thread_data(&store, &self.owner_pk, &self.thread_id)?;
-        Ok(view::thread(&data))
+        let usage = axel_tui::load_usage_data(&store, &self.thread_id)?;
+        Ok(view::thread(&data, &usage))
     }
 
     fn marker(&self) -> Option<(i64, i64)> {

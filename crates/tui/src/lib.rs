@@ -52,6 +52,12 @@ pub fn load_thread_data(store: &axel_store::Store, owner_pk: &str, thread_id: &s
     glue::load_thread(store, owner_pk, thread_id, util::now_secs())
 }
 
+/// What the tokens pane shows for one thread: spend per agent, its last
+/// hour minute by minute, context windows and plan limits.
+pub fn load_usage_data(store: &axel_store::Store, thread_id: &str) -> anyhow::Result<model::UsageData> {
+    glue::load_usage(store, util::now_secs(), Some(thread_id))
+}
+
 /// Which screen the UI opens on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {

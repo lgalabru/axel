@@ -30,7 +30,7 @@ const DASHBOARD_BOUNDS: [f64; 4] = [0.10, 0.08, 0.80, 0.84];
 const DOCK_KEEP: f64 = 0.4;
 const DOCK_STREAM: f64 = 0.85;
 /// The pane the launcher was opened from, handed to the floating panes.
-const ORIGIN_BLOCK_ENV: &str = "AXEL_ORIGIN_BLOCK";
+pub(super) const ORIGIN_BLOCK_ENV: &str = "AXEL_ORIGIN_BLOCK";
 /// Programs that sit at a prompt when nothing runs in them.
 const SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh"];
 /// The composer pane's label; a split with it below is a docked thread.
@@ -397,10 +397,7 @@ fn open_thread_here(ctx: &Ctx, thread_id: &str) -> Result<()> {
         }
         label_block_with_thread(ctx, rex, &block, thread_id);
         name_window_after_thread(ctx, rex, thread_id);
-        if super::web::web_panes() {
-            return super::web::pane(thread_id);
-        }
-        return split_here(ctx, rex, thread_id);
+        return split_here(ctx, rex, thread_id, PaneKind::chosen());
     }
     let exe = std::env::current_exe()?;
     let spec = axel_config::launch::LaunchSpec {
@@ -520,19 +517,10 @@ pub fn open_split(thread_id: &str) -> Result<()> {
     open_split_tab(&ctx, thread_id)
 }
 
-/// `axel thread open` inside Rex: this pane becomes the thread's web pane
-/// (RFD 0007), or the stream with the composer below; outside Rex, the full
-/// in-TUI view.
+/// `axel thread open` inside Rex: this pane becomes the conversation, with
+/// the composer and the activity pane split in below (web panes when they
+/// are on, RFD 0007); outside Rex, the full in-TUI view.
 pub fn open_here(thread_id: &str) -> Result<()> {
-    if super::web::web_panes() {
-        return super::web::pane(thread_id);
-    }
-    open_here_as_text(thread_id)
-}
-
-/// [`open_here`] as terminal text, whatever the pane choice: what a web
-/// pane falls back to.
-pub fn open_here_as_text(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
     let Some(rex) = ctx.rex.as_ref() else {
         drop(ctx);
@@ -540,23 +528,78 @@ pub fn open_here_as_text(thread_id: &str) -> Result<()> {
     };
     let block = rex.env().block.clone();
     label_block_with_thread(&ctx, rex, &block, thread_id);
-    split_here(&ctx, rex, thread_id)
+    split_here(&ctx, rex, thread_id, PaneKind::chosen())
+}
+
+/// How a thread view's three panes are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneKind {
+    Text,
+    Web,
+}
+
+impl PaneKind {
+    /// What the owner chose, where it can be drawn (`axel panes`).
+    fn chosen() -> PaneKind {
+        if super::web::web_panes() { PaneKind::Web } else { PaneKind::Text }
+    }
+
+    /// The commands of a thread view's three panes: the conversation, the
+    /// composer and the activity (tokens) pane.
+    fn commands(self, thread_id: &str) -> ThreadPaneCommands {
+        match self {
+            PaneKind::Web => ThreadPaneCommands {
+                stream: super::web::pane_command(thread_id, super::web::WebView::Messages),
+                compose: super::web::pane_command(thread_id, super::web::WebView::Composer),
+                usage: super::web::pane_command(thread_id, super::web::WebView::Activity),
+            },
+            PaneKind::Text => {
+                let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+                ThreadPaneCommands {
+                    stream: vec![exe.clone(), "thread".into(), "stream".into(), thread_id.to_string()],
+                    compose: vec![exe, "thread".into(), "compose".into(), thread_id.to_string()],
+                    usage: usage_command(thread_id),
+                }
+            }
+        }
+    }
+
+    /// How many rows the composer gets: a web composer draws a taller field
+    /// and Ladybird keeps the pane's last row for its status line.
+    fn composer_rows(self) -> u16 {
+        match self {
+            PaneKind::Text => PANE_MIN_ROWS,
+            PaneKind::Web => WEB_COMPOSER_ROWS,
+        }
+    }
+}
+
+/// Rows a web composer pane starts with: its field, its controls, and
+/// Ladybird's status line.
+const WEB_COMPOSER_ROWS: u16 = 12;
+
+struct ThreadPaneCommands {
+    stream: Vec<String>,
+    compose: Vec<String>,
+    usage: Vec<String>,
 }
 
 /// Split this pane: the composer below (told which block streams), then
 /// stream the conversation here until the composer closes this pane.
-fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
+fn split_here(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str, kind: PaneKind) -> Result<()> {
     let me = rex.env().block.clone();
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread_id.to_string()];
+    let panes = kind.commands(thread_id);
     let mut env = passthrough_env();
     env.push(("AXEL_STREAM_BLOCK".into(), me.clone()));
-    let usage = usage_command(thread_id);
     let size = rex.terminal_size(&me).ok();
     let width = size.as_ref().map(|s| s.columns);
-    let ids = rex.split_below_beside(&me, COMPOSE_LABEL, &compose, usage_beside(&usage, width).as_ref(), DOCK_STREAM, None, &env, true)?;
+    let ids = rex.split_below_beside(&me, COMPOSE_LABEL, &panes.compose, usage_beside(&panes.usage, width).as_ref(), DOCK_STREAM, None, &env, true)?;
     if let Some(compose) = ids.first() {
-        settle_thread_row(rex, &me, compose, ids.get(1).map(String::as_str), size.map(|s| s.rows), width);
+        settle_thread_row(rex, &me, compose, ids.get(1).map(String::as_str), size.map(|s| s.rows), width, kind.composer_rows());
+    }
+    if kind == PaneKind::Web {
+        // This pane is the conversation, as a web page.
+        return super::web::pane(thread_id, super::web::WebView::Messages);
     }
     stream_with_input(ctx, thread_id)
 }
@@ -624,18 +667,13 @@ fn composer_below(view: &serde_json::Value, stream: &str) -> Option<String> {
 /// shell is busy (or unknown), the thread docks as a column on the right.
 /// Then Axel's floating panes close, this one last (which ends this process).
 pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
-    if super::web::web_panes() {
-        return dock_web_thread(ctx, rex, thread_id);
-    }
     let me = rex.env().block.clone();
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
-    let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
+    let kind = PaneKind::chosen();
+    let ThreadPaneCommands { stream, compose, usage } = kind.commands(&thread.id);
     let title = axel_tui::util::ellipsize(&thread.title, 48);
     let cwd = std::env::current_dir().ok();
     let mut env = passthrough_env();
-    let usage = usage_command(&thread.id);
     let ids = if let Some(origin) = reusable_origin(rex, &me) {
         env.push((ORIGIN_BLOCK_ENV.into(), origin.clone()));
         // The shell leaves once the thread is in: the column takes its width.
@@ -643,12 +681,12 @@ pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Re
         let width = size.as_ref().map(|s| s.columns);
         let ids = rex.split_right_stacked(&origin, (&title, &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), 0.5, DOCK_STREAM, cwd.as_deref(), &env, true)?;
         let _ = rex.api_call("session.detach_block", serde_json::json!({ "block_id": origin }));
-        settle_thread_row(rex, &ids[0], &ids[1], ids.get(2).map(String::as_str), size.map(|s| s.rows), width);
+        settle_thread_row(rex, &ids[0], &ids[1], ids.get(2).map(String::as_str), size.map(|s| s.rows), width, kind.composer_rows());
         ids
     } else if let Some(anchor) = rex.view().ok().and_then(|v| tiled_root(&v, &me)) {
         let width = window_columns(rex, &me).map(|w| (f64::from(w) * (1.0 - DOCK_KEEP)) as u16);
         let ids = rex.split_right_stacked(&anchor, (&title, &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), DOCK_KEEP, DOCK_STREAM, cwd.as_deref(), &env, true)?;
-        settle_thread_row(rex, &ids[0], &ids[1], ids.get(2).map(String::as_str), None, width);
+        settle_thread_row(rex, &ids[0], &ids[1], ids.get(2).map(String::as_str), None, width, kind.composer_rows());
         ids
     } else {
         // A window with nothing tiled in it: open the thread in its own tab.
@@ -657,32 +695,6 @@ pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Re
         return Ok(());
     };
     let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": ids[1] }));
-    name_window_after_thread(ctx, rex, thread_id);
-    close_axel_layers(ctx, rex);
-    Ok(())
-}
-
-/// [`dock_thread`] as one web pane (RFD 0007): a column on the right of the
-/// shell `axel` was typed in, or of the window's tiles, holding the whole
-/// thread (conversation and composer).  The shell stays where it is.
-fn dock_web_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
-    let me = rex.env().block.clone();
-    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
-    let title = axel_tui::util::ellipsize(&thread.title, 48);
-    let command = super::web::pane_command(&thread.id);
-    let cwd = std::env::current_dir().ok();
-    let anchor = std::env::var(ORIGIN_BLOCK_ENV)
-        .ok()
-        .filter(|o| !o.is_empty() && *o != me)
-        .or_else(|| rex.view().ok().and_then(|v| tiled_root(&v, &me)));
-    let Some(anchor) = anchor else {
-        // A window with nothing tiled in it: open the thread in its own tab.
-        open_split_tab(ctx, thread_id)?;
-        close_axel_layers(ctx, rex);
-        return Ok(());
-    };
-    let block = rex.split_right(&anchor, &title, &command, DOCK_KEEP, cwd.as_deref(), &passthrough_env(), true)?;
-    let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": block }));
     name_window_after_thread(ctx, rex, thread_id);
     close_axel_layers(ctx, rex);
     Ok(())
@@ -838,21 +850,13 @@ fn find_split(node: &serde_json::Value, want: &dyn Fn(&str, &str) -> bool) -> Op
 fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let rex = ctx.rex.as_ref().context(t!("not inside Rex"))?;
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
-    if super::web::web_panes() {
-        // One web pane holds the whole thread.
-        let label = axel_tui::util::ellipsize(&thread.title, 40);
-        rex.new_window(&label, &super::web::pane_command(&thread.id), None, &passthrough_env(), true)?;
-        return Ok(());
-    }
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
-    let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];
+    let kind = PaneKind::chosen();
+    let ThreadPaneCommands { stream, compose, usage } = kind.commands(&thread.id);
     let label = axel_tui::util::ellipsize(&thread.title, 40);
-    let usage = usage_command(&thread.id);
     let width = window_columns(rex, &rex.env().block);
     let w = rex.new_window_stacked(&label, ("thread", &stream), (COMPOSE_LABEL, &compose), usage_beside(&usage, width).as_ref(), 0.8, None, &passthrough_env(), true)?;
     if let [stream, compose, rest @ ..] = &w.block_ids[..] {
-        settle_thread_row(rex, stream, compose, rest.first().map(String::as_str), None, width);
+        settle_thread_row(rex, stream, compose, rest.first().map(String::as_str), None, width, kind.composer_rows());
     }
     if let Some(b) = w.block_ids.get(1) {
         let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": b }));
@@ -952,9 +956,7 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
     };
     let open_terminal = |thread_id: &str| open_thread_terminal(&ctx, thread_id);
     let deps = Deps { store: &ctx.store, keystore: &ctx.keystore, cwd, harnesses: harnesses(), send: &send, summon: &summon, runtime_label: &runtime_label, open_thread: None, focus_peer: None, fit_prompt: None, manage_thread: None, open_controls: Some(&open_controls), open_terminal: Some(&open_terminal) };
-    let stream = ctx.rex.as_ref().and_then(stream_block);
-    // The tokens pane opened beside us, in the same row, if there is one.
-    let usage = ctx.rex.as_ref().and_then(|rex| rex.view().ok().and_then(|v| block_beside(&v, &rex.env().block, TOKENS_LABEL)));
+    let (stream, usage) = ctx.rex.as_ref().map(composer_neighbours).unwrap_or_default();
     if let (Some(rex), Some(stream), Some(usage)) = (&ctx.rex, &stream, &usage) {
         fit_usage_pane(rex, usage, stream);
     }
@@ -967,21 +969,8 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
             }
         }
     };
-    // A docked thread stands in for a shell: leaving brings that shell back.
     let origin = std::env::var(ORIGIN_BLOCK_ENV).ok().filter(|o| !o.is_empty());
-    let leave = move |rex: &axel_rex::Rex, stream: Option<&str>| {
-        if let Some(usage) = &usage {
-            let _ = rex.api_call("block.close", serde_json::json!({ "block_id": usage }));
-        }
-        if let Some(origin) = &origin {
-            restore_origin(rex, origin, stream);
-        }
-        // The stream above goes too; this pane closes as its program exits.
-        // Only those two blocks: the window may hold the user's other panes.
-        if let Some(stream) = stream {
-            let _ = rex.api_call("block.close", serde_json::json!({ "block_id": stream }));
-        }
-    };
+    let leave = move |rex: &axel_rex::Rex, stream: Option<&str>| undock(rex, stream, usage.as_deref(), origin.as_deref());
     // Closing the pane (its × in Rex) hangs us up, about a second before we're
     // killed: leave right away, from a thread of our own.
     if ctx.rex.is_some() {
@@ -1015,6 +1004,31 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
         leave(rex, stream.as_deref());
     }
     res
+}
+
+/// The panes a composer (text or web) belongs with: the conversation above
+/// it and the tokens pane beside it, when they are there.
+pub(super) fn composer_neighbours(rex: &axel_rex::Rex) -> (Option<String>, Option<String>) {
+    let stream = stream_block(rex);
+    let usage = rex.view().ok().and_then(|v| block_beside(&v, &rex.env().block, TOKENS_LABEL));
+    (stream, usage)
+}
+
+/// Close a thread view from its composer: the tokens pane, then the
+/// conversation, bringing back the shell the thread stood in for.  Only
+/// those blocks: the window may hold the user's other panes.  The composer
+/// pane itself closes as its program exits.
+pub(super) fn undock(rex: &axel_rex::Rex, stream: Option<&str>, usage: Option<&str>, origin: Option<&str>) {
+    // Each close is best effort: a block the user already closed is gone either way.
+    if let Some(usage) = usage {
+        let _ = rex.api_call("block.close", serde_json::json!({ "block_id": usage }));
+    }
+    if let Some(origin) = origin {
+        restore_origin(rex, origin, stream);
+    }
+    if let Some(stream) = stream {
+        let _ = rex.api_call("block.close", serde_json::json!({ "block_id": stream }));
+    }
 }
 
 /// What the tokens pane beside `thread_id`'s composer runs: that thread's spend.
@@ -1270,7 +1284,7 @@ pub fn run_answer(thread_id: &str, item_id: &str) -> Result<()> {
 /// Run `f` and exit when this process is hung up (SIGHUP).  The handler only
 /// writes a byte to a pipe, whichever thread the signal lands on; a thread of
 /// our own reads it and does the work.
-fn on_hangup(f: impl FnOnce() + Send + 'static) {
+pub(super) fn on_hangup(f: impl FnOnce() + Send + 'static) {
     static WAKE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
     extern "C" fn wake(_: libc::c_int) {
         let fd = WAKE.load(std::sync::atomic::Ordering::Relaxed);
@@ -1373,15 +1387,15 @@ const PANE_MIN_ROWS: u16 = 5;
 /// already know (the pane it replaces: `rows` tall, `width` wide), instead
 /// of the half-and-half Rex's app first lays a new split out at.  The
 /// composer then only fine-tunes.
-fn settle_thread_row(rex: &axel_rex::Rex, stream: &str, compose: &str, usage: Option<&str>, rows: Option<u16>, width: Option<u16>) {
+fn settle_thread_row(rex: &axel_rex::Rex, stream: &str, compose: &str, usage: Option<&str>, rows: Option<u16>, width: Option<u16>, composer_rows: u16) {
     if let (Some(usage), Some(keep)) = (usage, width.and_then(usage_keep)) {
         let _ = rex.api_call(
             "session.resize_pane",
             serde_json::json!({ "direction": "horizontal", "before_block_id": compose, "after_block_id": usage, "ratio": keep }),
         );
     }
-    if let Some(rows) = rows.filter(|r| *r > PANE_MIN_ROWS * 2) {
-        let ratio = ((f64::from(rows) - f64::from(PANE_MIN_ROWS) - 0.25) / f64::from(rows)).clamp(0.5, 0.95);
+    if let Some(rows) = rows.filter(|r| *r > composer_rows * 2) {
+        let ratio = ((f64::from(rows) - f64::from(composer_rows) - 0.25) / f64::from(rows)).clamp(0.5, 0.95);
         let _ = rex.api_call(
             "session.resize_pane",
             serde_json::json!({ "direction": "vertical", "before_block_id": stream, "after_block_id": compose, "ratio": ratio }),

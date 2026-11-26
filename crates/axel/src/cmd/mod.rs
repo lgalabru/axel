@@ -135,8 +135,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Some(Command::Panes { choice }) => web::panes(choice.as_deref()),
         Some(Command::Web { command }) => match command {
-            crate::cli::WebCommand::Pane { thread } => web::pane(&thread),
-            crate::cli::WebCommand::Serve { thread } => web::serve(&thread),
+            crate::cli::WebCommand::Pane { thread, view } => web::pane(&thread, web::parse_view(&view)?),
+            crate::cli::WebCommand::Serve { thread, view } => web::serve(&thread, web::parse_view(&view)?),
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
     }
