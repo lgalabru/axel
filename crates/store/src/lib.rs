@@ -25,6 +25,7 @@ mod items;
 mod local;
 mod native_usage;
 mod log;
+mod devices;
 mod owner;
 mod policy;
 mod team;

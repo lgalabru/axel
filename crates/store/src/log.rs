@@ -144,6 +144,10 @@ impl Store {
             "UPDATE events SET applied_at = NULL, rejected_reason = NULL",
             [],
         )?;
+        // Device links are only ever kind-120 envelopes: they replay from
+        // scratch too.  Profiles and teams also hold unsigned local edits, so
+        // they are revalidated below instead.
+        tx.execute("DELETE FROM devices", [])?;
 
         let plain: Vec<Envelope> = {
             let mut st = tx.prepare(&format!(
@@ -162,14 +166,19 @@ impl Store {
                 // Settled here without the thread replay `owner::project`
                 // would do: every thread is replayed below anyway.
                 match crate::owner::apply_only(&tx, env)? {
-                    Ok(()) => mark_applied(&tx, &env.id)?,
+                    Ok(()) => {
+                        mark_applied(&tx, &env.id)?;
+                        // As `owner::project` does, so a rebuild settles
+                        // every record the way arriving one by one did.
+                        crate::owner::revive(&tx)?;
+                    }
                     Err(reason) => mark_rejected(&tx, &env.id, &reason)?,
                 }
             } else {
                 project_plain(&tx, env)?;
             }
         }
-        crate::owner::revive(&tx)?;
+        crate::owner::revalidate(&tx)?;
 
         let threads: Vec<String> = {
             let mut st =

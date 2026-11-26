@@ -279,7 +279,10 @@ impl Store {
         let created_at = now();
         let tx = self.conn.unchecked_transaction()?;
         let profile_id = match &a.profile_id {
-            Some(id) if profile_exists(&tx, id)? => id.clone(),
+            Some(id) if profile_exists(&tx, id)? => {
+                self.check_same_owner(&tx, id, a.auth_tag.as_ref())?;
+                id.clone()
+            }
             given => {
                 let id = given.clone().unwrap_or_else(|| format!("p-{}", new_id()));
                 let owner = attester(a.auth_tag.as_ref()).map(|o| self.principal_in(&tx, &o)).transpose()?;
@@ -297,6 +300,22 @@ impl Store {
         let agent = self.agent_by_pubkey(&a.pubkey)?.ok_or_else(|| Error::NotFound(format!("agent {}", a.pubkey)))?;
         debug_assert_eq!(agent.profile_id, profile_id);
         Ok(agent)
+    }
+
+    /// Refuse an instance whose attester doesn't speak for the owner of the
+    /// profile it would join: an agent of one owner never becomes an instance
+    /// of another's.
+    fn check_same_owner(&self, conn: &rusqlite::Connection, profile_id: &str, auth_tag: Option<&Vec<String>>) -> Result<(), Error> {
+        let owner: Option<String> = conn.query_row("SELECT owner FROM agent_profiles WHERE profile_id = ?1", [profile_id], |r| r.get(0))?;
+        let attester = attester(auth_tag);
+        let same = match (owner, attester) {
+            (Some(owner), Some(attester)) => self.principal_in(conn, &owner)? == self.principal_in(conn, &attester)?,
+            _ => false,
+        };
+        if !same {
+            return Err(Error::Conflict(format!("profile {profile_id} belongs to another owner")));
+        }
+        Ok(())
     }
 
     fn principal_in(&self, conn: &rusqlite::Connection, key: &str) -> Result<String, Error> {

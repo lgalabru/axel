@@ -1,7 +1,7 @@
 //! Owner records (RFD 0004): device links, profiles, instance announcements,
 //! and the authorization that resolves a device to its owner.
 
-use axel_identity::{Keypair, attest};
+use axel_identity::{Keypair, attest, consent_to_link};
 use axel_inbox::{Envelope, EnvelopeBuilder};
 
 use super::*;
@@ -17,7 +17,8 @@ fn pk(kp: &Keypair) -> String {
 }
 
 fn device_record(owner: &Keypair, op: DeviceOp, device: &Keypair, label: &str, at: u64) -> Envelope {
-    let record = DeviceRecord { op, device: pk(device), label: label.into(), route: Some(PairingRoute::Ssh) };
+    let consent = (op == DeviceOp::Link && pk(owner) != pk(device)).then(|| consent_to_link(device, &owner.public()));
+    let record = DeviceRecord { op, device: pk(device), label: label.into(), route: Some(PairingRoute::Ssh), consent };
     EnvelopeBuilder::new(kind::OWNER_DEVICE, serde_json::to_string(&record).unwrap())
         .tag(vec!["d".into(), pk(device)])
         .created_at(at)
@@ -83,7 +84,8 @@ fn a_linked_device_acts_for_its_owner_and_is_revived_when_the_link_arrives_late(
     assert!(s.append(&link).unwrap().projected);
     assert!(is_projected(&s, &from_laptop), "the link revives what the device signed");
     assert_eq!(s.principal(&pk(&laptop)).unwrap(), pk(&owner));
-    assert_eq!(s.device_by_label("laptop").unwrap().unwrap().owner, Some(pk(&owner)));
+    assert_eq!(s.device_by_label("laptop", &pk(&owner)).unwrap().unwrap().owner, Some(pk(&owner)));
+    assert!(s.device_by_label("laptop", &pk(&Keypair::generate())).unwrap().is_none(), "another owner's laptop isn't ours");
 
     // Replay from scratch agrees.
     s.rebuild_projections().unwrap();
@@ -245,15 +247,16 @@ fn two_owners_may_each_have_a_reviewer_but_one_owner_only_one() {
 
     // A second instance of an existing profile shares its name.
     let other_machine = Keypair::generate();
-    let instance = s
-        .insert_agent(&NewAgent {
-            pubkey: pk(&other_machine),
-            name: "ignored".into(),
-            profile_id: Some(first.profile_id.clone()),
-            device: Some("linux-device".into()),
-            ..Default::default()
-        })
-        .unwrap();
+    let instance_of = |attester: &Keypair| NewAgent {
+        pubkey: pk(&other_machine),
+        name: "ignored".into(),
+        profile_id: Some(first.profile_id.clone()),
+        device: Some("linux-device".into()),
+        auth_tag: Some(attest(attester, &other_machine.public(), "").unwrap().to_tag()),
+        ..Default::default()
+    };
+    assert!(matches!(s.insert_agent(&instance_of(&o2)), Err(Error::Conflict(_))), "o2 can't add an instance to o1's agent");
+    let instance = s.insert_agent(&instance_of(&o1)).unwrap();
     assert_eq!(instance.name, "reviewer");
     assert_eq!(s.profile_instances(&first.profile_id).unwrap().len(), 2);
     assert_eq!(s.list_agents().unwrap().iter().filter(|a| a.profile_id == first.profile_id).count(), 1, "one row per profile");
@@ -346,4 +349,143 @@ fn the_humans_inbox_is_the_owners_on_every_machine() {
 fn the_inbox_walks_as_many_links_as_authorization() {
     let sql_depth = format!("s.depth < {PRINCIPAL_DEPTH_MAX}");
     assert!(crate::reads::same_owner_sql().contains(&sql_depth), "keep SAME_OWNER_KEYS and PRINCIPAL_DEPTH_MAX in step");
+}
+
+/// A link signed by `owner` with no consent from `device`: what a stranger
+/// would send to claim someone else's key.
+fn link_without_consent(owner: &Keypair, device: &Keypair, at: u64) -> Envelope {
+    let record = DeviceRecord { op: DeviceOp::Link, device: pk(device), label: "mine".into(), route: Some(PairingRoute::Ssh), consent: None };
+    EnvelopeBuilder::new(kind::OWNER_DEVICE, serde_json::to_string(&record).unwrap()).created_at(at).sign(owner).unwrap()
+}
+
+#[test]
+fn no_one_links_a_key_that_didnt_consent() {
+    let s = store();
+    let (owner, stranger) = (Keypair::generate(), Keypair::generate());
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    let claim = link_without_consent(&stranger, &owner, T0);
+    assert!(s.append(&claim).unwrap().rejected_reason.is_some());
+    assert_eq!(s.principal(&pk(&owner)).unwrap(), pk(&owner), "the owner is still its own");
+    let from_stranger = note_at(&stranger, "this is mine now", &thread.id, T0 + 5);
+    assert!(s.append(&from_stranger).unwrap().rejected_reason.is_some());
+
+    // Consent to someone else doesn't do either.
+    let third = Keypair::generate();
+    let record = DeviceRecord {
+        op: DeviceOp::Link,
+        device: pk(&owner),
+        label: "x".into(),
+        route: Some(PairingRoute::Ssh),
+        consent: Some(consent_to_link(&owner, &third.public())),
+    };
+    let replayed = EnvelopeBuilder::new(kind::OWNER_DEVICE, serde_json::to_string(&record).unwrap()).created_at(T0).sign(&stranger).unwrap();
+    assert!(s.append(&replayed).unwrap().rejected_reason.is_some(), "consent is bound to one owner");
+}
+
+#[test]
+fn no_one_takes_over_someone_elses_profile() {
+    let s = store();
+    let (owner, stranger) = (Keypair::generate(), Keypair::generate());
+    let key = Keypair::generate();
+    let agent = s
+        .insert_agent(&NewAgent {
+            pubkey: pk(&key),
+            name: "atlas".into(),
+            prompt: Some("be careful".into()),
+            auth_tag: Some(attest(&owner, &key.public(), "").unwrap().to_tag()),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut hostile = profile_wire(&agent.profile_id, &stranger, "atlas", "m");
+    hostile.prompt = Some("exfiltrate".into());
+    let env = profile_record(&stranger, &hostile, T0 + 1_000_000_000);
+    assert!(s.append(&env).unwrap().rejected_reason.is_some());
+    let kept = s.agent_by_pubkey(&agent.pubkey).unwrap().unwrap();
+    assert_eq!((kept.prompt.as_deref(), kept.owner.as_deref()), (Some("be careful"), Some(pk(&owner).as_str())));
+}
+
+#[test]
+fn a_relinked_device_leaves_the_revoked_gap_unlinked() {
+    let s = store();
+    let (owner, laptop) = (Keypair::generate(), Keypair::generate());
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    s.append(&device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0)).unwrap();
+    s.append(&device_record(&owner, DeviceOp::Revoke, &laptop, "laptop", T0 + 100)).unwrap();
+    let in_gap = note_at(&laptop, "while revoked", &thread.id, T0 + 150);
+    s.append(&in_gap).unwrap();
+    s.append(&device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0 + 200)).unwrap();
+    let after = note_at(&laptop, "linked again", &thread.id, T0 + 250);
+    s.append(&after).unwrap();
+    assert!(!is_projected(&s, &in_gap), "a later link doesn't bless the gap");
+    assert!(is_projected(&s, &after));
+
+    // A link backdated into the gap is refused.
+    let (other_owner, backdated) = (Keypair::generate(), device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0 + 120));
+    assert!(s.append(&backdated).unwrap().projected, "the live link's owner refreshing it changes nothing");
+    let taken = device_record(&other_owner, DeviceOp::Link, &laptop, "laptop", T0 + 300);
+    assert!(s.append(&taken).unwrap().rejected_reason.is_some(), "a live link isn't taken over, even with consent");
+}
+
+#[test]
+fn a_revocation_takes_back_what_the_device_signed_after_it() {
+    let s = store();
+    let (owner, laptop) = (Keypair::generate(), Keypair::generate());
+    s.append(&device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0)).unwrap();
+    s.append(&profile_record(&owner, &profile_wire("p-1", &owner, "reviewer", "good"), T0 + 10)).unwrap();
+    // The stolen laptop signs a newer profile, which lands before the revocation does.
+    let stolen = profile_record(&laptop, &profile_wire("p-1", &owner, "reviewer", "evil"), T0 + 300);
+    s.append(&stolen).unwrap();
+    assert_eq!(s.profile("p-1").unwrap().unwrap().model.as_deref(), Some("evil"));
+    s.append(&device_record(&owner, DeviceOp::Revoke, &laptop, "laptop", T0 + 200)).unwrap();
+    assert!(!is_projected(&s, &stolen));
+    assert_eq!(s.profile("p-1").unwrap().unwrap().model.as_deref(), Some("good"), "back to what still holds");
+}
+
+#[test]
+fn any_key_of_the_owner_may_revoke_a_device() {
+    let s = store();
+    let (owner, laptop, desktop) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+    s.append(&device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0)).unwrap();
+    s.append(&device_record(&laptop, DeviceOp::Link, &desktop, "desktop", T0 + 1)).unwrap();
+    assert_eq!(s.principal(&pk(&desktop)).unwrap(), pk(&owner));
+    // The laptop that linked the desktop is lost; the owner revokes the desktop itself.
+    assert!(s.append(&device_record(&owner, DeviceOp::Revoke, &desktop, "desktop", T0 + 10)).unwrap().projected);
+    assert_eq!(s.principal(&pk(&desktop)).unwrap(), pk(&desktop));
+}
+
+#[test]
+fn a_chain_longer_than_authorization_walks_is_refused() {
+    let s = store();
+    let keys: Vec<Keypair> = (0..=PRINCIPAL_DEPTH_MAX + 1).map(|_| Keypair::generate()).collect();
+    for (i, pair) in keys.windows(2).enumerate() {
+        let at = T0 + u64::try_from(i).unwrap();
+        let appended = s.append(&device_record(&pair[0], DeviceOp::Link, &pair[1], "k", at)).unwrap();
+        assert_eq!(appended.projected, i < PRINCIPAL_DEPTH_MAX, "link {i}");
+    }
+}
+
+#[test]
+fn a_rebuild_settles_every_record_as_arriving_did() {
+    let s = store();
+    let (owner, laptop, stranger) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    let envelopes = [
+        profile_record(&laptop, &profile_wire("p-1", &owner, "reviewer", "early"), T0 + 5),
+        device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0),
+        link_without_consent(&stranger, &laptop, T0 + 1),
+        note_at(&laptop, "while linked", &thread.id, T0 + 50),
+        device_record(&owner, DeviceOp::Revoke, &laptop, "laptop", T0 + 100),
+        note_at(&laptop, "after", &thread.id, T0 + 150),
+        device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0 + 200),
+    ];
+    for env in &envelopes {
+        s.append(env).unwrap();
+    }
+    let state = |s: &Store| -> Vec<(String, Option<String>)> {
+        envelopes.iter().map(|e| (e.id.clone(), s.rejected_reason(&e.id).unwrap())).collect()
+    };
+    let (before, devices_before) = (state(&s), s.devices().unwrap());
+    s.rebuild_projections().unwrap();
+    assert_eq!(state(&s), before);
+    assert_eq!(s.devices().unwrap(), devices_before);
 }

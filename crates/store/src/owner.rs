@@ -10,41 +10,24 @@
 //! A home merged into another (an owner key linked as a device) is the same
 //! walk, one link longer.
 
-use std::collections::HashMap;
-
 use axel_identity::{AuthTag, PublicKey, verify_attestation};
 use axel_inbox::Envelope;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+pub(crate) use crate::devices::Principals;
+pub use crate::devices::{DeviceRecord, PRINCIPAL_DEPTH_MAX};
 use crate::log::{EVENT_COLS, mark_applied, mark_rejected, replay_thread, row_envelope};
 use crate::types::lenient;
 use crate::{
-    AgentColor, AgentProfile, Device, DeviceOp, Effort, Error, Harness, PairingRoute, RuntimeMode,
+    AgentColor, AgentProfile, Effort, Error, Harness, RuntimeMode,
     Store, Team, TeamMember, TeamReach, kind, now,
 };
-
-/// The most links between a key and the owner it speaks for.  A device of a
-/// merged home is two (device → old owner → owner); four leaves room for a
-/// merge of merges and bounds the walk whatever the table holds.
-pub const PRINCIPAL_DEPTH_MAX: usize = 4;
 
 /// The most passes that revive owner records rejected for want of another
 /// one (a profile before its signer's link).  Each pass that revives
 /// anything can unlock at most one more level of the chain.
 const REVIVE_PASSES_MAX: usize = PRINCIPAL_DEPTH_MAX + 2;
-
-/// Kind-120 content.  The signer is the owner, except for `label`, where
-/// the signer names its own machine.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeviceRecord {
-    pub op: DeviceOp,
-    pub device: String,
-    pub label: String,
-    /// How the far end was proved: required to link, absent otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<PairingRoute>,
-}
 
 /// Kind-122 content: a whole profile.  The latest `created_at` per
 /// `profile_id` wins, ties broken by envelope id.
@@ -142,76 +125,6 @@ pub struct AnnounceWire {
     pub auth: Vec<String>,
 }
 
-/// One device → owner link as authorization sees it.
-#[derive(Clone, Debug)]
-struct Link {
-    owner: String,
-    revoked_at: Option<i64>,
-}
-
-impl Link {
-    /// A revoked device authorizes nothing signed at or after its revocation.
-    fn permits(&self, at: u64) -> bool {
-        self.revoked_at
-            .is_none_or(|revoked| i64::try_from(at).is_ok_and(|at| at < revoked))
-    }
-}
-
-/// Every device link on this replica, for resolving signers to owners.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Principals {
-    links: HashMap<String, Link>,
-}
-
-impl Principals {
-    pub(crate) fn load(conn: &Connection) -> Result<Principals, Error> {
-        // Migrations before 13 replay threads too, before this table exists:
-        // then nobody is anybody's device yet.
-        let has_devices = conn
-            .prepare_cached("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'devices'")?
-            .exists([])?;
-        if !has_devices {
-            return Ok(Principals::default());
-        }
-        let mut statement =
-            conn.prepare_cached("SELECT pubkey, owner, revoked_at FROM devices WHERE owner IS NOT NULL")?;
-        let rows = statement.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, Link { owner: r.get(1)?, revoked_at: r.get(2)? }))
-        })?;
-        let links: HashMap<String, Link> = rows.collect::<Result<_, _>>()?;
-        debug_assert!(links.iter().all(|(device, link)| *device != link.owner), "no device is its own owner");
-        Ok(Principals { links })
-    }
-
-    /// The owner `key` speaks for at `at`: itself when it is no live device.
-    pub(crate) fn resolve<'a>(&'a self, key: &'a str, at: u64) -> &'a str {
-        let mut current = key;
-        for _ in 0..PRINCIPAL_DEPTH_MAX {
-            match self.links.get(current) {
-                Some(link) if link.permits(at) => current = &link.owner,
-                _ => return current,
-            }
-        }
-        current
-    }
-
-    /// Whether linking `device` under `owner` would make a key its own owner.
-    fn would_cycle(&self, owner: &str, device: &str) -> bool {
-        let mut current = owner;
-        for _ in 0..=PRINCIPAL_DEPTH_MAX {
-            if current == device {
-                return true;
-            }
-            match self.links.get(current) {
-                Some(link) => current = &link.owner,
-                None => return false,
-            }
-        }
-        // Deeper than any chain we accept counts as a cycle: fail closed.
-        true
-    }
-}
-
 /// Project one owner record and settle it as applied or rejected.  When a
 /// link changes who speaks for whom, every thread is replayed, and records
 /// that waited for it are revived.
@@ -223,6 +136,11 @@ pub(crate) fn project(conn: &Connection, env: &Envelope) -> Result<(), Error> {
             mark_applied(conn, &env.id)?;
             let mut authorization_changed = changes_authorization(env.kind);
             authorization_changed |= revive(conn)?;
+            if env.kind == kind::OWNER_DEVICE {
+                // A revocation can withdraw what a device signed after it, even
+                // records that arrived before the revocation did.
+                revalidate(conn)?;
+            }
             if authorization_changed {
                 replay_all_threads(conn)?;
             }
@@ -266,6 +184,128 @@ pub(crate) fn revive(conn: &Connection) -> Result<bool, Error> {
     Ok(links_changed)
 }
 
+/// The most applied owner records one revalidation re-checks.  An owner's
+/// every profile, team and instance many times over; past it, the rest wait
+/// for the next link change or rebuild.
+const REVALIDATE_RECORDS_MAX: i64 = 100_000;
+
+/// Re-check every applied profile, team and announcement against the device
+/// links as they stand now, and undo the ones that no longer hold.
+pub(crate) fn revalidate(conn: &Connection) -> Result<(), Error> {
+    let applied: Vec<Envelope> = {
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT {EVENT_COLS} FROM events
+             WHERE kind IN (121, 122, 123) AND thread_id IS NULL AND applied_at IS NOT NULL
+             ORDER BY kind ASC, seq ASC LIMIT ?1"
+        ))?;
+        let rows = statement.query_map([REVALIDATE_RECORDS_MAX], row_envelope)?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for env in &applied {
+        if let Some(reason) = authority(conn, env)? {
+            mark_rejected(conn, &env.id, &reason)?;
+            undo(conn, env)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`profile_authority`], [`team_authority`] or [`announce_authority`] for
+/// a stored record.
+fn authority(conn: &Connection, env: &Envelope) -> Result<Option<String>, Error> {
+    match env.kind {
+        kind::AGENT_ANNOUNCE => match parse::<AnnounceWire>(env) {
+            Ok(wire) => announce_authority(conn, env, &wire),
+            Err(reason) => Ok(Some(reason)),
+        },
+        kind::AGENT_PROFILE => match parse::<ProfileWire>(env) {
+            Ok(wire) => profile_authority(conn, env, &wire),
+            Err(reason) => Ok(Some(reason)),
+        },
+        kind::TEAM => match parse::<TeamWire>(env) {
+            Ok(wire) => team_authority(conn, env, &wire),
+            Err(reason) => Ok(Some(reason)),
+        },
+        other => unreachable!("kind {other} is not revalidated"),
+    }
+}
+
+/// Take back what a record that no longer holds had set: the instance it
+/// announced, or the profile or team it last wrote, which falls back to the
+/// newest record that still holds.
+fn undo(conn: &Connection, env: &Envelope) -> Result<(), Error> {
+    match env.kind {
+        kind::AGENT_ANNOUNCE => {
+            if let Ok(wire) = parse::<AnnounceWire>(env) {
+                conn.execute("DELETE FROM agents WHERE pubkey = ?1 AND device = ?2", params![wire.instance, env.from])?;
+            }
+        }
+        kind::AGENT_PROFILE => {
+            let set_by_it: Option<String> = conn
+                .query_row("SELECT profile_id FROM agent_profiles WHERE updated_id = ?1", [&env.id], |r| r.get(0))
+                .optional()?;
+            if let Some(profile_id) = set_by_it {
+                restore_profile(conn, &profile_id)?;
+            }
+        }
+        kind::TEAM => {
+            if let Ok(wire) = parse::<TeamWire>(env)
+                && crate::team::read_team(conn, &wire.team_id)?.is_some_and(|t| t.updated_id.as_deref() == Some(env.id.as_str()))
+            {
+                restore_team(conn, &wire.team_id)?;
+            }
+        }
+        other => unreachable!("kind {other} is not revalidated"),
+    }
+    Ok(())
+}
+
+/// The newest applied record of `kind` whose content `matches`.
+fn newest_applied<T: serde::de::DeserializeOwned>(conn: &Connection, kind: u32, matches: impl Fn(&T) -> bool) -> Result<Option<(Envelope, T)>, Error> {
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT {EVENT_COLS} FROM events WHERE kind = ?1 AND applied_at IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT ?2"
+    ))?;
+    let rows = statement.query_map(params![kind, REVALIDATE_RECORDS_MAX], row_envelope)?;
+    for row in rows {
+        let env = row?;
+        if let Ok(wire) = parse::<T>(&env)
+            && matches(&wire)
+        {
+            return Ok(Some((env, wire)));
+        }
+    }
+    Ok(None)
+}
+
+fn restore_profile(conn: &Connection, profile_id: &str) -> Result<(), Error> {
+    match newest_applied::<ProfileWire>(conn, kind::AGENT_PROFILE, |w| w.profile_id == profile_id)? {
+        Some((env, wire)) => write_profile(conn, &wire, crate::sql_integer(env.created_at, "envelope created_at")?, &env.id),
+        None => {
+            // Nothing that holds ever set it: it goes, unless instances here
+            // still use it, which keep it as it is.
+            conn.execute(
+                "DELETE FROM agent_profiles WHERE profile_id = ?1 AND NOT EXISTS (SELECT 1 FROM agents WHERE profile_id = ?1)",
+                [profile_id],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn restore_team(conn: &Connection, team_id: &str) -> Result<(), Error> {
+    match newest_applied::<TeamWire>(conn, kind::TEAM, |w| w.team_id == team_id)? {
+        Some((env, _)) => {
+            // Re-applying the record that holds writes the team as it set it.
+            conn.execute("UPDATE teams SET updated_at = 0, updated_id = NULL WHERE team_id = ?1", [team_id])?;
+            apply_team(conn, &env).map(|_| ())
+        }
+        None => {
+            conn.execute("UPDATE teams SET archived_at = COALESCE(archived_at, ?2) WHERE team_id = ?1", params![team_id, now()])?;
+            Ok(())
+        }
+    }
+}
+
 fn replay_all_threads(conn: &Connection) -> Result<(), Error> {
     let threads: Vec<String> = {
         let mut statement =
@@ -287,7 +327,7 @@ pub(crate) fn apply_only(conn: &Connection, env: &Envelope) -> Result<Result<(),
 /// Why an owner record can't take effect yet, or `Ok` once it has.
 fn apply(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error> {
     match env.kind {
-        kind::OWNER_DEVICE => apply_device(conn, env),
+        kind::OWNER_DEVICE => crate::devices::apply(conn, env),
         kind::AGENT_ANNOUNCE => apply_announce(conn, env),
         kind::AGENT_PROFILE => apply_profile(conn, env),
         kind::TEAM => apply_team(conn, env),
@@ -303,92 +343,13 @@ fn parse<T: serde::de::DeserializeOwned>(env: &Envelope) -> Result<T, String> {
     serde_json::from_str(&env.content).map_err(|e| format!("malformed content: {e}"))
 }
 
-fn is_key(text: &str) -> bool {
-    PublicKey::from_base58(text).is_ok()
-}
-
-fn apply_device(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error> {
-    let record: DeviceRecord = match parse(env) {
-        Ok(r) => r,
-        Err(reason) => return Ok(Err(reason)),
-    };
-    if !is_key(&record.device) {
-        return Ok(Err(format!("device {:?} is not a public key", record.device)));
-    }
-    let at = crate::sql_integer(env.created_at, "envelope created_at")?;
-    match record.op {
-        DeviceOp::Label => apply_label(conn, env, &record, at),
-        DeviceOp::Link => apply_link(conn, env, &record, at),
-        DeviceOp::Revoke => apply_revoke(conn, env, &record, at),
-    }
-}
-
-fn apply_label(conn: &Connection, env: &Envelope, record: &DeviceRecord, at: i64) -> Result<Result<(), String>, Error> {
-    if record.device != env.from {
-        return Ok(Err("a machine can only label itself".into()));
-    }
-    conn.execute(
-        "INSERT INTO devices (pubkey, owner, label, route, link_event_id, linked_at) VALUES (?1, NULL, ?2, ?3, ?4, ?5)
-         ON CONFLICT(pubkey) DO UPDATE SET label = excluded.label",
-        params![record.device, record.label, record.route.map(PairingRoute::as_str), env.id, at],
-    )?;
-    Ok(Ok(()))
-}
-
-fn apply_link(conn: &Connection, env: &Envelope, record: &DeviceRecord, at: i64) -> Result<Result<(), String>, Error> {
-    if record.device == env.from {
-        return Ok(Err("an owner can't link itself".into()));
-    }
-    let Some(route) = record.route else {
-        return Ok(Err("a link must say how the device was proved".into()));
-    };
-    let existing = device_row(conn, &record.device)?;
-    if let Some(d) = &existing
-        && let Some(owner) = &d.owner
-        && owner != &env.from
-        && d.revoked_at.is_none()
-    {
-        return Ok(Err(format!("device {} is already linked to {owner}", record.device)));
-    }
-    if Principals::load(conn)?.would_cycle(&env.from, &record.device) {
-        return Ok(Err(format!("linking {} under {} would make a key its own owner", record.device, env.from)));
-    }
-    conn.execute(
-        "INSERT INTO devices (pubkey, owner, label, route, link_event_id, linked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(pubkey) DO UPDATE SET owner = excluded.owner, label = excluded.label, route = excluded.route,
-             link_event_id = excluded.link_event_id, linked_at = excluded.linked_at, revoked_at = NULL, revoke_event_id = NULL",
-        params![record.device, env.from, record.label, route.as_str(), env.id, at],
-    )?;
-    Ok(Ok(()))
-}
-
-fn apply_revoke(conn: &Connection, env: &Envelope, record: &DeviceRecord, at: i64) -> Result<Result<(), String>, Error> {
-    let Some(existing) = device_row(conn, &record.device)? else {
-        return Ok(Err(format!("device {} is not linked yet", record.device)));
-    };
-    if existing.owner.as_deref() != Some(env.from.as_str()) {
-        return Ok(Err("only the owner that linked a device can revoke it".into()));
-    }
-    // The earliest revocation stands: a later one can't extend a device's life.
-    conn.execute(
-        "UPDATE devices SET revoked_at = MIN(COALESCE(revoked_at, ?2), ?2), revoke_event_id = COALESCE(revoke_event_id, ?3)
-         WHERE pubkey = ?1",
-        params![record.device, at, env.id],
-    )?;
-    Ok(Ok(()))
-}
-
 fn apply_profile(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error> {
     let wire: ProfileWire = match parse(env) {
         Ok(w) => w,
         Err(reason) => return Ok(Err(reason)),
     };
-    if wire.name.trim().is_empty() || wire.profile_id.is_empty() {
-        return Ok(Err("a profile needs an id and a name".into()));
-    }
-    let principals = Principals::load(conn)?;
-    if principals.resolve(&env.from, env.created_at) != principals.resolve(&wire.owner, env.created_at) {
-        return Ok(Err(format!("signer {} doesn't speak for owner {}", env.from, wire.owner)));
+    if let Some(reason) = profile_authority(conn, env, &wire)? {
+        return Ok(Err(reason));
     }
     let at = crate::sql_integer(env.created_at, "envelope created_at")?;
     let current: Option<(i64, Option<String>)> = conn
@@ -405,6 +366,29 @@ fn apply_profile(conn: &Connection, env: &Envelope) -> Result<Result<(), String>
         write_profile(conn, &wire, at, &env.id)?;
     }
     Ok(Ok(()))
+}
+
+/// Why `env` may not set `wire`: its signer must speak for the profile's
+/// owner, and a profile's owner never changes, so no one can take over an
+/// agent of someone else's by naming its profile id.
+fn profile_authority(conn: &Connection, env: &Envelope, wire: &ProfileWire) -> Result<Option<String>, Error> {
+    if wire.name.trim().is_empty() || wire.profile_id.is_empty() {
+        return Ok(Some("a profile needs an id and a name".into()));
+    }
+    let principals = Principals::load(conn)?;
+    let owner = principals.resolve(&wire.owner, env.created_at);
+    if principals.resolve(&env.from, env.created_at) != owner {
+        return Ok(Some(format!("signer {} doesn't speak for owner {}", env.from, wire.owner)));
+    }
+    let stored: Option<Option<String>> = conn
+        .query_row("SELECT owner FROM agent_profiles WHERE profile_id = ?1", [&wire.profile_id], |r| r.get(0))
+        .optional()?;
+    Ok(match stored {
+        None => None,
+        Some(None) => Some(format!("profile {} has no known owner, so no one can claim it", wire.profile_id)),
+        Some(Some(stored)) if principals.resolve(&stored, env.created_at) == owner => None,
+        Some(Some(stored)) => Some(format!("profile {} belongs to {stored}", wire.profile_id)),
+    })
 }
 
 fn write_profile(conn: &Connection, wire: &ProfileWire, at: i64, event_id: &str) -> Result<(), Error> {
@@ -440,18 +424,7 @@ fn apply_team(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, E
         Ok(w) => w,
         Err(reason) => return Ok(Err(reason)),
     };
-    if wire.team_id.is_empty() {
-        return Ok(Err("a team needs an id".into()));
-    }
-    if let Err(reason) = crate::team::check_shape(&wire.name, &wire.members, &wire.skills, wire.lead.as_deref()) {
-        return Ok(Err(reason));
-    }
-    let principals = Principals::load(conn)?;
-    let owner = principals.resolve(&wire.owner, env.created_at);
-    if principals.resolve(&env.from, env.created_at) != owner {
-        return Ok(Err(format!("signer {} doesn't speak for owner {}", env.from, wire.owner)));
-    }
-    if let Err(reason) = crate::team::check_members(conn, &principals, owner, &wire.members, env.created_at)? {
+    if let Some(reason) = team_authority(conn, env, &wire)? {
         return Ok(Err(reason));
     }
     let at = crate::sql_integer(env.created_at, "envelope created_at")?;
@@ -478,37 +451,35 @@ fn apply_team(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, E
     Ok(Ok(()))
 }
 
+/// Why `env` may not set `wire`: the same rules as a profile's, and every
+/// member must be one of the owner's profiles.
+fn team_authority(conn: &Connection, env: &Envelope, wire: &TeamWire) -> Result<Option<String>, Error> {
+    if wire.team_id.is_empty() {
+        return Ok(Some("a team needs an id".into()));
+    }
+    if let Err(reason) = crate::team::check_shape(&wire.name, &wire.members, &wire.skills, wire.lead.as_deref()) {
+        return Ok(Some(reason));
+    }
+    let principals = Principals::load(conn)?;
+    let owner = principals.resolve(&wire.owner, env.created_at);
+    if principals.resolve(&env.from, env.created_at) != owner {
+        return Ok(Some(format!("signer {} doesn't speak for owner {}", env.from, wire.owner)));
+    }
+    if let Some(stored) = crate::team::read_team(conn, &wire.team_id)?
+        && principals.resolve(&stored.owner, env.created_at) != owner
+    {
+        return Ok(Some(format!("team {} belongs to {}", wire.team_id, stored.owner)));
+    }
+    Ok(crate::team::check_members(conn, &principals, owner, &wire.members, env.created_at)?.err())
+}
+
 fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error> {
     let wire: AnnounceWire = match parse(env) {
         Ok(w) => w,
         Err(reason) => return Ok(Err(reason)),
     };
-    let Ok(instance) = PublicKey::from_base58(&wire.instance) else {
-        return Ok(Err(format!("instance {:?} is not a public key", wire.instance)));
-    };
-    let Ok(auth) = AuthTag::from_tag(&wire.auth) else {
-        return Ok(Err("malformed instance attestation".into()));
-    };
-    if verify_attestation(&auth, &instance).is_err() {
-        return Ok(Err("the instance attestation doesn't verify".into()));
-    }
-    let principals = Principals::load(conn)?;
-    let attester = auth.owner.to_base58();
-    if principals.resolve(&attester, env.created_at) != principals.resolve(&env.from, env.created_at) {
-        return Ok(Err(format!("device {} doesn't speak for the instance's attester {attester}", env.from)));
-    }
-    let profile_owner: Option<Option<String>> = conn
-        .query_row("SELECT owner FROM agent_profiles WHERE profile_id = ?1", [&wire.profile_id], |r| r.get(0))
-        .optional()?;
-    let Some(profile_owner) = profile_owner else {
-        return Ok(Err(format!("profile {} not received yet", wire.profile_id)));
-    };
-    // The device must speak for the profile's owner: a machine nobody linked
-    // can't add instances to someone's agents.
-    let speaks_for_owner = profile_owner
-        .is_some_and(|o| principals.resolve(&o, env.created_at) == principals.resolve(&env.from, env.created_at));
-    if !speaks_for_owner {
-        return Ok(Err(format!("device {} doesn't speak for the owner of profile {}", env.from, wire.profile_id)));
+    if let Some(reason) = announce_authority(conn, env, &wire)? {
+        return Ok(Err(reason));
     }
     // An instance this machine runs is never re-homed by someone's
     // announcement; this machine's own announcement marks it announced.
@@ -532,26 +503,36 @@ fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String
     Ok(Ok(()))
 }
 
-const DEVICE_COLS: &str = "pubkey, owner, label, route, linked_at, revoked_at";
-
-fn row_device(r: &Row<'_>) -> rusqlite::Result<Device> {
-    let route: Option<String> = r.get("route")?;
-    Ok(Device {
-        pubkey: r.get("pubkey")?,
-        owner: r.get("owner")?,
-        label: r.get("label")?,
-        // A route this build doesn't know was refused at ingest, so this is
-        // only a hand-edited row; it reads as the weakest route.
-        route: route.map(|r| r.parse().unwrap_or(PairingRoute::Confirm)),
-        linked_at: r.get("linked_at")?,
-        revoked_at: r.get("revoked_at")?,
-    })
-}
-
-fn device_row(conn: &Connection, pubkey: &str) -> Result<Option<Device>, Error> {
-    Ok(conn
-        .query_row(&format!("SELECT {DEVICE_COLS} FROM devices WHERE pubkey = ?1"), [pubkey], row_device)
-        .optional()?)
+/// Why `env` may not announce `wire`'s instance: the attestation must
+/// verify, and the announcing device must speak for both the attester and
+/// the profile's owner, so a machine nobody linked can't add instances to
+/// someone's agents.
+fn announce_authority(conn: &Connection, env: &Envelope, wire: &AnnounceWire) -> Result<Option<String>, Error> {
+    let Ok(instance) = PublicKey::from_base58(&wire.instance) else {
+        return Ok(Some(format!("instance {:?} is not a public key", wire.instance)));
+    };
+    let Ok(auth) = AuthTag::from_tag(&wire.auth) else {
+        return Ok(Some("malformed instance attestation".into()));
+    };
+    if verify_attestation(&auth, &instance).is_err() {
+        return Ok(Some("the instance attestation doesn't verify".into()));
+    }
+    let principals = Principals::load(conn)?;
+    let device = principals.resolve(&env.from, env.created_at);
+    let attester = auth.owner.to_base58();
+    if principals.resolve(&attester, env.created_at) != device {
+        return Ok(Some(format!("device {} doesn't speak for the instance's attester {attester}", env.from)));
+    }
+    let profile_owner: Option<Option<String>> = conn
+        .query_row("SELECT owner FROM agent_profiles WHERE profile_id = ?1", [&wire.profile_id], |r| r.get(0))
+        .optional()?;
+    let Some(profile_owner) = profile_owner else {
+        return Ok(Some(format!("profile {} not received yet", wire.profile_id)));
+    };
+    if !profile_owner.is_some_and(|o| principals.resolve(&o, env.created_at) == device) {
+        return Ok(Some(format!("device {} doesn't speak for the owner of profile {}", env.from, wire.profile_id)));
+    }
+    Ok(None)
 }
 
 /// Migration 13: each profile's owner is whoever attested its instance.
@@ -578,31 +559,6 @@ pub(crate) fn fill_profile_owners(tx: &Connection) -> Result<(), Error> {
 }
 
 impl Store {
-    /// Every machine this replica knows, linked ones and owners' own labels.
-    pub fn devices(&self) -> Result<Vec<Device>, Error> {
-        let mut statement =
-            self.conn.prepare(&format!("SELECT {DEVICE_COLS} FROM devices ORDER BY label COLLATE NOCASE"))?;
-        let rows = statement.query_map([], row_device)?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// One machine by its key.
-    pub fn device(&self, pubkey: &str) -> Result<Option<Device>, Error> {
-        device_row(&self.conn, pubkey)
-    }
-
-    /// One machine by its label, preferring a live link.
-    pub fn device_by_label(&self, label: &str) -> Result<Option<Device>, Error> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!("SELECT {DEVICE_COLS} FROM devices WHERE label = ?1 ORDER BY revoked_at IS NOT NULL LIMIT 1"),
-                [label],
-                row_device,
-            )
-            .optional()?)
-    }
-
     /// This machine's instances that no kind-121 envelope announced yet,
     /// with the attestation an announcement carries.
     pub fn unannounced_instances(&self) -> Result<Vec<(String, String, Vec<String>)>, Error> {
@@ -617,12 +573,5 @@ impl Store {
             out.push((pubkey, profile_id, serde_json::from_str(&auth_json)?));
         }
         Ok(out)
-    }
-
-    /// The owner `key` speaks for now: itself unless it is a live device.
-    pub fn principal(&self, key: &str) -> Result<String, Error> {
-        let principals = Principals::load(&self.conn)?;
-        let now = u64::try_from(now()).unwrap_or(0);
-        Ok(principals.resolve(key, now).to_string())
     }
 }

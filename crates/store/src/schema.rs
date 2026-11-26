@@ -542,16 +542,19 @@ const MIGRATIONS: &[&str] = &[
 
     -- Machines linked to an owner, projected from kind-120 envelopes.  A row
     -- with no owner is an owner's own machine label.
+    -- One row per link, so a key linked, revoked and linked again keeps
+    -- the gap between.
     CREATE TABLE devices (
-        pubkey           TEXT PRIMARY KEY,
+        link_event_id    TEXT PRIMARY KEY,
+        pubkey           TEXT NOT NULL,
         owner            TEXT,
         label            TEXT NOT NULL,
         route            TEXT,
-        link_event_id    TEXT NOT NULL,
         linked_at        INTEGER NOT NULL,
         revoked_at       INTEGER,
         revoke_event_id  TEXT
     );
+    CREATE INDEX devices_pubkey ON devices(pubkey, linked_at);
     "#,
     // v14: scheduled work (RFD 0006), two projections of the log: `schedules`
     // from the kind 124 envelopes, and `schedule_runs`, one row per run note
