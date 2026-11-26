@@ -156,6 +156,70 @@ pub enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// Scheduled work: messages that arrive in an agent's inbox at a set time.
+    #[command(visible_alias = "schedules")]
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ScheduleCommand {
+    /// Arm a schedule: AGENT gets PROMPT on a thread at a set time.
+    Add(Box<ScheduleAdd>),
+    /// List schedules, with their next run.
+    #[command(visible_alias = "list")]
+    Ls {
+        /// Cancelled and finished ones too.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Cancel a schedule (id or unique prefix).
+    #[command(visible_alias = "cancel")]
+    Rm { schedule: String },
+    /// Send every run that is due (run it from cron every minute; running it twice sends nothing new).
+    Tick,
+}
+
+/// `axel schedule add`'s arguments: one place (`--thread` or `--new`) and one
+/// time (`--at`, `--every` or `--daily`).
+#[derive(clap::Args, Debug)]
+#[command(group = clap::ArgGroup::new("place").required(true).args(["thread", "new"]))]
+#[command(group = clap::ArgGroup::new("when").required(true).args(["at", "every", "daily"]))]
+pub struct ScheduleAdd {
+    /// The recipient, `@name` or `name`.
+    pub agent: String,
+    /// Every run on this thread (id or unique prefix).
+    #[arg(long)]
+    pub thread: Option<String>,
+    /// A new thread with this title for every run.
+    #[arg(long = "new", value_name = "TITLE")]
+    pub new: Option<String>,
+    /// A project for the new thread (repeatable); the current directory when none.
+    #[arg(long = "project", value_name = "DIR", requires = "new")]
+    pub projects: Vec<std::path::PathBuf>,
+    /// One run at this RFC 3339 time (`2026-11-26T09:00:00+01:00`).
+    #[arg(long, value_name = "RFC3339")]
+    pub at: Option<String>,
+    /// A run every DURATION (`90s`, `15m`, `2h`, `7d`; at least a minute).
+    #[arg(long, value_name = "DURATION")]
+    pub every: Option<String>,
+    /// A run every day at HH:MM.
+    #[arg(long, value_name = "HH:MM")]
+    pub daily: Option<String>,
+    /// The UTC offset of --daily (`+01:00`); this machine's current offset when omitted.
+    #[arg(long, value_name = "OFFSET", requires = "daily", allow_hyphen_values = true)]
+    pub tz: Option<String>,
+    /// Most runs it sends (default 1000).
+    #[arg(long, value_name = "N")]
+    pub runs_max: Option<u32>,
+    /// No run after this RFC 3339 time.
+    #[arg(long, value_name = "RFC3339")]
+    pub until: Option<String>,
+    /// What the agent is asked, every run.
+    #[arg(required = true)]
+    pub prompt: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -647,6 +711,31 @@ mod alias_tests {
         let mut argv = vec!["axel"];
         argv.extend_from_slice(args);
         Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{args:?}: {e}")).command.expect("a command")
+    }
+
+    #[test]
+    fn a_schedule_names_one_place_and_one_time() {
+        let Command::Schedule { command: ScheduleCommand::Add(add) } =
+            parses(&["schedule", "add", "@reviewer", "--thread", "01JD", "--daily", "09:00", "--tz", "-05:00", "review", "merges"])
+        else {
+            panic!()
+        };
+        assert_eq!((add.agent.as_str(), add.thread.as_deref(), add.daily.as_deref(), add.tz.as_deref()), ("@reviewer", Some("01JD"), Some("09:00"), Some("-05:00")));
+        assert_eq!(add.prompt, ["review", "merges"]);
+        let Command::Schedule { command: ScheduleCommand::Add(add) } =
+            parses(&["schedule", "add", "@scout", "--new", "Audit", "--project", "/src/a", "--project", "/src/b", "--every", "7d", "go"])
+        else {
+            panic!()
+        };
+        assert_eq!((add.new.as_deref(), add.projects.len(), add.every.as_deref()), (Some("Audit"), 2, Some("7d")));
+        let fails = |args: &[&str]| Cli::try_parse_from([&["axel", "schedule", "add", "@a"], args].concat()).is_err();
+        assert!(fails(&["--every", "1h", "go"]), "no place");
+        assert!(fails(&["--thread", "t", "go"]), "no time");
+        assert!(fails(&["--thread", "t", "--new", "x", "--every", "1h", "go"]), "two places");
+        assert!(fails(&["--thread", "t", "--every", "1h", "--daily", "09:00", "go"]), "two times");
+        assert!(fails(&["--thread", "t", "--every", "1h"]), "no prompt");
+        assert!(matches!(parses(&["schedules", "list"]), Command::Schedule { command: ScheduleCommand::Ls { all: false } }));
+        assert!(matches!(parses(&["schedule", "tick"]), Command::Schedule { command: ScheduleCommand::Tick }));
     }
 
     #[test]

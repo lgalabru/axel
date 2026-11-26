@@ -91,8 +91,27 @@ fn host_hints(text: &str, agents: &[axel_store::Agent]) -> HostHints {
 /// A [`MessageKind::Fyi`] message is tagged so, and becomes a note: read with
 /// the recipient's next turn, never a turn of its own or a summons.
 pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)], text: &str, kind: MessageKind) -> Result<SendReport> {
+    let origin = Origin { thread_id: std::env::var("AXEL_THREAD").ok().filter(|t| !t.trim().is_empty()), tags: vec![], created_at: None };
+    send_from(ctx, &origin, recipients, hosts, text, kind)
+}
+
+/// Where a message is sent from, beyond who is asking (the policy caller).
+#[derive(Clone, Debug, Default)]
+pub struct Origin {
+    /// The thread it goes on: `$AXEL_THREAD` for `axel send`, the schedule's
+    /// thread for a scheduled run.
+    pub thread_id: Option<String>,
+    /// Extra tags, such as a scheduled run's `["sched", id, n]`.
+    pub tags: Vec<Vec<String>>,
+    /// The envelope's `created_at` in Unix seconds; `None` is now.
+    pub created_at: Option<u64>,
+}
+
+/// [`send_message`] from an explicit [`Origin`]: the one path every message
+/// takes (reach, chatter, sign, post, then deliver: live note or summon).
+pub fn send_from(ctx: &Ctx, origin: &Origin, recipients: &[String], hosts: &[(String, String)], text: &str, kind: MessageKind) -> Result<SendReport> {
     super::policy::check_message(ctx, recipients)?;
-    let thread_id = std::env::var("AXEL_THREAD").ok().filter(|t| !t.trim().is_empty());
+    let thread_id = origin.thread_id.clone();
     let from_agent = super::policy::caller_agent();
     if let (Some(t), Some(_)) = (&thread_id, &from_agent) {
         check_chatter(ctx, t)?;
@@ -111,6 +130,12 @@ pub fn send_message(ctx: &Ctx, recipients: &[String], hosts: &[(String, String)]
     }
     if let Some(s) = super::policy::caller_session() {
         b = b.session(&s);
+    }
+    for tag in &origin.tags {
+        b = b.tag(tag.clone());
+    }
+    if let Some(at) = origin.created_at {
+        b = b.created_at(at);
     }
     match kind {
         MessageKind::Fyi => b = b.tag(vec![MessageKind::FYI_TAG.to_string()]),

@@ -7,21 +7,37 @@ use axel_store::{Refusal, Reach, SummonCheck, local_day_start};
 
 use super::Ctx;
 
+/// Who a policy check treats as the caller, when it isn't this process's own.
+#[derive(Clone, Debug)]
+enum Acting {
+    /// The owner, whatever `$AXEL_AGENT` says: a scheduled run the owner set up.
+    Owner,
+    /// An agent, in a session or not.
+    Agent { agent: String, session: Option<String> },
+}
+
 thread_local! {
-    /// Who is asking, when this process acts for an agent that isn't its
-    /// own caller: syncing delivers a remote agent's message here, and the
-    /// summons it causes must be checked as that agent's session.
-    static ACTING_AS: std::cell::RefCell<Option<(String, Option<String>)>> = const { std::cell::RefCell::new(None) };
+    /// Who is asking, when this process acts for someone who isn't its own
+    /// caller: syncing delivers a remote agent's message here, and the
+    /// summons it causes must be checked as that agent's session; a
+    /// scheduled run is checked as the schedule's author.
+    static ACTING_AS: std::cell::RefCell<Option<Acting>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Until the guard drops, policy checks treat `agent` (in `session`) as the
 /// caller instead of this process's own `$AXEL_AGENT` / `$AXEL_SESSION`.
 pub fn act_as(agent: &str, session: Option<&str>) -> ActingAs {
-    let prev = ACTING_AS.with(|a| a.replace(Some((agent.to_string(), session.map(String::from)))));
-    ActingAs(prev)
+    let acting = Acting::Agent { agent: agent.to_string(), session: session.map(String::from) };
+    ActingAs(ACTING_AS.with(|a| a.replace(Some(acting))))
 }
 
-pub struct ActingAs(Option<(String, Option<String>)>);
+/// Until the guard drops, policy checks treat the owner as the caller, even
+/// in a process an agent started.
+pub fn act_as_owner() -> ActingAs {
+    ActingAs(ACTING_AS.with(|a| a.replace(Some(Acting::Owner))))
+}
+
+pub struct ActingAs(Option<Acting>);
 
 impl Drop for ActingAs {
     fn drop(&mut self) {
@@ -32,18 +48,20 @@ impl Drop for ActingAs {
 
 /// The session an agent's process runs in, if this command was run by one.
 pub fn caller_session() -> Option<String> {
-    if let Some((_, s)) = ACTING_AS.with(|a| a.borrow().clone()) {
-        return s;
+    match ACTING_AS.with(|a| a.borrow().clone()) {
+        Some(Acting::Owner) => None,
+        Some(Acting::Agent { session, .. }) => session,
+        None => std::env::var("AXEL_SESSION").ok().filter(|s| !s.trim().is_empty()),
     }
-    std::env::var("AXEL_SESSION").ok().filter(|s| !s.trim().is_empty())
 }
 
 /// The agent running this command, if any (`$AXEL_AGENT`).
 pub fn caller_agent() -> Option<String> {
-    if let Some((a, _)) = ACTING_AS.with(|a| a.borrow().clone()) {
-        return Some(a);
+    match ACTING_AS.with(|a| a.borrow().clone()) {
+        Some(Acting::Owner) => None,
+        Some(Acting::Agent { agent, .. }) => Some(agent),
+        None => std::env::var("AXEL_AGENT").ok().filter(|s| !s.trim().is_empty()),
     }
-    std::env::var("AXEL_AGENT").ok().filter(|s| !s.trim().is_empty())
 }
 
 /// Display name of a pubkey: the agent's name, else a short prefix.
@@ -165,5 +183,15 @@ mod grant_tests {
             assert!(!reach_granted("pk-nova"), "only who the owner allowed");
         }
         assert!(!reach_granted("pk-atlas"), "gone with the guard");
+    }
+
+    #[test]
+    fn acting_as_the_owner_hides_the_agent_and_restores_it() {
+        let _agent = act_as("pk-atlas", Some("s1"));
+        {
+            let _owner = act_as_owner();
+            assert_eq!((caller_agent(), caller_session()), (None, None));
+        }
+        assert_eq!((caller_agent(), caller_session()), (Some("pk-atlas".into()), Some("s1".into())));
     }
 }

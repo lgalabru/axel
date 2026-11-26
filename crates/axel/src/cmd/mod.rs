@@ -18,6 +18,7 @@ mod policy;
 mod process_control;
 mod reconcile;
 mod rex_link;
+mod schedule;
 mod session;
 mod setup;
 mod skills;
@@ -141,5 +142,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             crate::cli::DeviceCommand::Code { owner } => device::code(&owner),
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
+        Some(Command::Schedule { command }) => schedule::run(command),
     }
 }
