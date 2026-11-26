@@ -220,6 +220,30 @@ $ axel                               # in any Rex terminal
    blocked or unread, otherwise on the launcher. A Rex `init.lua` action
    (`rex do axel`) can bind this to a key.
 
+## Coming back after Rex restarts (OSC 7577)
+
+Rex's Program Resume Protocol (OSC 7577, revision 0.5) lets a program tell
+Rex how to start it again. Rex gives each pane a token in `$OSC7577_TOKEN`;
+a report is `pid`, `time`, base64 `argv` and `cwd`, signed with
+`mac = sha256(body ":" token)` (`axel_rex::resume`). `axel` takes the token
+out of its environment first thing in `main`, so no harness or child ever
+sees it, and hands it back only when it execs another `axel` in the same
+pane.
+
+| Pane | Comes back as |
+|---|---|
+| A thread's stream, composer, tokens pane | the same command: `axel thread stream T`, `axel thread compose T`, `axel ui --screen usage --thread T` |
+| An agent's session, managed host or harness in a pane | `axel session resume S`, with the session's work directory as `cwd` |
+| The floating launcher, its threads list, the corner tokens pane, questions | nothing: they are summoned, not kept |
+
+`axel session resume S` ends what is left of the agent's sessions on that
+thread and starts a new one in this pane (`Target::ThisPane`), continuing the
+newest conversation it had there (`--resume`, `codex resume`, or ACP
+`session/load`) with no prompt sent again. It is safe to run twice: when the
+agent already runs on the thread, it says so and changes nothing. A session
+with no harness conversation is not resumed. Leaving the composer sends
+`clear`; signals never do, as the spec asks.
+
 ## Signals (how status gets back without scraping)
 
 | Harness | Mechanism | Notes |

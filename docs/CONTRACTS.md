@@ -305,6 +305,18 @@ pub mod osc {   // OSC 7501 program status, rev 0.4
 }
 ```
 
+
+```rust
+// axel_rex::resume: OSC 7577, the Program Resume Protocol (rev 0.5)
+pub const TOKEN_ENV: &str = "OSC7577_TOKEN"; pub const REPORT_BYTES_MAX: usize = 2048; pub const ARGV_ELEMENTS_MAX: usize = 64;
+pub enum Action<'a> { Resume { argv: &'a [String], cwd: Option<&'a Path> }, Clear }
+pub enum Unreportable { NoProgram, RelativeProgram(String), RelativeCwd(String), ControlCharacter, TooManyArguments, TooLong(usize), BadToken }
+pub fn encode(pid: u32, time_secs: u64, action: Action<'_>, token: &str) -> Result<String, Unreportable>;
+pub unsafe fn take_token();               // first thing in main: keep the token, remove it from the environment
+pub fn token() -> Option<String>;
+pub fn report(action: Action<'_>) -> std::io::Result<bool>;   // to /dev/tty; false without a token; an unreportable command sends Clear
+```
+
 ## axel-tui
 
 ```rust
