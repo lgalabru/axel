@@ -17,9 +17,10 @@ aren't decisions yet are in `rfd/`.
 2. **Structured over scraped.** Every signal comes through a protocol: Claude Code
    hooks, Codex notify, ACP frames, OSC 7501 program status. Never `capture-pane`
    and grep. (This is where Axel v1 failed.)
-3. **Agents are principals.** An agent is a named identity with an Ed25519 key,
-   attested by its owner, addressable as `@name`, with an inbox. Identity outlives
-   any process or thread. (Borrowed from Buzz, re-keyed from secp256k1 to Ed25519.)
+3. **Agents are principals.** An agent is a *profile*, the owner's and the same on
+   every machine, with an *instance* per machine: an Ed25519 key attested by that
+   machine, addressable as `@name`, with an inbox. Identity outlives any process or
+   thread. (Borrowed from Buzz, re-keyed from secp256k1 to Ed25519; ADR 0012.)
 4. **Local-first, the signed log is the truth.** One `~/.axel/axel.db` per machine holds
    the event log and its projections. CLI, hooks and the TUI all append to it. Replicas
    merge by union. No daemon in v0; one appears only for always-on sync.
@@ -36,13 +37,16 @@ aren't decisions yet are in `rfd/`.
 |---|---|
 | **Environment** | A machine running Axel: its filesystem, credentials, DB. Identified by a stable `environment_id`, and by the Rex `host_id` when reachable through Rex. |
 | **Project** | A directory on an environment, usually a git root, optionally with an `AXEL.md`. Projects on different environments that share a `repo_key` (canonical remote URL) are the same repository. |
-| **Agent** | A named identity (Ed25519 keypair, owner attestation) plus a *profile*: harness, model, reasoning effort, skills, default prompt, colour. Reusable across threads. Has an inbox. |
+| **Agent** | A *profile* and its *instances* (ADR 0012). Reusable across threads. `@name` names the profile. |
+| **Agent profile** | What an agent is: name, harness, model, reasoning effort, skills, default prompt, colour, runtime mode. The owner's, the same on every device, no key. Names are unique per owner. |
+| **Agent instance** | A profile on one machine: an Ed25519 keypair attested by that machine's key. It signs, it has the inbox, its sessions hang off its pubkey. `@name@device` names one. |
+| **Device** | A machine whose key an owner linked (kind 120): its key then speaks for that owner. |
 | **Harness** | The program that runs the agent: `claude`, `codex`, `opencode`, or a custom command. |
 | **Thread** | **The primitive.** An intent (the initial prompt) and everything done in its name: attached to 0..n projects, realized by many agent *sessions* over time, on one or many environments. States: `open → done → archived`. Live state is derived from its sessions. |
 | **Session** | One agent instance working on a thread: agent + environment + (optional) project + harness process. Owns the Rex block, the harness's own session id (for `--resume`), the transcript, status and token usage. States: `starting → running ⇄ blocked ⇄ idle → ended`. |
 | **Message** | A signed envelope from one identity (you, or an agent) addressed to identities via `p` tags. Stored in the DB. Kinds: `note`, `task`, `permission_request`, `permission_reply`, `question`, `answer`, `status`, `handoff`. |
 | **Inbox** | For an identity: messages that mention it, plus live status records from its sessions, minus what it has read (a per-identity read frontier). |
-| **Owner** | You. One Ed25519 key per environment, generated on first run, kept in the OS keychain. Signs agent attestations and your own messages. |
+| **Owner** | You. One Ed25519 key per environment, generated on first run, kept in the OS keychain. Signs agent attestations and your own messages. Once another machine's key is linked to it, that key speaks for you too (see *Linked devices*). |
 
 ## The thread model
 
@@ -128,6 +132,9 @@ signed-event lineage, minus the relay.
   | 20 | `status` | tags `s`; content = JSON `{state, kind?, title?, msg?, progress?}` |
   | 21 | `usage` | tags `s`; content = JSON delta `{input, output, cache_read, cache_write, turns, cost_usd_est}` |
   | 1,2,10–13,30 | notes, tasks, requests, replies, handoff | as before, tags `t` and optionally `s` |
+  | 120 | `owner.device` | no `t` tag; tag `["d", device]`; content = JSON `{op: link\|revoke\|label, device, label, route?}` (see *Linked devices*) |
+  | 121 | `agent.announce` | no `t` tag; tag `["d", instance]`; content = JSON `{instance, profile_id, auth}` |
+  | 122 | `agent.profile` | no `t` tag; tag `["d", profile_id]`; content = JSON profile `{profile_id, owner, name, harness, model, effort, skills, prompt, color, runtime_mode, archived}` |
   | 124 | `schedule` | no `t` tag; content = JSON `{schedule_id, op: add\|cancel, to, thread \| new_thread, prompt, when, runs_max, until, device}` (see *Scheduled work*) |
 
   All thread-scoped envelopes carry `["t", thread_id]`. Session ids are ULIDs minted by
@@ -425,14 +432,53 @@ Not yet: moving a session straight from one host to another (bring it home first
 moving Codex sessions, and agents on two different hosts messaging each other directly
 (it goes through the laptop's sync).
 
+## Linked devices
+
+One owner, many machines (RFD 0004, ADR 0012). Each machine keeps signing with its own
+key. `axel device link LABEL [--ssh TARGET] [--route ssh|confirm|wireguard] [--code CODE]`
+installs Axel there the way `axel host add` does, checks the far end is the machine
+meant, and signs a kind-120 link with this machine's key. From then on:
+
+- **Its key speaks for the owner.** Authorization resolves every signer to its
+  *principal*: device, then owner, at most `PRINCIPAL_DEPTH_MAX` (4) links. Roster
+  entries, participant checks and attestations compare principals, so a thread a device
+  started is the owner's, and any of the owner's machines may act on it. A home that was
+  an owner of its own, linked as a device, brings its threads and agents along with no
+  re-signing (the #40 case: two homes become one).
+- **Pairing proves the far end.** `ssh` (default): `axel host add` reached it with
+  `BatchMode=yes`, so its host key matched `known_hosts`. `confirm` and `wireguard`: both
+  machines compute an eight-digit code from the two keys (`axel device code OWNER` prints
+  it there); a code that doesn't match links nothing. `rex_tailscale` is refused until
+  `axel` can read Rex's caller identity.
+- **Everything syncs.** `sync_host` sends a linked device every thread and every owner
+  record (kinds 120-129: links, profiles, instances, schedules); a host of another owner
+  gets only the threads shared with it plus our device links. Sync first signs what
+  changed here (`device::publish`): edited profiles, new instances, this machine's label.
+- **Profiles and instances.** A profile edit is unsigned (`updated_id NULL`) until the
+  next publish; the newest `(created_at, id)` per profile wins. A profile that runs on a
+  machine for the first time gets that machine's own instance: a new key, attested by
+  the machine, announced with kind 121. `@name` resolves to this machine's instance,
+  else the one on a known host, which runs it there.
+- **Jobs on a linked device** carry `instance: true` and no delegation: the device runs
+  its own instance of the profile, signing as itself. Hosts of other owners still get a
+  job key and a delegation (*Remote hosts*).
+- **Revocation.** `axel device revoke LABEL` signs a kind-120 revoke: the device
+  authorizes nothing signed at or after it, and it is pushed to the other devices.
+- **The human's inbox** is the owner's: a message to any live device key counts on every
+  machine.
+- **Out of scope:** an offline owner key (RFD 0004 phase 8), Rex's caller identity as a
+  route, and refusing backdated envelopes from a revoked device.
+
 ## Identity and crypto
 
 - **Curve:** Ed25519 via `ed25519-dalek` 3. Public keys are 32 bytes, shown as
   base58 (the same encoding as Solana addresses, so an agent key *is* a valid Solana
   address if you ever want it to be). Signatures are 64 bytes, verified with
   `verify_strict`.
-- **Owner key:** one per environment, generated on first run.
-- **Agent key:** generated on `axel agent new`.
+- **Owner key:** one per environment, generated on first run. It is also the machine's
+  device key: linked by another owner (kind 120), it speaks for that owner.
+- **Agent key:** one per instance, generated on `axel agent new` or the first time a
+  profile runs on a machine, attested by that machine's key.
 - **Attestation** (adapted from Buzz NIP-OA):
   `preimage = "axel:agent-auth:v1:" || agent_pubkey_b58 || ":" || conditions`,
   `sig = Ed25519(owner_sk, preimage)`. Stored as `["auth", owner_pk, conditions, sig]`.
@@ -468,8 +514,12 @@ See *The thread model* above for `threads`, `thread_projects`, `sessions`, `stat
 
 ```sql
 environments(id PK, label, rex_host_id, is_local, created_at)
-agents(pubkey PK, name UNIQUE, harness, model, effort NULL, skills_json, prompt, color,
-       runtime_mode, auth_tag_json, created_at, last_seen_at, archived_at)
+agent_profiles(profile_id PK, owner, name, harness, model, effort, skills_json, prompt,
+       color, runtime_mode, created_at, updated_at, updated_id, archived_at)
+agents(pubkey PK, profile_id, device NULL, auth_tag_json, announced_id, created_at,
+       last_seen_at, archived_at)        -- instances; device NULL = this machine
+devices(pubkey PK, owner NULL, label, route NULL, link_event_id, linked_at, revoked_at,
+       revoke_event_id)                  -- owner NULL = an owner's own label
 mentions(message_id, pubkey, PRIMARY KEY(message_id, pubkey))
 message_refs(message_id, ref_id)
 read_frontiers(pubkey, scope, through_created_at, through_id, PRIMARY KEY(pubkey, scope))

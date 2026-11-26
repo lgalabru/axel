@@ -255,6 +255,50 @@ reported as `disabled` is cleared.
 
 Authorization in `append`: kind 100 → always (signer becomes owner). Other thread kinds → signer is a participant of `t`, or an agent whose `agents.auth_tag` owner is a participant, or (kinds 20/21/110–112) signer is one of this replica's own agents. Non-thread kinds (notes etc. without `t`) → always. Rejected envelopes are kept with `rejected_reason` and re-tried by `rebuild_projections`.
 
+## axel-store additions (profiles, instances, linked devices; RFD 0004, ADR 0012)
+
+```rust
+// kinds (axel_inbox::kind): OWNER_DEVICE = 120, AGENT_ANNOUNCE = 121, AGENT_PROFILE = 122;
+// is_owner_record(k) for 120..130 (on no thread, sent to every device of the owner).
+pub const PRINCIPAL_DEPTH_MAX: usize = 4;         // device → owner links authorization walks
+str_enum PairingRoute { RexTailscale => "rex_tailscale", Ssh => "ssh", Wireguard => "wireguard", Confirm => "confirm" }
+str_enum DeviceOp { Link => "link", Revoke => "revoke", Label => "label" }
+pub struct DeviceRecord { pub op: DeviceOp, pub device: String, pub label: String, pub route: Option<PairingRoute> }   // kind 120; route required to link
+pub struct ProfileWire { pub profile_id, pub owner, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub archived: bool }  // kind 122
+impl ProfileWire { pub fn of(p: &AgentProfile, owner: &str) -> ProfileWire; }
+pub struct AnnounceWire { pub instance: String, pub profile_id: String, pub auth: Vec<String> }   // kind 121, signed by the device
+pub struct AgentProfile { pub profile_id, pub owner: Option<String>, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub created_at, pub updated_at, pub updated_id: Option<String>, pub archived_at }
+pub struct Device { pub pubkey: String, pub owner: Option<String>, pub label: String, pub route: Option<PairingRoute>, pub linked_at: i64, pub revoked_at: Option<i64> }
+// Agent gains: profile_id: String, owner: Option<String>, device: Option<String> (None = this machine).
+// NewAgent gains: profile_id: Option<String> (None = a new profile from its fields), device: Option<String>.
+pub enum OwnerRecords { Links, All }              // which owner records a peer gets
+impl Store {
+    pub fn devices(&self) -> Result<Vec<Device>, Error>; pub fn device(&self, pk: &str) -> Result<Option<Device>, Error>;
+    pub fn device_by_label(&self, label: &str) -> Result<Option<Device>, Error>;
+    pub fn principal(&self, key: &str) -> Result<String, Error>;      // the owner `key` speaks for now
+    pub fn profile(&self, id: &str) -> Result<Option<AgentProfile>, Error>; pub fn profile_by_name(&self, name: &str) -> Result<Option<AgentProfile>, Error>;
+    pub fn profiles(&self) -> Result<Vec<AgentProfile>, Error>; pub fn unsigned_profiles(&self, owner: &str) -> Result<Vec<AgentProfile>, Error>;
+    pub fn list_instances(&self) -> Result<Vec<Agent>, Error>; pub fn profile_instances(&self, profile_id: &str) -> Result<Vec<Agent>, Error>;
+    pub fn agent_on_device(&self, name: &str, device: &str) -> Result<Option<Agent>, Error>;
+    pub fn unannounced_instances(&self) -> Result<Vec<(String, String, Vec<String>)>, Error>;   // (instance, profile_id, auth tag)
+    pub fn thread_events_since(&self, cursor: i64, threads: Option<&[String]>, records: OwnerRecords, limit: usize) -> Result<Vec<(i64, Envelope)>, Error>;
+}
+// list_agents: one row per profile (this machine's instance first). agent_by_name: this machine's
+// instance, else the most recently seen. Profile setters edit the instance's profile and leave it unsigned.
+// insert_agent: Conflict when a live profile of the same owner has the name.
+// inbox / unread_count: messages to any live key that resolves to the same owner.
+```
+
+Authorization resolves keys to principals before every check above: a signer, an attested owner, a
+roster entry, a participant change's signer and target.
+
+```rust
+// axel-identity
+pub mod pairing { pub const DOMAIN: &str = "axel:pair:v1:"; pub const CODE_DIGITS: u32 = 8;
+    pub fn confirm_code(owner: &PublicKey, device: &PublicKey) -> String;   // "1234-5678"
+    pub fn code_matches(expected: &str, typed: &str) -> bool; }
+```
+
 ## axel-store additions (scheduled work, RFD 0006)
 
 ```rust
