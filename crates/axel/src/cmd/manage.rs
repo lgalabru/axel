@@ -342,6 +342,7 @@ mod tests {
                 pubkey: key.public().to_base58(), name: name.into(), harness: Harness::Claude,
                 model: None, effort: None, skills: vec![], prompt: None, color: None, runtime_mode: RuntimeMode::default(),
                 auth_tag: Some(attest(&owner, &key.public(), "").unwrap().to_tag()),
+                profile_id: None, device: None,
             }).unwrap();
             key
         };

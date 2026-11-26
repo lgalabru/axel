@@ -258,6 +258,8 @@ pub fn create(
         color,
         runtime_mode,
         auth_tag: Some(tag.to_tag()),
+        profile_id: None,
+        device: None,
     })?;
     Ok(agent)
 }

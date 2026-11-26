@@ -165,6 +165,8 @@ fn new_agent(name: &str, params: Params) -> axel_store::NewAgent {
         color,
         runtime_mode,
         auth_tag: None,
+        profile_id: None,
+        device: None,
     }
 }
 

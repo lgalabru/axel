@@ -232,6 +232,10 @@ pub struct JobAgent {
     pub prompt: Option<String>,
     pub color: Option<axel_store::AgentColor>,
     pub auth_tag: Option<Vec<String>>,
+    /// The profile it instantiates, so two owners' agents of one name stay
+    /// apart here.  Absent from a build that predates profiles.
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 fn known_effort<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<axel_store::Effort>, D::Error> {
@@ -250,6 +254,7 @@ impl JobAgent {
             prompt: a.prompt.clone(),
             color: a.color,
             auth_tag: a.auth_tag.clone(),
+            profile_id: Some(a.profile_id.clone()),
         }
     }
 
@@ -266,6 +271,8 @@ impl JobAgent {
                 color: self.color,
                 runtime_mode: mode,
                 auth_tag: self.auth_tag.clone(),
+                profile_id: self.profile_id.clone(),
+                device: None,
             })?;
         }
         Ok(())

@@ -26,6 +26,8 @@ fn agent_spec(name: &str, kp: &Keypair, owner: Option<&Keypair>) -> NewAgent {
         color: Some(AgentColor::Gray),
         runtime_mode: RuntimeMode::default(),
         auth_tag: owner.map(|o| attest(o, &kp.public(), "").unwrap().to_tag()),
+        profile_id: None,
+        device: None,
     }
 }
 
@@ -518,7 +520,7 @@ fn agent_registry() {
     );
     assert!(s.known_identity_name(&pk(&owner)).unwrap().is_none());
 
-    let mut dup = agent_spec("atlas", &Keypair::generate(), None);
+    let mut dup = agent_spec("atlas", &Keypair::generate(), Some(&owner));
     dup.runtime_mode = RuntimeMode::Plan;
     assert!(
         matches!(s.insert_agent(&dup), Err(Error::Conflict(_))),
@@ -1802,7 +1804,7 @@ fn unknown_enum_text_reads_leniently() {
         .unwrap();
     s.connection()
         .execute(
-            "UPDATE agents SET runtime_mode = 'yolo', color = 'teal', harness = 'zed'",
+            "UPDATE agent_profiles SET runtime_mode = 'yolo', color = 'teal', harness = 'zed'",
             [],
         )
         .unwrap();
@@ -3116,6 +3118,9 @@ fn a_database_from_before_effort_upgrades_with_its_agents_at_the_harness_default
             created_at: 1_700_000_000,
             last_seen_at: Some(1_700_000_500),
             archived_at: None,
+            profile_id: "p-pk-atlas".into(),
+            owner: None,
+            device: None,
         },
         "the row is as it was, with no effort"
     );
@@ -3123,7 +3128,7 @@ fn a_database_from_before_effort_upgrades_with_its_agents_at_the_harness_default
     assert_eq!(s.agent_by_name("atlas").unwrap().unwrap().effort, Some(Effort::High));
 
     // A level this build does not know (a newer build's) reads as none, not as an error.
-    s.connection().execute("UPDATE agents SET effort = 'ludicrous'", []).unwrap();
+    s.connection().execute("UPDATE agent_profiles SET effort = 'ludicrous'", []).unwrap();
     assert_eq!(s.agent_by_name("atlas").unwrap().unwrap().effort, None);
     assert_eq!(s.list_agents().unwrap().len(), 1);
 }

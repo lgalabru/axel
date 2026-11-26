@@ -25,6 +25,7 @@ mod items;
 mod local;
 mod native_usage;
 mod log;
+mod owner;
 mod policy;
 mod reads;
 mod remote;
@@ -36,6 +37,8 @@ mod writers;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod owner_tests;
 
 use std::path::{Path, PathBuf};
 
@@ -46,13 +49,14 @@ pub use axel_inbox::{Envelope, EnvelopeBuilder};
 pub use error::Error;
 pub use log::author;
 pub use remote::{ItemChange, SyncStream};
+pub use owner::{AnnounceWire, DeviceRecord, ProfileWire, PRINCIPAL_DEPTH_MAX};
 pub use policy::{
     AgentPolicy, Budget, DEFAULT_MAX_DEPTH, Reach, Refusal, SpendLimit, SummonCheck, local_day_start, narrower,
 };
 pub use guard::{SCHEMA_BACKUPS_KEPT_MAX, schema_backup_path};
 pub use schema::SCHEMA_VERSION;
 pub use types::{
-    Agent, AgentColor, Appended, BlockedKind, ConversationItem, Effort, Environment, Harness, ItemKind, parse_harness_model,
+    Agent, AgentColor, AgentProfile, Appended, Device, DeviceOp, PairingRoute, BlockedKind, ConversationItem, Effort, Environment, Harness, ItemKind, parse_harness_model,
     ItemStatus, NewAgent, NewItem, NewSession, Participant, ParticipantRole, Project, Relationship,
     RuntimeMode, Session, SessionFilter, SessionRuntime, SessionState, SessionUpdate, Status,
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,

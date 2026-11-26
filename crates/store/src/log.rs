@@ -15,6 +15,7 @@ use axel_identity::{AuthTag, Delegation, PublicKey, verify_attestation};
 use axel_inbox::Envelope;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use crate::owner::Principals;
 use crate::schema::PROJECTION_TABLES;
 use crate::wire::{self, ParticipantAction, ProjectAction, kind, tag};
 use crate::{
@@ -157,10 +158,18 @@ impl Store {
             } else if has_delegation(env) {
                 // These have no thread tag, and a delegation is only valid on one.
                 mark_rejected(&tx, &env.id, DELEGATED_WITHOUT_THREAD)?;
+            } else if kind::is_owner_record(env.kind) {
+                // Settled here without the thread replay `owner::project`
+                // would do: every thread is replayed below anyway.
+                match crate::owner::apply_only(&tx, env)? {
+                    Ok(()) => mark_applied(&tx, &env.id)?,
+                    Err(reason) => mark_rejected(&tx, &env.id, &reason)?,
+                }
             } else {
                 project_plain(&tx, env)?;
             }
         }
+        crate::owner::revive(&tx)?;
 
         let threads: Vec<String> = {
             let mut st =
@@ -227,6 +236,8 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
         mark_rejected(conn, &env.id, DELEGATED_WITHOUT_THREAD)?;
     } else if let Some(r) = thread_id.as_deref().and_then(|t| delegation_problem(env, t)) {
         mark_rejected(conn, &env.id, &r)?;
+    } else if kind::is_owner_record(env.kind) {
+        crate::owner::project(conn, env)?;
     } else {
         project_plain(conn, env)?;
     }
@@ -252,7 +263,7 @@ fn event_state(conn: &Connection, id: &str) -> Result<(bool, Option<String>), Er
     )?)
 }
 
-fn mark_applied(conn: &Connection, id: &str) -> Result<(), Error> {
+pub(crate) fn mark_applied(conn: &Connection, id: &str) -> Result<(), Error> {
     let updated = conn.execute(
         "UPDATE events SET applied_at = ?2, rejected_reason = NULL WHERE id = ?1",
         params![id, now()],
@@ -261,7 +272,7 @@ fn mark_applied(conn: &Connection, id: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn mark_rejected(conn: &Connection, id: &str, reason: &str) -> Result<(), Error> {
+pub(crate) fn mark_rejected(conn: &Connection, id: &str, reason: &str) -> Result<(), Error> {
     let updated = conn.execute(
         "UPDATE events SET applied_at = NULL, rejected_reason = ?2 WHERE id = ?1",
         params![id, reason],
@@ -426,13 +437,14 @@ fn authorize(
     env: &Envelope,
     participants: &BTreeMap<String, ParticipantRow>,
     own_agents: &HashMap<String, Option<AuthTag>>,
+    principals: &Principals,
 ) -> Option<String> {
     let who = author(env);
-    if participants.contains_key(who) {
+    if participants.contains_key(principals.resolve(who, env.created_at)) {
         return None;
     }
     if let Some(owner) = attested_owner(env, own_agents)
-        && participants.contains_key(&owner)
+        && participants.contains_key(principals.resolve(&owner, env.created_at))
     {
         return None;
     }
@@ -474,14 +486,15 @@ pub(crate) fn replay_thread(
     };
     clear_thread(conn, thread_id)?;
     let own_agents = load_own_agents(conn)?;
+    let principals = Principals::load(conn)?;
 
-    let Some(roster) = participant_roster(&events, thread_id) else {
+    let Some(roster) = participant_roster(&events, thread_id, &principals) else {
         for e in &events {
             mark_rejected(conn, &e.id, "thread root (kind 100) not received yet")?;
         }
         return Ok(());
     };
-    authorize_and_apply(conn, &events, thread_id, &roster, &own_agents)?;
+    authorize_and_apply(conn, &events, thread_id, &roster, &own_agents, &principals)?;
     restore_local_session_state(conn, saved_offsets)
 }
 
@@ -495,7 +508,10 @@ struct Roster<'a> {
 
 /// The thread's roster after `events` (in replay order), or `None` while the
 /// thread root has not been received.
-fn participant_roster<'a>(events: &'a [Envelope], thread_id: &str) -> Option<Roster<'a>> {
+///
+/// Keys are principals: a thread a device created is its owner's, and any
+/// device of that owner may change the roster.
+fn participant_roster<'a>(events: &'a [Envelope], thread_id: &str, principals: &Principals) -> Option<Roster<'a>> {
     let mut roster = Roster {
         participants: BTreeMap::new(),
         valid_changes: HashSet::new(),
@@ -504,32 +520,34 @@ fn participant_roster<'a>(events: &'a [Envelope], thread_id: &str) -> Option<Ros
     for e in events {
         if e.kind == kind::THREAD_CREATE && e.id == thread_id {
             roster.participants.insert(
-                e.from.clone(),
+                principals.resolve(&e.from, e.created_at).to_string(),
                 ParticipantRow {
                     role: ParticipantRole::Owner,
                 },
             );
             root_seen = true;
         } else if e.kind == kind::THREAD_PARTICIPANT {
-            apply_participant_change(&mut roster, e);
+            apply_participant_change(&mut roster, e, principals);
         }
     }
     root_seen.then_some(roster)
 }
 
 /// Mirror one participant change into `roster` if its signer may make it.
-fn apply_participant_change<'a>(roster: &mut Roster<'a>, e: &'a Envelope) {
+fn apply_participant_change<'a>(roster: &mut Roster<'a>, e: &'a Envelope, principals: &Principals) {
     let Some(target) = e.first_tag(tag::MENTION) else {
         return;
     };
     let Ok(op) = serde_json::from_str::<wire::ParticipantOp>(&e.content) else {
         return;
     };
+    let signer = principals.resolve(&e.from, e.created_at);
+    let target = principals.resolve(target, e.created_at);
     let signer_is_owner = roster
         .participants
-        .get(&e.from)
+        .get(signer)
         .is_some_and(|p| p.role == ParticipantRole::Owner);
-    let self_remove = op.op == ParticipantAction::Remove && target == e.from;
+    let self_remove = op.op == ParticipantAction::Remove && target == signer;
     if !(signer_is_owner || self_remove) {
         return;
     }
@@ -557,6 +575,7 @@ fn authorize_and_apply(
     thread_id: &str,
     roster: &Roster<'_>,
     own_agents: &HashMap<String, Option<AuthTag>>,
+    principals: &Principals,
 ) -> Result<(), Error> {
     for e in events {
         let reason = if e.kind == kind::THREAD_CREATE {
@@ -566,7 +585,7 @@ fn authorize_and_apply(
                 .then(|| "participant change not signed by a current owner".to_string())
         } else {
             delegation_problem(e, thread_id)
-                .or_else(|| authorize(e, &roster.participants, own_agents))
+                .or_else(|| authorize(e, &roster.participants, own_agents, principals))
         };
         match reason {
             Some(r) => mark_rejected(conn, &e.id, &r)?,

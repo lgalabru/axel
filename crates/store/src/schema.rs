@@ -13,6 +13,8 @@
 //! - **projections**, rebuildable from the log at any time: `threads`,
 //!   `thread_projects`, `thread_participants`, `sessions`, `status`, `usage`,
 //!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
+//! - **owner records**, projected from kinds 120-122 but also written locally:
+//!   `devices`, `agent_profiles` (RFD 0004);
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
 //!   `session_context`, `plan_limits`, `turn_marks`, `native_usage_sources`,
 //!   `native_usage`, `model_requests`, `inspected_threads`,
@@ -490,6 +492,63 @@ const MIGRATIONS: &[&str] = &[
     r#"
     -- model_requests.throttled: see post_migrate.
     "#,
+    // v13: agents become a profile and its instances, and machines can be
+    // linked to one owner (RFD 0004).  A profile is what the agent is and is
+    // the same on every device of its owner; an instance is that profile on
+    // one machine, with its own key.  Each existing agent becomes a profile
+    // (id `p-<pubkey>`, so the migration needs no randomness) plus its one
+    // instance.  `agents` is rebuilt because SQLite can't drop the old
+    // `name UNIQUE`: two instances of one profile share a name.
+    // `post_migrate` fills `agent_profiles.owner` from each attestation.
+    r#"
+    CREATE TABLE agent_profiles (
+        profile_id     TEXT PRIMARY KEY,
+        owner          TEXT,
+        name           TEXT NOT NULL,
+        harness        TEXT NOT NULL,
+        model          TEXT,
+        effort         TEXT,
+        skills_json    TEXT NOT NULL DEFAULT '[]',
+        prompt         TEXT,
+        color          TEXT,
+        runtime_mode   TEXT NOT NULL DEFAULT 'autopilot',
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL,
+        updated_id     TEXT,
+        archived_at    INTEGER
+    );
+    CREATE INDEX agent_profiles_name ON agent_profiles(name);
+    INSERT INTO agent_profiles (profile_id, name, harness, model, effort, skills_json, prompt, color, runtime_mode, created_at, updated_at, archived_at)
+        SELECT 'p-' || pubkey, name, harness, model, effort, skills_json, prompt, color, runtime_mode, created_at, created_at, archived_at FROM agents;
+
+    CREATE TABLE agents_v13 (
+        pubkey         TEXT PRIMARY KEY,
+        profile_id     TEXT NOT NULL REFERENCES agent_profiles(profile_id),
+        device         TEXT,
+        auth_tag_json  TEXT,
+        created_at     INTEGER NOT NULL,
+        last_seen_at   INTEGER,
+        archived_at    INTEGER
+    );
+    INSERT INTO agents_v13 (pubkey, profile_id, auth_tag_json, created_at, last_seen_at, archived_at)
+        SELECT pubkey, 'p-' || pubkey, auth_tag_json, created_at, last_seen_at, archived_at FROM agents;
+    DROP TABLE agents;
+    ALTER TABLE agents_v13 RENAME TO agents;
+    CREATE INDEX agents_profile ON agents(profile_id);
+
+    -- Machines linked to an owner, projected from kind-120 envelopes.  A row
+    -- with no owner is an owner's own machine label.
+    CREATE TABLE devices (
+        pubkey           TEXT PRIMARY KEY,
+        owner            TEXT,
+        label            TEXT NOT NULL,
+        route            TEXT NOT NULL,
+        link_event_id    TEXT NOT NULL,
+        linked_at        INTEGER NOT NULL,
+        revoked_at       INTEGER,
+        revoke_event_id  TEXT
+    );
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.
@@ -533,6 +592,7 @@ fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
         8 => add_column_if_missing(tx, "turns", "changes_json", "TEXT"),
         10 => add_column_if_missing(tx, "agents", "effort", "TEXT"),
         12 => add_column_if_missing(tx, "model_requests", "throttled", "INTEGER NOT NULL DEFAULT 0"),
+        13 => crate::owner::fill_profile_owners(tx),
         _ => Ok(()),
     }
 }

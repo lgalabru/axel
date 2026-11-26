@@ -838,6 +838,8 @@ fn each_turn_starts_with_what_the_agent_missed_and_notes_wait_for_it() {
             color: None,
             runtime_mode: RuntimeMode::default(),
             auth_tag: None,
+            profile_id: None,
+            device: None,
         })
         .unwrap();
     let nova_session = f

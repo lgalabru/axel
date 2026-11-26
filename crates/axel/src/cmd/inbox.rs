@@ -394,6 +394,9 @@ mod tests {
             created_at: 0,
             last_seen_at: None,
             archived_at: None,
+            profile_id: format!("p-pk-{name}"),
+            owner: None,
+            device: None,
         }
     }
 
