@@ -263,7 +263,7 @@ Authorization in `append`: kind 100 → always (signer becomes owner). Other thr
 pub const PRINCIPAL_DEPTH_MAX: usize = 4;         // device → owner links authorization walks
 str_enum PairingRoute { RexTailscale => "rex_tailscale", Ssh => "ssh", Wireguard => "wireguard", Confirm => "confirm" }
 str_enum DeviceOp { Link => "link", Revoke => "revoke", Label => "label" }
-pub struct DeviceRecord { pub op: DeviceOp, pub device: String, pub label: String, pub route: Option<PairingRoute> }   // kind 120; route required to link
+pub struct DeviceRecord { pub op: DeviceOp, pub device: String, pub label: String, pub route: Option<PairingRoute>, pub consent: Option<String> }   // kind 120; route and the device's consent required to link
 pub struct ProfileWire { pub profile_id, pub owner, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub archived: bool }  // kind 122
 impl ProfileWire { pub fn of(p: &AgentProfile, owner: &str) -> ProfileWire; }
 pub struct AnnounceWire { pub instance: String, pub profile_id: String, pub auth: Vec<String> }   // kind 121, signed by the device
@@ -274,7 +274,7 @@ pub struct Device { pub pubkey: String, pub owner: Option<String>, pub label: St
 pub enum OwnerRecords { Links, All }              // which owner records a peer gets
 impl Store {
     pub fn devices(&self) -> Result<Vec<Device>, Error>; pub fn device(&self, pk: &str) -> Result<Option<Device>, Error>;
-    pub fn device_by_label(&self, label: &str) -> Result<Option<Device>, Error>;
+    pub fn device_by_label(&self, label: &str, owner: &str) -> Result<Option<Device>, Error>;   // a live link speaking for `owner`
     pub fn principal(&self, key: &str) -> Result<String, Error>;      // the owner `key` speaks for now
     pub fn profile(&self, id: &str) -> Result<Option<AgentProfile>, Error>; pub fn profile_by_name(&self, name: &str) -> Result<Option<AgentProfile>, Error>;
     pub fn profiles(&self) -> Result<Vec<AgentProfile>, Error>; pub fn unsigned_profiles(&self, owner: &str) -> Result<Vec<AgentProfile>, Error>;
@@ -285,7 +285,8 @@ impl Store {
 }
 // list_agents: one row per profile (this machine's instance first). agent_by_name: this machine's
 // instance, else the most recently seen. Profile setters edit the instance's profile and leave it unsigned.
-// insert_agent: Conflict when a live profile of the same owner has the name.
+// insert_agent: Conflict when a live profile of the same owner has the name, or when it would join
+// a profile whose owner its attester doesn't speak for.
 // inbox / unread_count: messages to any live key that resolves to the same owner.
 ```
 
@@ -296,7 +297,10 @@ roster entry, a participant change's signer and target.
 // axel-identity
 pub mod pairing { pub const DOMAIN: &str = "axel:pair:v1:"; pub const CODE_DIGITS: u32 = 8;
     pub fn confirm_code(owner: &PublicKey, device: &PublicKey) -> String;   // "1234-5678"
-    pub fn code_matches(expected: &str, typed: &str) -> bool; }
+    pub fn code_matches(expected: &str, typed: &str) -> bool;
+    pub const LINK_CONSENT_DOMAIN: &str = "axel:device-link:v1:";
+    pub fn consent_to_link(device: &Keypair, owner: &PublicKey) -> String;   // hex signature
+    pub fn verify_link_consent(owner: &PublicKey, device: &PublicKey, consent_hex: &str) -> Result<(), Error>; }
 ```
 
 ## axel-store additions (scheduled work, RFD 0006)

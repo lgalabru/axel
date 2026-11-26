@@ -444,7 +444,10 @@ moving Codex sessions, and agents on two different hosts messaging each other di
 One owner, many machines (RFD 0004, ADR 0012). Each machine keeps signing with its own
 key. `axel device link LABEL [--ssh TARGET] [--route ssh|confirm|wireguard] [--code CODE]`
 installs Axel there the way `axel host add` does, checks the far end is the machine
-meant, and signs a kind-120 link with this machine's key. From then on:
+meant, asks it to consent (`axel host rpc` `consent_link`: the device signs
+`axel:device-link:v1:<owner>:<device>`), and signs a kind-120 link carrying that consent
+with this machine's key. A link without the device's consent is refused, so no key can
+claim another machine. From then on:
 
 - **Its key speaks for the owner.** Authorization resolves every signer to its
   *principal*: device, then owner, at most `PRINCIPAL_DEPTH_MAX` (4) links. Roster
@@ -469,8 +472,15 @@ meant, and signs a kind-120 link with this machine's key. From then on:
 - **Jobs on a linked device** carry `instance: true` and no delegation: the device runs
   its own instance of the profile, signing as itself. Hosts of other owners still get a
   job key and a delegation (*Remote hosts*).
-- **Revocation.** `axel device revoke LABEL` signs a kind-120 revoke: the device
-  authorizes nothing signed at or after it, and it is pushed to the other devices.
+- **Revocation.** `axel device revoke LABEL` signs a kind-120 revoke, from any key that
+  speaks for the owner: the device authorizes nothing signed at or after it, and it is
+  pushed to the other devices. Each link is its own row, so linking the device again
+  later leaves the revoked span unlinked; a key's first link alone vouches for what it
+  signed before. A revocation also takes back profiles, teams and instances the device
+  signed after it, even ones that arrived first, falling back to what still holds.
+- **Other owners' records stay theirs.** A profile's or team's owner never changes, and
+  sync keeps profiles, teams, instances and schedules only from keys that speak for this
+  machine's owner. A host of another owner gets only our own device links.
 - **The human's inbox** is the owner's: a message to any live device key counts on every
   machine.
 - **Out of scope:** an offline owner key (RFD 0004 phase 8), Rex's caller identity as a
