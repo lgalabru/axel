@@ -16,7 +16,7 @@ use crate::{
 pub mod kind {
     pub use axel_inbox::kind::{
         AGENT_ANNOUNCE, AGENT_PROFILE, ANSWER, HANDOFF, NOTE, OWNER_DEVICE, PERMISSION_REPLY,
-        PERMISSION_REQUEST, QUESTION, SESSION_END, SESSION_START, SESSION_UPDATE, STATUS, TASK,
+        PERMISSION_REQUEST, QUESTION, SCHEDULE, SESSION_END, SESSION_START, SESSION_UPDATE, STATUS, TASK,
         THREAD_CREATE, THREAD_PARTICIPANT, THREAD_PROJECT, THREAD_UPDATE, USAGE, is_owner_record,
     };
     /// A completed turn of a managed session (`["s", id]`, content = `TurnSummary`).

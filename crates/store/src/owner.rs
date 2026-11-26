@@ -1,6 +1,6 @@
 //! Owner records (RFD 0004): which machines belong to which owner (kind 120),
-//! agent profiles (kind 122), and the agent instances each device runs
-//! (kind 121).  They are on no thread and travel to every device of an owner.
+//! agent profiles (kind 122), the agent instances each device runs
+//! (kind 121), and schedules (kind 124, projected by `crate::schedule`).  They are on no thread and travel to every device of an owner.
 //!
 //! A machine signs with its own key.  Once its owner links it, that key
 //! speaks for the owner: [`Principals::resolve`] walks device → owner, and
@@ -244,6 +244,10 @@ fn apply(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error>
         kind::OWNER_DEVICE => apply_device(conn, env),
         kind::AGENT_ANNOUNCE => apply_announce(conn, env),
         kind::AGENT_PROFILE => apply_profile(conn, env),
+        kind::SCHEDULE => Ok(match crate::schedule::project_schedule(conn, env)? {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }),
         other => Ok(Err(format!("owner record kind {other} is not known to this build"))),
     }
 }

@@ -180,6 +180,7 @@ impl Store {
         for thread_id in &threads {
             replay_thread(&tx, thread_id, Some(&offsets))?;
         }
+        crate::schedule::rebuild_runs(&tx)?;
         // Every event was either projected or rejected by the passes above.
         debug_assert_eq!(
             tx.query_row(
@@ -200,6 +201,15 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
     // Refused before storing, like a bad signature: a `created_at` past
     // `i64::MAX` would be stored negative and replay before everything.
     let created_at = sql_integer(env.created_at, "envelope created_at")?;
+    // A second run with a number another note already took (two devices
+    // firing one schedule) is dropped, not stored: sync never spreads it.
+    if let Some(reason) = crate::schedule::duplicate_run(conn, env)? {
+        return Ok(Appended {
+            inserted: false,
+            projected: false,
+            rejected_reason: Some(reason),
+        });
+    }
     let tags_json = serde_json::to_string(&env.tags)?;
     let thread_id = thread_id_of(env);
     let session_id = env.first_tag(tag::SESSION);
@@ -227,6 +237,7 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
             rejected_reason,
         });
     }
+    crate::schedule::record_run(conn, env)?;
     if is_scoped(env) {
         match &thread_id {
             Some(t) => replay_thread(conn, t, None)?,

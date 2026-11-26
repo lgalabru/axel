@@ -12,7 +12,8 @@
 //! - **the log**: `events`, every envelope ever received;
 //! - **projections**, rebuildable from the log at any time: `threads`,
 //!   `thread_projects`, `thread_participants`, `sessions`, `status`, `usage`,
-//!   `usage_samples`, `usage_log`, `mentions`, `message_refs`;
+//!   `usage_samples`, `usage_log`, `mentions`, `message_refs`, `schedules`,
+//!   `schedule_runs`;
 //! - **owner records**, projected from kinds 120-122 but also written locally:
 //!   `devices`, `agent_profiles` (RFD 0004);
 //! - **local-only**: `environments`, `projects`, `agents`, `read_frontiers`,
@@ -40,6 +41,8 @@ pub(crate) const PROJECTION_TABLES: &[&str] = &[
     "threads",
     "mentions",
     "message_refs",
+    "schedules",
+    "schedule_runs",
 ];
 
 /// Each entry is one migration: `MIGRATIONS[n]` moves a database from version
@@ -548,6 +551,32 @@ const MIGRATIONS: &[&str] = &[
         linked_at        INTEGER NOT NULL,
         revoked_at       INTEGER,
         revoke_event_id  TEXT
+    );
+    "#,
+    // v14: scheduled work (RFD 0006), two projections of the log: `schedules`
+    // from the kind 124 envelopes, and `schedule_runs`, one row per run note
+    // (tag `["sched", schedule_id, run_number]`).  The primary key is what
+    // drops a second run with the same number at ingest.  Self-contained, so
+    // it needs no `post_migrate`: no earlier build wrote either kind of
+    // envelope, so there is nothing in the log to replay into them.
+    r#"
+    CREATE TABLE schedules (
+        schedule_id   TEXT PRIMARY KEY,
+        event_id      TEXT NOT NULL,
+        author        TEXT NOT NULL,
+        to_pubkey     TEXT NOT NULL,
+        device        TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        cancelled_at  INTEGER,
+        content       TEXT NOT NULL
+    );
+    CREATE INDEX schedules_device ON schedules(device, created_at);
+    CREATE TABLE schedule_runs (
+        schedule_id  TEXT NOT NULL,
+        run_number   INTEGER NOT NULL,
+        event_id     TEXT NOT NULL UNIQUE,
+        fired_at     INTEGER NOT NULL,
+        PRIMARY KEY (schedule_id, run_number)
     );
     "#,
 ];

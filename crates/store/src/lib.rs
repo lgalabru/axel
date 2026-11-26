@@ -28,6 +28,7 @@ mod log;
 mod owner;
 mod policy;
 mod reads;
+mod schedule;
 mod remote;
 pub mod pricing;
 pub mod schema;
@@ -39,6 +40,8 @@ mod writers;
 mod tests;
 #[cfg(test)]
 mod owner_tests;
+#[cfg(test)]
+mod schedule_tests;
 
 use std::path::{Path, PathBuf};
 
@@ -63,6 +66,12 @@ pub use types::{
     ThreadWorkspace, Turn, TurnChanges, TurnMark, FileChange, ChangeStatus, TurnSummary, Usage, UsageDelta, UsageSample, UsageTotals, UsageWindows, NativeUsage, SessionContext, LimitWindow, PlanLimit, WorkspaceKind,
 };
 pub use wire::kind;
+pub use schedule::{
+    FinishReason, INTERVAL_SECS_MAX, INTERVAL_SECS_MIN, NEW_THREAD_PROJECTS_MAX, NewThreadSpec, PROMPT_BYTES_MAX,
+    RUNS_MAX_DEFAULT, RUNS_MAX_LIMIT, RunCheck, RunThread, SCHEDULE_ID_CHARS_MAX, SCHEDULE_RUN_TAG,
+    SCHEDULES_LIST_MAX, Schedule, ScheduleAction, ScheduleRun, ScheduleSpec, ScheduleWhen, ScheduleWire,
+    TIMESTAMP_MAX, TZ_OFFSET_MINUTES_MAX, parse_run_tag, plan_run, run_tag, run_text,
+};
 
 /// The read-frontier scope used by [`Store::unread_count`] and [`Store::mark_read`].
 pub const INBOX_SCOPE: &str = "inbox";

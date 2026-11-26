@@ -26,7 +26,7 @@ macro_rules! str_enum {
             }
         }
 
-        impl FromStr for $name {
+        impl std::str::FromStr for $name {
             type Err = Error;
             fn from_str(s: &str) -> Result<Self, Error> {
                 match s {
@@ -43,6 +43,7 @@ macro_rules! str_enum {
         }
     };
 }
+pub(crate) use str_enum;
 
 /// Lenient serde helpers for enum fields read back from the log: text this
 /// build does not know maps to the enum's default (or `None`) instead of
