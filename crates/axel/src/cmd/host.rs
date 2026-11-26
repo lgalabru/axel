@@ -939,6 +939,27 @@ pub fn launch_remote(ctx: &Ctx, host_label: &str, thread_id: &str, agent_name: &
     start_remote(ctx, &host, thread_id, agent_name, prompt, files, None)
 }
 
+/// The agents a job's agent may reach, and the reach to record on the host.
+/// A host knows no teams, so when a team's rule takes part the reach goes
+/// as the names it allows today.
+fn job_reach(ctx: &Ctx, agent: &axel_store::Agent, own: axel_store::Reach) -> Result<(Vec<JobAgent>, axel_store::Reach)> {
+    let effective = ctx.store.effective_reach(&agent.pubkey)?;
+    let peers: Vec<JobAgent> = ctx
+        .store
+        .list_agents()?
+        .iter()
+        .filter(|a| a.pubkey != agent.pubkey && effective.allows(&a.pubkey, Some(&a.profile_id)))
+        .map(JobAgent::of)
+        .collect();
+    if !effective.from_teams() {
+        return Ok((peers, own));
+    }
+    let names: Vec<String> = peers.iter().map(|p| p.pubkey.clone()).collect();
+    let reach = if names.is_empty() { axel_store::Reach::Nobody } else { axel_store::Reach::Only(names) };
+    debug_assert!(!matches!(reach, axel_store::Reach::Team(_) | axel_store::Reach::Lead(_)), "a host gets names, not team rules");
+    Ok((peers, reach))
+}
+
 /// A conversation to resume on the host, and the directory whose state
 /// goes with it.
 struct Carry {
@@ -976,13 +997,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         .filter(|pk| *pk != agent.pubkey)
         .map(|pk| socket::Sender::new(pk.clone(), super::policy::name_of(ctx, &pk)));
     let policy = ctx.store.agent_policy(&agent.pubkey)?;
-    let peers = ctx
-        .store
-        .list_agents()?
-        .iter()
-        .filter(|a| a.pubkey != agent.pubkey && policy.reach.allows(&a.pubkey))
-        .map(JobAgent::of)
-        .collect();
+    let (peers, reach) = job_reach(ctx, &agent, policy.reach)?;
     let job = Job {
         thread_id: thread.id.clone(),
         title: thread.title.clone(),
@@ -994,7 +1009,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         workspace,
         attachments,
         resume: carry.map(|c| c.transcript),
-        reach: policy.reach,
+        reach,
         budget: policy.budget,
         peers,
         instance,

@@ -44,6 +44,12 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Teams: named sets of agents with skills and a reach rule they share.
+    #[command(visible_alias = "teams")]
+    Team {
+        #[command(subcommand)]
+        command: TeamCommand,
+    },
     /// Skills this project can use: directories, and remote skills pinned in AXEL.lock.
     #[command(visible_alias = "skill")]
     Skills {
@@ -387,7 +393,8 @@ pub struct PolicyArgs {
     /// Take these agents off the list.
     #[arg(long, value_delimiter = ',', value_name = "AGENT")]
     pub disallow: Vec<String>,
-    /// Replace the list: nobody, or any agent.
+    /// Replace the list: nobody, any agent, the other members of its teams,
+    /// or as its teams' leads allow (`--allow` names still come on top).
     #[arg(long, value_enum)]
     pub reach: Option<ReachArg>,
     /// Daily spend cap in estimated USD, or `unlimited` (the default).
@@ -402,6 +409,78 @@ pub struct PolicyArgs {
 pub enum ReachArg {
     Nobody,
     Anyone,
+    /// The other members of its teams.
+    Team,
+    /// Its teams' leads if it is a member; every member of a team it leads.
+    Lead,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TeamCommand {
+    /// Create a team of agents.
+    #[command(aliases = ["create", "add"])]
+    New {
+        name: String,
+        /// The agent that leads it (joins as a member).
+        #[arg(long, value_name = "AGENT")]
+        lead: Option<String>,
+        /// A member, with an optional role shown in the roster (repeatable).
+        #[arg(long = "member", value_name = "AGENT[:ROLE]")]
+        members: Vec<String>,
+        /// A skill source in AXEL.md's `skills:` syntax, installed for every member (repeatable).
+        #[arg(long = "skills", value_name = "SOURCE")]
+        skills: Vec<String>,
+        /// Who members may reach: each other, through the lead, or no team rule.
+        #[arg(long, value_enum, default_value_t = TeamReachArg::None)]
+        reach: TeamReachArg,
+    },
+    /// Change a team's members, lead, skills or reach.
+    Edit {
+        name: String,
+        /// Add a member, or change its role (repeatable).
+        #[arg(long = "add", value_name = "AGENT[:ROLE]")]
+        add: Vec<String>,
+        /// Take a member out (repeatable).
+        #[arg(long = "remove", value_name = "AGENT")]
+        remove: Vec<String>,
+        /// Make this agent the lead (joins as a member).
+        #[arg(long, value_name = "AGENT")]
+        lead: Option<String>,
+        /// Replace the skill sources (repeatable).
+        #[arg(long = "skills", value_name = "SOURCE")]
+        skills: Vec<String>,
+        #[arg(long, value_enum)]
+        reach: Option<TeamReachArg>,
+    },
+    /// Show one team: members, roles, lead, skills and reach.
+    #[command(alias = "info")]
+    Show { name: String },
+    /// List teams.
+    #[command(alias = "list")]
+    Ls,
+    /// Archive a team: its reach rule and skills stop applying.
+    #[command(aliases = ["archive", "delete"])]
+    Rm { name: String },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum TeamReachArg {
+    /// Members may reach each other.
+    Team,
+    /// The lead may reach every member; members may reach the lead alone.
+    Lead,
+    /// No team rule: each member's own reach applies.
+    None,
+}
+
+impl From<TeamReachArg> for axel_store::TeamReach {
+    fn from(r: TeamReachArg) -> Self {
+        match r {
+            TeamReachArg::Team => axel_store::TeamReach::Team,
+            TeamReachArg::Lead => axel_store::TeamReach::Lead,
+            TeamReachArg::None => axel_store::TeamReach::None,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -768,6 +847,25 @@ mod alias_tests {
         assert_eq!((runs.as_deref(), model), (Some("goose/gpt-5.5"), None));
         let Command::Agent { command: AgentCommand::Edit { runs, model, .. } } = parses(&["agent", "edit", "opus", "--model", "fable"]) else { panic!() };
         assert_eq!((runs, model.as_deref()), (None, Some("fable")));
+    }
+
+    #[test]
+    fn a_team_takes_members_with_roles_and_repeats_its_flags() {
+        let Command::Team { command: TeamCommand::New { name, lead, members, skills, reach } } =
+            parses(&["team", "new", "core", "--lead", "coordinator", "--member", "scout:code reconnaissance", "--member", "reviewer", "--skills", "./skills/core", "--reach", "lead"])
+        else {
+            panic!()
+        };
+        assert_eq!((name.as_str(), lead.as_deref(), reach), ("core", Some("coordinator"), TeamReachArg::Lead));
+        assert_eq!(members, ["scout:code reconnaissance", "reviewer"]);
+        assert_eq!(skills, ["./skills/core"]);
+        let Command::Team { command: TeamCommand::New { reach, .. } } = parses(&["team", "new", "solo"]) else { panic!() };
+        assert_eq!(reach, TeamReachArg::None, "no team rule unless asked");
+        assert!(matches!(parses(&["teams", "list"]), Command::Team { command: TeamCommand::Ls }));
+        assert!(matches!(parses(&["team", "edit", "core", "--add", "a:b", "--remove", "c"]), Command::Team { command: TeamCommand::Edit { .. } }));
+        assert!(matches!(parses(&["team", "rm", "core"]), Command::Team { command: TeamCommand::Rm { .. } }));
+        let Command::Agent { command: AgentCommand::Edit { policy, .. } } = parses(&["agent", "edit", "scout", "--reach", "team"]) else { panic!() };
+        assert_eq!(policy.reach, Some(ReachArg::Team));
     }
 
     #[test]

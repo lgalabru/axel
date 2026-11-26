@@ -113,11 +113,11 @@ fn claude_executable(found: PathBuf) -> PathBuf {
     }
 }
 
-fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+fn session_meta(agent: &axel_store::Agent, cwd: &Path, roster: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     // Codex gets who it is as developer instructions (the built-in adapter
     // reads `systemPrompt.append`); the Claude extras below don't apply.
     if agent.harness == axel_store::Harness::Codex {
-        let meta = serde_json::json!({ "systemPrompt": { "append": super::launch::system_prompt(agent, cwd) } });
+        let meta = serde_json::json!({ "systemPrompt": { "append": super::launch::system_prompt(agent, cwd, roster) } });
         return meta.as_object().cloned();
     }
     if agent.harness != axel_store::Harness::Claude {
@@ -136,7 +136,7 @@ fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map
         Err(e) => eprintln!("axel: {}", t!("could not write the axel skill plugin: {error}", error = e)),
     }
     let meta = serde_json::json!({
-        "systemPrompt": { "append": super::launch::system_prompt(agent, cwd) },
+        "systemPrompt": { "append": super::launch::system_prompt(agent, cwd, roster) },
         "claudeCode": { "options": { "extraArgs": extra_args } }
     });
     meta.as_object().cloned()
@@ -165,7 +165,8 @@ fn host(session_id: &str) -> Result<()> {
     }
     let env = harness_env(&thread.id, &session.id, &agent);
 
-    let meta = session_meta(&agent, &cwd);
+    let roster = super::team::roster(&ctx.store, &agent.profile_id)?;
+    let meta = session_meta(&agent, &cwd, &roster);
     let mcp_servers = vec![super::launch::axel_mcp_server(&env)];
     let cfg = HostConfig {
         session_id: session.id.clone(),

@@ -204,6 +204,9 @@ fn show(ctx: &Ctx, name: &str) -> Result<()> {
     println!("{}", if has_key { t!("key in keystore: yes") } else { t!("key in keystore: MISSING") });
     let p = ctx.store.agent_policy(&a.pubkey)?;
     print_policy(ctx, &p);
+    for line in super::policy::team_reach_lines(ctx, &ctx.store.effective_reach(&a.pubkey)?) {
+        println!("  {line}");
+    }
     print_effort(&a.harness, a.effort);
     print_host(ctx, &a.pubkey)?;
     let spent = ctx.store.agent_spend_since(&a.pubkey, axel_store::local_day_start())?;
@@ -309,6 +312,8 @@ fn apply_policy(ctx: &Ctx, me: &str, p: &mut AgentPolicy, args: &PolicyArgs) -> 
         p.reach = match r {
             ReachArg::Nobody => Reach::Nobody,
             ReachArg::Anyone => Reach::Anyone,
+            ReachArg::Team => Reach::Team(Vec::new()),
+            ReachArg::Lead => Reach::Lead(Vec::new()),
         };
     }
     let resolve = |n: &str| -> Result<String> {

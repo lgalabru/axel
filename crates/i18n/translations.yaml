@@ -1736,3 +1736,44 @@
   zh-Hans: "本机"
 "instance {key} on {place}":
   zh-Hans: "实例 {key}，位于 {place}"
+# teams (RFD 0005): team 团队 · member 成员 · lead 负责人 · role 角色
+"agents can't change teams; ask the owner to run this":
+  zh-Hans: "智能体不能修改团队；请让所有者来运行"
+"no team named {name}":
+  zh-Hans: "没有名为 {name} 的团队"
+"no teams yet; create one with `axel team new NAME --member AGENT`":
+  zh-Hans: "还没有团队；用 `axel team new NAME --member AGENT` 创建一个"
+"{n} members":
+  zh-Hans: "{n} 名成员"
+"members":
+  zh-Hans: "成员"
+"lead    {name}":
+  zh-Hans: "负责人  {name}"
+"skills  {list}":
+  zh-Hans: "技能  {list}"
+"members reach each other":
+  zh-Hans: "成员之间可以互相联系"
+"members reach the lead; the lead reaches every member":
+  zh-Hans: "成员只能联系负责人；负责人可以联系每位成员"
+"no team rule":
+  zh-Hans: "没有团队规则"
+"skill source {source}: {error}":
+  zh-Hans: "技能来源 {source}：{error}"
+"the team record was refused: {reason}":
+  zh-Hans: "团队记录被拒绝：{reason}"
+"the clock is before 1970":
+  zh-Hans: "系统时钟早于 1970 年"
+"team {name} left out of the roster: it passes {max} bytes":
+  zh-Hans: "团队 {name} 未写入名单：超过 {max} 字节"
+"team skills: only the first {max} sources are read":
+  zh-Hans: "团队技能：只读取前 {max} 个来源"
+"its teams' members":
+  zh-Hans: "所在团队的成员"
+"as its teams' leads allow":
+  zh-Hans: "按所在团队的负责人规则"
+"team    {team} ({rule}): {who}":
+  zh-Hans: "团队    {team}（{rule}）：{who}"
+"the stricter of its own rule and its teams' wins; agents it names come on top":
+  zh-Hans: "自身规则与团队规则取更严格者；单独列出的智能体另外允许"
+"its own reach sets no rule, so its teams' applies; agents it names come on top":
+  zh-Hans: "自身可联系范围未设规则，因此按团队规则；单独列出的智能体另外允许"

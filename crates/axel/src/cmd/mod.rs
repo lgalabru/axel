@@ -24,6 +24,7 @@ mod setup;
 mod skills;
 mod links;
 mod status;
+mod team;
 mod text;
 mod thread;
 mod ui;
@@ -102,6 +103,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Session { command }) => session::run(command),
         Some(Command::Log { session, follow }) => log::run(&session, follow),
         Some(Command::Agent { command }) => agent::run(command),
+        Some(Command::Team { command }) => team::run(command),
         Some(Command::Skills { command }) => skills::run(command),
         Some(Command::Thread { command }) => thread::run(command),
         Some(Command::Hook { harness, guard_only }) => hook::run(harness, guard_only),

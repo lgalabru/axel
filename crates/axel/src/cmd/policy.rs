@@ -148,26 +148,57 @@ pub fn check_message(ctx: &Ctx, recipients: &[String]) -> Result<()> {
     bail!("{}", axel_mcp::SendError::NoReach { from: name_of(ctx, &from), to: denied })
 }
 
-/// The recipients (pubkeys) `from` may not message: not in its reach, and not
-/// agents that may reach it (whom it may always answer).
+/// The recipients (pubkeys) `from` may not message: not in its reach (its
+/// own and its teams'), and not agents that may reach it (whom it may
+/// always answer).
 pub fn denied_reach(ctx: &Ctx, from: &str, recipients: &[String]) -> Result<Vec<String>> {
-    let reach = ctx.store.agent_policy(from)?.reach;
     let mut denied = Vec::new();
-    for r in recipients.iter().filter(|r| **r != from && !reach.allows(r) && !reach_granted(r)) {
-        if !ctx.store.agent_policy(r)?.reach.allows(from) {
+    for r in recipients.iter().filter(|r| **r != from && !reach_granted(r)) {
+        if !ctx.store.may_reach(from, r)? && !ctx.store.may_reach(r, from)? {
             denied.push(r.clone());
         }
     }
     Ok(denied)
 }
 
-/// One-line description of a reach, with names.
+/// One-line description of an agent's own reach, with names.
 pub fn reach_label(ctx: &Ctx, reach: &Reach) -> String {
+    let names = |pks: &[String]| pks.iter().map(|pk| name_of(ctx, pk)).collect::<Vec<_>>().join(", ");
+    let with_names = |rule: String, pks: &[String]| if pks.is_empty() { rule } else { format!("{rule} + {}", names(pks)) };
     match reach {
         Reach::Nobody => axel_i18n::t!("nobody (only you)").into(),
         Reach::Anyone => axel_i18n::t!("any agent").into(),
-        Reach::Only(pks) => pks.iter().map(|pk| name_of(ctx, pk)).collect::<Vec<_>>().join(", "),
+        Reach::Only(pks) => names(pks),
+        Reach::Team(pks) => with_names(axel_i18n::t!("its teams' members").into(), pks),
+        Reach::Lead(pks) => with_names(axel_i18n::t!("as its teams' leads allow").into(), pks),
     }
+}
+
+/// What an agent's teams add to its own reach, one line per team, and how
+/// the parts combine (RFD 0005: say where each part came from).  Empty when
+/// no team takes part.
+pub fn team_reach_lines(ctx: &Ctx, reach: &axel_store::EffectiveReach) -> Vec<String> {
+    let mut lines = Vec::new();
+    for part in &reach.teams {
+        let who: Vec<String> = part.profiles.iter().map(|p| profile_label(ctx, p)).collect();
+        let who = if who.is_empty() { axel_i18n::t!("nobody (only you)").to_string() } else { who.join(", ") };
+        lines.push(axel_i18n::t!("team    {team} ({rule}): {who}", team = part.team_name, rule = part.reach, who = who).to_string());
+    }
+    if reach.from_teams() {
+        // `nobody` and a bare list set no rule of their own (see `EffectiveReach`).
+        let note = match reach.own {
+            Reach::Nobody | Reach::Only(_) => axel_i18n::t!("its own reach sets no rule, so its teams' applies; agents it names come on top"),
+            Reach::Anyone | Reach::Team(_) | Reach::Lead(_) => axel_i18n::t!("the stricter of its own rule and its teams' wins; agents it names come on top"),
+        };
+        lines.push(format!("        {note}"));
+    }
+    lines
+}
+
+/// A profile's name, or a short id when this replica doesn't know it.
+fn profile_label(ctx: &Ctx, profile_id: &str) -> String {
+    // A failed read shows the id: the line still says who it is.
+    ctx.store.profile(profile_id).ok().flatten().map_or_else(|| profile_id.chars().take(10).collect(), |p| p.name)
 }
 
 #[cfg(test)]

@@ -151,10 +151,8 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     let config = WorkspaceConfig::load(&work_dir).context(t!("reading AXEL.md"))?;
     let profile = build_profile(&agent);
 
-    // 4. Skills (remote ones fetched and pinned in AXEL.lock) and the project context.
-    if let Some(driver) = drivers::for_harness(profile.harness.kind) {
-        install_skills(driver.as_ref(), &work_dir, &profile.skills, config.as_ref(), &paths::global_skills_dir())?;
-    }
+    // 4. Skills (remote ones fetched and pinned in AXEL.lock, then its teams'), the project context and the roster.
+    let roster = prepare_skills(ctx, &agent, &profile, &work_dir, config.as_ref())?;
     if profile.harness.kind == HarnessKind::Claude {
         prepare_claude_state(claude_state, claude_profile.is_some(), &work_dir, runtime_mode)?;
     }
@@ -188,7 +186,7 @@ pub fn launch(ctx: &Ctx, req: LaunchRequest, opts: LaunchOptions) -> Result<Laun
     if let Some(harness_session) = &resume {
         prepend_resume(&mut spec, profile.harness.kind, harness_session);
     }
-    finish_spec(&mut spec, &profile, &agent, &work_dir, runtime_mode)?;
+    finish_spec(&mut spec, &profile, &agent, &work_dir, runtime_mode, &roster)?;
     push_session_env(&mut spec, &thread.id, &session.id, &agent, &profile, runtime_mode);
     if runtime == SessionRuntime::Pane {
         apply_pane_only(&mut spec, &agent, claude_profile.as_ref())?;
@@ -371,20 +369,38 @@ fn prepare_claude_state(state: Option<PathBuf>, has_profile: bool, work_dir: &Pa
 }
 
 /// The runtime mode's flags, the hooks, and (for Claude Code) Axel's skill,
-/// identity and tools.
+/// identity, team roster and tools.
 fn finish_spec(
     spec: &mut cfg_launch::LaunchSpec,
     profile: &AgentProfile,
     agent: &axel_store::Agent,
     work_dir: &Path,
     runtime_mode: RuntimeMode,
+    roster: &str,
 ) -> Result<()> {
     inject_runtime_mode(spec, profile.harness.kind, runtime_mode);
     inject_hooks(spec, profile.harness.kind)?;
     if profile.harness.kind == HarnessKind::Claude {
-        prepend_claude_axel_args(spec, agent, work_dir);
+        prepend_claude_axel_args(spec, agent, work_dir, roster);
     }
     Ok(())
+}
+
+/// Install the agent's skills and its teams' in `work_dir`, and return the
+/// roster of its teams for its system prompt.
+fn prepare_skills(
+    ctx: &Ctx,
+    agent: &axel_store::Agent,
+    profile: &AgentProfile,
+    work_dir: &Path,
+    config: Option<&WorkspaceConfig>,
+) -> Result<String> {
+    let team_sources = super::team::skill_sources(&ctx.store, &agent.profile_id)?;
+    if let Some(driver) = drivers::for_harness(profile.harness.kind) {
+        let levels = SkillLevels { requested: &profile.skills, config, global: &paths::global_skills_dir(), team: &team_sources };
+        install_skills(driver.as_ref(), work_dir, &levels)?;
+    }
+    super::team::roster(&ctx.store, &agent.profile_id)
 }
 
 /// What only a pane session needs: a managed session's host applies the
@@ -413,8 +429,8 @@ fn prepend_resume(spec: &mut cfg_launch::LaunchSpec, kind: HarnessKind, harness_
 
 /// The axel skill and who-you-are, for pane sessions; managed sessions get
 /// the same through the adapter (`session_meta`).  Then Axel's MCP tools.
-fn prepend_claude_axel_args(spec: &mut cfg_launch::LaunchSpec, agent: &axel_store::Agent, work_dir: &Path) {
-    let mut args = vec!["--append-system-prompt".to_string(), system_prompt(agent, work_dir)];
+fn prepend_claude_axel_args(spec: &mut cfg_launch::LaunchSpec, agent: &axel_store::Agent, work_dir: &Path, roster: &str) {
+    let mut args = vec!["--append-system-prompt".to_string(), system_prompt(agent, work_dir, roster)];
     match write_axel_plugin() {
         Ok(dir) => args.extend(["--plugin-dir".to_string(), dir.to_string_lossy().into_owned()]),
         Err(e) => eprintln!("axel: {}", t!("could not write the axel skill plugin: {error}", error = e)),
@@ -689,23 +705,37 @@ fn build_profile(agent: &axel_store::Agent) -> AgentProfile {
     profile
 }
 
-/// Every skill a launch in this project can use: the project's sources (remote ones
-/// resolved to their pinned checkout, fetched and pinned on first use), then the
-/// global directory. A source that can't be used is reported and skipped.
+/// Where a launch's skills come from, in the order RFD 0005 names the
+/// levels: global, project, team, agent.
+pub struct SkillLevels<'a> {
+    /// The agent's skill names (or `*`), picked from the project's and the
+    /// global ones.
+    pub requested: &'a [String],
+    pub config: Option<&'a WorkspaceConfig>,
+    pub global: &'a Path,
+    /// Its teams' skill sources: every skill in them is installed.
+    pub team: &'a [String],
+}
+
+/// The most team skill sources one launch reads: a member of four teams
+/// that each list the most a team may ([`axel_store::TEAM_SKILLS_MAX`]).
+const TEAM_SKILL_SOURCES_MAX: usize = 4 * axel_store::TEAM_SKILLS_MAX;
+
 /// Give the agent its skills in `work_dir` (the project's, remote ones, and
-/// `global`'s, as `requested` names them) and link `AXEL.md` where the
-/// harness reads its context.  The links are this machine's: each goes in
-/// the repository's `.git/info/exclude`, so a `git add -A` never commits it.
+/// the global ones, as `requested` names them, then every skill of its
+/// teams) and link `AXEL.md` where the harness reads its context.  The
+/// links are this machine's: each goes in the repository's
+/// `.git/info/exclude`, so a `git add -A` never commits it.
 /// The skills installed, by name.
-pub fn install_skills(
-    driver: &dyn axel_config::drivers::SkillDriver,
-    work_dir: &Path,
-    requested: &[String],
-    config: Option<&WorkspaceConfig>,
-    global: &Path,
-) -> Result<Vec<String>> {
-    let all = skills_from(config, global)?;
-    let skills = axel_config::resolve_skills(requested, &all);
+pub fn install_skills(driver: &dyn axel_config::drivers::SkillDriver, work_dir: &Path, levels: &SkillLevels<'_>) -> Result<Vec<String>> {
+    let config = levels.config;
+    let all = skills_from(config, levels.global)?;
+    let mut skills = axel_config::resolve_skills(levels.requested, &all);
+    // A team skill wins over a project or global one of its name: the
+    // team is the more specific level.
+    let team = team_skills(levels.team, work_dir)?;
+    skills.retain(|s| !team.contains_key(&s.name));
+    skills.extend(team.into_values());
     driver.install(work_dir, &skills).context(t!("installing skills"))?;
     let dir = driver.skills_dir(work_dir);
     let mut local: Vec<PathBuf> = skills.iter().map(|s| dir.join(&s.name)).collect();
@@ -765,6 +795,38 @@ fn exclude_from_git(dir: &Path, paths: &[PathBuf]) {
     }
 }
 
+/// The skills in a member's team sources (RFD 0005), read as `AXEL.md`'s
+/// `skills:` entries: a relative directory is taken from `work_dir`, and a
+/// remote one is fetched as a project's is but not pinned, since a team has
+/// no `AXEL.lock`.  A source that can't be used is reported and skipped.
+fn team_skills(sources: &[String], work_dir: &Path) -> Result<axel_config::IndexMap<String, axel_config::Skill>> {
+    if sources.is_empty() {
+        return Ok(axel_config::IndexMap::new());
+    }
+    if sources.len() > TEAM_SKILL_SOURCES_MAX {
+        eprintln!("axel: {}", t!("team skills: only the first {max} sources are read", max = TEAM_SKILL_SOURCES_MAX));
+    }
+    let mut parsed = Vec::with_capacity(sources.len().min(TEAM_SKILL_SOURCES_MAX));
+    for text in sources.iter().take(TEAM_SKILL_SOURCES_MAX) {
+        match axel_config::SkillSource::parse(text, Some(work_dir)) {
+            Ok(source) => parsed.push(match source.resolve(Some(work_dir)) {
+                Some(dir) => axel_config::SkillSource::Dir(dir),
+                None => source,
+            }),
+            Err(e) => eprintln!("axel: {}", t!("skills: {warning}", warning = e)),
+        }
+    }
+    assert!(parsed.len() <= TEAM_SKILL_SOURCES_MAX);
+    // No manifest path: nothing is pinned, and no project's lock is touched.
+    let config = WorkspaceConfig { skills: parsed, ..WorkspaceConfig::default() };
+    debug_assert!(config.dir().is_none(), "team sources never write an AXEL.lock");
+    let resolved = axel_config::remote::resolve(&config, &paths::skills_cache_dir());
+    for w in &resolved.warnings {
+        eprintln!("axel: {}", t!("skills: {warning}", warning = w));
+    }
+    Ok(axel_config::find_skills(&resolved.roots, None)?)
+}
+
 pub fn project_skills(config: Option<&WorkspaceConfig>) -> Result<axel_config::IndexMap<String, axel_config::Skill>> {
     skills_from(config, &paths::global_skills_dir())
 }
@@ -801,10 +863,11 @@ fn unlinked_context(harness: &axel_store::Harness, dir: &Path) -> Option<String>
     Some(config.body)
 }
 
-/// [`identity_prompt`], then the owner's standing rules, then `AXEL.md` when
-/// the harness wouldn't otherwise see it.
-pub fn system_prompt(agent: &axel_store::Agent, dir: &Path) -> String {
+/// [`identity_prompt`], then its teams' `roster`, then the owner's standing
+/// rules, then `AXEL.md` when the harness wouldn't otherwise see it.
+pub fn system_prompt(agent: &axel_store::Agent, dir: &Path, roster: &str) -> String {
     let mut s = identity_prompt(agent);
+    s.push_str(roster);
     let global = axel_config::default_global_skills_dir();
     match axel_config::standing_skills(global.as_deref()) {
         Ok(skills) => s.push_str(&standing_rules(&skills)),
@@ -1019,7 +1082,12 @@ fn truncate(s: &str, n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceConfig, drivers, install_skills, normalize_repo_url, standing_rules};
+    use super::{SkillLevels, WorkspaceConfig, drivers, install_skills, normalize_repo_url, standing_rules};
+
+    /// The levels for a launch with `requested` skills and no team.
+    fn levels<'a>(requested: &'a [String], config: Option<&'a WorkspaceConfig>, global: &'a std::path::Path) -> SkillLevels<'a> {
+        SkillLevels { requested, config, global, team: &[] }
+    }
 
     #[test]
     fn standing_skills_are_written_in_full_after_a_heading() {
@@ -1072,7 +1140,7 @@ mod tests {
         let config = WorkspaceConfig::load(repo.path()).unwrap();
         for kind in [axel_config::HarnessKind::Claude, axel_config::HarnessKind::Codex] {
             let driver = drivers::for_harness(kind).unwrap();
-            let names = install_skills(driver.as_ref(), repo.path(), &["*".to_string()], config.as_ref(), global.path()).unwrap();
+            let names = install_skills(driver.as_ref(), repo.path(), &levels(&["*".to_string()], config.as_ref(), global.path())).unwrap();
             assert_eq!(names, vec!["conventional-commits".to_string(), "tone".to_string()], "{kind:?}: `*` is all of them");
             let linked = driver.skills_dir(repo.path()).join("conventional-commits").join("SKILL.md");
             assert!(std::fs::read_to_string(&linked).unwrap().contains("feat:"), "{kind:?}: the skill is where the harness looks");
@@ -1081,12 +1149,43 @@ mod tests {
         assert_eq!(git(&["status", "--porcelain"]).trim(), "?? AXEL.md", "only the project's own file shows");
         // Installing again adds no lines.
         let driver = drivers::for_harness(axel_config::HarnessKind::Claude).unwrap();
-        install_skills(driver.as_ref(), repo.path(), &["*".to_string()], config.as_ref(), global.path()).unwrap();
+        install_skills(driver.as_ref(), repo.path(), &levels(&["*".to_string()], config.as_ref(), global.path())).unwrap();
         let exclude = std::fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
         assert_eq!(exclude.matches("/.claude/skills/conventional-commits").count(), 1, "{exclude}");
         // An agent given named skills gets those.
-        let named = install_skills(driver.as_ref(), repo.path(), &["tone".to_string()], config.as_ref(), global.path()).unwrap();
+        let named = install_skills(driver.as_ref(), repo.path(), &levels(&["tone".to_string()], config.as_ref(), global.path())).unwrap();
         assert_eq!(named, vec!["tone".to_string()]);
+    }
+
+    #[test]
+    fn a_member_gets_every_skill_of_its_teams_over_a_global_one_of_the_same_name() {
+        let global = tempfile::tempdir().unwrap();
+        std::fs::write(global.path().join("review.md"), "The global review.
+").unwrap();
+        std::fs::write(global.path().join("tone.md"), "Be brief.
+").unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let team_dir = work.path().join("skills").join("core");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        std::fs::write(team_dir.join("review.md"), "The team's review.
+").unwrap();
+        std::fs::write(team_dir.join("handoff.md"), "Hand off with a summary.
+").unwrap();
+        let driver = drivers::for_harness(axel_config::HarnessKind::Claude).unwrap();
+        let team = ["./skills/core".to_string(), "not a source://x".to_string()];
+        let requested = ["tone".to_string(), "review".to_string()];
+        let levels = SkillLevels { requested: &requested, config: None, global: global.path(), team: &team };
+
+        let names = install_skills(driver.as_ref(), work.path(), &levels).unwrap();
+        assert_eq!(names, vec!["tone".to_string(), "handoff".to_string(), "review".to_string()], "a bad source is skipped, not fatal");
+        let review = std::fs::read_to_string(driver.skills_dir(work.path()).join("review").join("SKILL.md"))
+            .or_else(|_| std::fs::read_to_string(driver.skills_dir(work.path()).join("review.md")))
+            .unwrap();
+        assert!(review.contains("The team's review."), "the team's wins: {review}");
+
+        // No team (an archived one gives no sources): the agent's own skills only.
+        let alone = install_skills(driver.as_ref(), work.path(), &self::levels(&requested, None, global.path())).unwrap();
+        assert_eq!(alone, vec!["tone".to_string(), "review".to_string()]);
     }
 
     #[test]
