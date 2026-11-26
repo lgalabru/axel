@@ -222,18 +222,21 @@ $ axel                               # in any Rex terminal
 
 ## Web panes (RFD 0007)
 
-A thread view can be a web page in its Rex pane instead of terminal text:
-`axel web pane THREAD` serves the thread on `127.0.0.1` from that process and
-runs `terminal-browser open --no-merge URL` in the same pane. The page draws
-`axel_tui::load_thread_data` and sends through `axel_tui::thread::dispatch`,
-as the terminal view does, so both route a message the same way. A secret
-cookie, a `Host` check and same-origin JSON writes keep other pages out.
+Experimental, and off until `axel panes web` turns it on: a thread view can
+then be a web page in its Rex pane instead of terminal text, wherever
+Ladybird is installed. `axel web pane THREAD` serves the thread on
+`127.0.0.1` from that process and runs `Ladybird --headless=terminal
+--temporary-profile URL` in the same pane, which draws the page as Kitty
+graphics. The page draws `axel_tui::load_thread_data` and sends through
+`axel_tui::thread::dispatch`, as the terminal view does, so both route a
+message the same way. A secret cookie, a `Host` check and same-origin JSON
+writes keep other pages out.
 
-`axel panes auto|web|terminal` chooses (`$AXEL_PANES` overrides it). `auto`,
-the default, means web where `terminal-browser` is installed and we're in
-Rex. Without it, or when it can't draw, the pane falls back to the terminal
-view and says why. The launcher, dashboard, inbox and question popups stay
-terminal panes for now.
+`axel panes web|terminal` chooses (`$AXEL_PANES` overrides it; the default is
+`terminal`). Ladybird is found at `$AXEL_LADYBIRD`, else on PATH, else as
+`Ladybird.app` in `/Applications` or `~/Applications`. Without it, or when it
+can't draw, the pane falls back to the terminal view and says why. The
+launcher, dashboard, inbox and question popups stay terminal panes for now.
 
 ## Coming back after Rex restarts (OSC 7577)
 

@@ -268,3 +268,38 @@ as a throwaway server (`--state-dir` in `/tmp`, `--config /dev/null`):
 - Program resume needs a trust rule (`rex.set("resume.trust.NAME", { command
   = {...} })`). Rex ships rules for `claude`, `codex` and `opencode`, and
   checks that the reporting process is the program the command starts.
+
+## Ladybird (2026.47.7, 2026-11-26)
+
+An independent browser engine (LibWeb, LibJS), BSD-2-Clause, alpha since
+2026-11-23 on macOS and Linux. Read: its news and newsletters, the
+repository's `Cargo.toml` and `Libraries/LibWebView/TerminalWebView.{h,cpp}`.
+Run: the copy in `/Applications`.
+
+- **Rust.** Since February 2026 parts of it are moving to Rust: LibJS first,
+  then style and layout, the HTML parser, Wasm and more. The root
+  `Cargo.toml` lists about 35 workspace crates (`libjs_rust`, `libweb_rust`,
+  `libgfx_rust`, `libipc_rust`…). They are path dependencies of each other
+  and of the C++ build; none is published.
+- **Process model.** A UI process, a WebContent process per page and helpers:
+  RequestServer, ImageDecoder, Compositor, AudioServer, VideoDecoderServer.
+  The macOS app is 217 MB.
+- **Headless modes.** `--headless[=screenshot|layout-tree|text|manual|terminal]`.
+  - `screenshot` takes `--screenshot-path`, `--screenshot-delay`,
+    `--window-width` and `--window-height`.
+  - `terminal` takes over the terminal; its processes log to
+    `/tmp/ladybird-terminal-PID.log`. It draws frames as Kitty graphics
+    (`a=T`, then `a=f` for damaged regions), through temporary files with an
+    inline fallback. It reads SGR-pixel mouse, the Kitty keyboard protocol,
+    focus and bracketed paste, and follows `SIGWINCH`. The last row is its
+    status line.
+- **Embedding.** Only through its own C++ classes (`HeadlessWebView`,
+  `TerminalWebView`), with no stable API. Public pull requests stopped on
+  2026-06-05; only maintainers open them now.
+- **Measured here.** It renders Axel's thread page the same as Chrome,
+  JavaScript, cookies and the event stream included. Terminal mode
+  through `axel web pane` uses about 285 MB in eight processes, idle, and
+  exits with every helper when the pane hangs up.
+- **What we take.** Its terminal mode, run as a program, as the web pane
+  renderer (RFD 0007).
+- **What we don't.** Linking it, its internal crates, and forking it.
