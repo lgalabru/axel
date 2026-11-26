@@ -107,7 +107,14 @@ pub enum Command {
         json: bool,
     },
     /// Get this machine ready and create an agent (runs by itself the first time).
-    Setup,
+    Setup {
+        /// Choose everything: harness, skills, colour, mode, and more agents.
+        #[arg(long)]
+        custom: bool,
+        /// Ask nothing: the defaults and the first free name (for scripts).
+        #[arg(long, conflicts_with = "custom")]
+        yes: bool,
+    },
     /// The built-in Claude Code ACP agent (what managed Claude sessions run).
     #[command(name = "claude-acp", hide = true)]
     ClaudeAcp,

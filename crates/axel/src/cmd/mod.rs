@@ -86,7 +86,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         None => {
             // The first time, with no agent yet: walk through setup, then open.
             if setup::interactive() && Ctx::open().map(|c| setup::needed(&c)).unwrap_or(false) {
-                return match setup::run()? {
+                return match setup::run(setup::SetupMode::Quick)? {
                     setup::Next::Open => ui::open_launcher(),
                     setup::Next::Quit => Ok(()),
                 };
@@ -95,7 +95,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         }
         Some(Command::ClaudeAcp) => axel_acp::claude::serve_stdio(),
         Some(Command::CodexAcp) => axel_acp::codex::serve_stdio(),
-        Some(Command::Setup) => match setup::run()? {
+        Some(Command::Setup { custom, yes }) => match setup::run(match (custom, yes) {
+            (true, _) => setup::SetupMode::Custom,
+            (_, true) => setup::SetupMode::Unattended,
+            _ => setup::SetupMode::Quick,
+        })? {
             setup::Next::Open => ui::open_launcher(),
             setup::Next::Quit => Ok(()),
         },

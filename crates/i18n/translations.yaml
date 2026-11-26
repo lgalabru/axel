@@ -1250,16 +1250,10 @@
 "its session had stopped, and resuming it failed: {error}":
   zh-Hans: "它的会话已停止，恢复失败：{error}"
 # cmd/setup.rs (the first-run walkthrough)
-"axel setup asks questions; run it in a terminal":
-  zh-Hans: "axel setup 需要回答问题，请在终端中运行"
 "agent orchestration, designed for Rex":
   zh-Hans: "为 Rex 设计的智能体编排工具"
-"Let's check this machine and create an agent.":
-  zh-Hans: "我们来检查一下这台机器，并创建一个智能体。"
 "Your first agent":
   zh-Hans: "你的第一个智能体"
-"An agent is a name you can @mention, its own key, and how to run it.":
-  zh-Hans: "智能体由三部分组成：一个可以 @提及 的名字、它自己的密钥，以及运行它的方式。"
 "A new agent":
   zh-Hans: "新的智能体"
 "Open Axel and give @{name} something to do":
@@ -1268,8 +1262,6 @@
   zh-Hans: "再创建一个智能体"
 "What next?":
   zh-Hans: "接下来做什么？"
-"Another agent":
-  zh-Hans: "另一个智能体"
 "A builder and a reviewer on another model make a good pair.":
   zh-Hans: "一个负责构建、一个用另一个模型负责评审，是不错的搭配。"
 "This machine":
@@ -1286,14 +1278,10 @@
   zh-Hans: "在窗格中运行（没有 ACP 适配器）"
 "Axel runs your agents' own CLIs, and none is installed.":
   zh-Hans: "Axel 运行的是各智能体自己的 CLI，但一个都没有安装。"
-"Install one of them, log in once, then run `axel` again:":
-  zh-Hans: "请安装其中一个，登录一次，然后再次运行 `axel`："
 "{harness} has to be logged in once: {how}.":
   zh-Hans: "{harness} 需要先登录一次：{how}。"
 "creating the agent":
   zh-Hans: "创建智能体"
-"key {key}… · attested by you":
-  zh-Hans: "密钥 {key}… · 由你签发证明"
 "letters, digits, - and _ only, so it works as @name":
   zh-Hans: "只能使用字母、数字、- 和 _，以便用作 @名称"
 "there's already an agent named {name}":
@@ -1308,8 +1296,6 @@
   zh-Hans: "每个操作前都询问"
 "read-only: looks and proposes":
   zh-Hans: "只读：只查看并提出方案"
-"Skip Claude Code's one-time autopilot prompt?":
-  zh-Hans: "跳过 Claude Code 一次性的自动模式确认？"
 "autopilot accepted in {path}":
   zh-Hans: "已在 {path} 中接受自动模式"
 "couldn't update its settings: {error}":
@@ -1779,3 +1765,43 @@
   zh-Hans: "{name} 是其他所有者的智能体：它不能作为你的智能体运行"
 "{host} answered with another key than the one it said it has":
   zh-Hans: "{host} 用了与它声明的不同的密钥作答"
+
+# --- setup (quick path) ---
+"Also supported: {names}.":
+  zh-Hans: "也支持：{names}。"
+"An agent is a name you can @mention and how to run it.":
+  zh-Hans: "智能体是一个可以 @ 提及的名字，加上它的运行方式。"
+"Change it: axel agent edit {name}  ·  more agents: axel setup [--custom]":
+  zh-Hans: "修改：axel agent edit {name}  ·  更多智能体：axel setup [--custom]"
+"Claude Code asks once before it runs on autopilot. Answer yes for it now?":
+  zh-Hans: "Claude Code 在以自动模式运行前会询问一次。现在就替它回答“是”吗？"
+"Claude Code will ask once before it runs on autopilot.":
+  zh-Hans: "Claude Code 在以自动模式运行前会询问一次。"
+"Give it something to do:":
+  zh-Hans: "给它一件事做："
+"Install one, log in once, then run `axel` again:":
+  zh-Hans: "安装其中一个，登录一次，然后再次运行 `axel`："
+"Name your agent":
+  zh-Hans: "给你的智能体起个名字"
+"Not in Rex: Axel runs inline here (superlogical.com/rex).":
+  zh-Hans: "不在 Rex 中：Axel 在这里以内联方式运行（superlogical.com/rex）。"
+"You have {names}. Here's another.":
+  zh-Hans: "你已有 {names}。再来一个。"
+"agents' questions will show in a pane: {error}":
+  zh-Hans: "智能体的问题将显示在窗格中：{error}"
+"also here: {names}":
+  zh-Hans: "本机还有：{names}"
+"autopilot":
+  zh-Hans: "自动模式"
+"axel setup asks a question; run it in a terminal, or use `axel setup --yes` to take the defaults":
+  zh-Hans: "axel setup 需要回答一个问题；请在终端中运行，或使用 `axel setup --yes` 采用默认设置"
+"log in once first: {how}":
+  zh-Hans: "请先登录一次：{how}"
+"log in once if you haven't: {how}":
+  zh-Hans: "如果还没有登录，请登录一次：{how}"
+"not found: agents need it to work in their own branches":
+  zh-Hans: "未找到：智能体需要它在各自的分支上工作"
+"ready":
+  zh-Hans: "就绪"
+"{name} is ready":
+  zh-Hans: "{name} 已就绪"
