@@ -1,6 +1,6 @@
 # RFD 0004: Linked devices: one owner, many machines, one log
 
-State: idea
+State: discussion
 Authors: Ludo  ·  Started: 2026-11-25
 
 ## Problem
@@ -22,6 +22,14 @@ from a Mac and a Linux box, both inside Rex:
   A lost machine's keys stay valid forever.
 - **Losing a machine loses its agents.** Agent keys are random seeds in the keychain or
   `~/.axel/secrets.json`, with no recovery path.
+- **One agent row mixes two things.** `agents` holds what the agent *is* (name,
+  harness, model, skills, prompt) and what one machine *holds* (a key, a keychain
+  entry, a default host). The first should be the same on every machine. The second
+  can't be, since keys never leave home. Today a `reviewer` on the Mac and a `reviewer`
+  on the Linux box are two unrelated agents that happen to share a name.
+- **Pairing assumes Tailscale.** Rex over SSH, which Rex's remote access docs
+  recommend, reports `server.whoami` as `kind: peer` with a Unix account and no node.
+  NetBird and other VPNs are anonymous listeners to Rex. Issue #40 runs this way.
 
 Out of scope: scheduled work (#40 section 3, a docs page) and several humans on one
 thread, which participants already handle.
@@ -31,38 +39,84 @@ thread, which participants already handle.
 ### Three levels of key
 
 ```
-owner O ──attests──▶ device D1 (this Mac)   ──attests──▶ agents of D1
-        └─attests──▶ device D2 (Linux box)  ──attests──▶ agents of D2
+owner O ──attests──▶ device D1 (this Mac)   ──attests──▶ instances on D1
+        └─attests──▶ device D2 (Linux box)  ──attests──▶ instances on D2
+
+profile "reviewer" (signed for O) ◀──instance of── reviewer@mac, reviewer@linux
 ```
 
 - **Owner key O.** It's who you are. It's a thread participant, and it signs device
   links and revocations, nothing else day to day. It can live on one machine, or
-  offline after phase 6.
+  offline after phase 8.
 - **Device key D.** Each machine has one, generated locally and never copied. O attests
   it once when the machine is linked. Everything a human does on that machine is signed
   by D, and authorization resolves D to O. It works like today's job delegation
   (`axel:delegate:v1`), but with no thread or time bound, ending only when O revokes it.
-- **Agent key A.** The device attests it, not O. New agents may derive their key:
-  `A = HKDF-SHA512(ikm = D_seed, info = "axel:agent:v1:" || agent_id)`. `agent_id` is a
-  ULID, not the name, so renaming never re-keys. Ed25519 only allows hardened
-  derivation, so only the holder of `D_seed` can derive. That is the point: one backed-up
-  seed per machine restores its agents.
+- **Instance key A.** One per agent instance (below). The device attests it, not O.
+  New instances may derive their key:
+  `A = HKDF-SHA512(ikm = D_seed, info = "axel:agent:v1:" || instance_id)`.
+  `instance_id` is a ULID, not the name, so renaming never re-keys. Ed25519 only allows
+  hardened derivation, so only the holder of `D_seed` can derive. That is the point: one
+  backed-up seed per machine restores its instances.
+
+### Agents: a profile, and an instance per machine
+
+An agent is two things, and we model them apart.
+
+- **Agent profile.** What the agent is: `profile_id` (a ULID), name, harness, model,
+  effort, skills, prompt, colour, runtime mode, and its default policy (reach, allow,
+  budget). It belongs to the owner, not to a machine. It has no key. It is the same on
+  every device of O, and `reviewer` names it. Names are unique per owner.
+- **Agent instance.** That profile on one device: `instance_id`, the profile it
+  instantiates, the device, an Ed25519 key attested by that device, and what only that
+  machine knows: the keychain entry, installed skills, harness login, worktrees. It is
+  the principal. It signs, it has the inbox, its sessions and history hang off its
+  pubkey. `reviewer@linux` names it.
+
+Why the instance and not the profile is the principal: keys never leave the machine that
+made them (ADR 0004), and what an agent can do depends on the machine (its credentials,
+its checkouts, its harness version). Two instances of one profile are two signers. The
+log says which one did the work, and the profile says they are the same agent.
+
+How the two meet in practice:
+
+- **Creating.** `axel agent new reviewer` signs a profile and creates its instance on
+  this device. Another device creates its own instance the first time the profile runs
+  there: it makes a key, attests it, and announces it (kind 121). Nobody copies a key.
+- **Editing.** `axel agent edit reviewer --model …` changes the profile, so every
+  instance picks it up on its next session. What is truly per machine (default host
+  today, a narrower local policy) stays on the instance.
+- **Addressing.** `@reviewer` names the profile. It resolves to an instance in this
+  order: the instance already on the thread, else the profile's default device, else
+  the instance on this device, else the profile's only instance. `@reviewer@linux`
+  picks one. The dashboard shows one row per profile and its instances under it.
+- **Today's agents.** Each existing agent becomes a profile plus one instance on its
+  home device, with the same pubkey and attestation. Nothing is re-signed.
+- **Hosts of another owner** keep job keys and delegations as today. A host that is one
+  of O's devices doesn't need them: `@atlas@mini` runs atlas's instance on `mini`,
+  which signs as itself.
 
 ### Wire
 
 - `kind 120 owner.device`: signed by O, content `{op: link|revoke, device, label}`, a tag
   `["d", device_pubkey]`. It isn't thread-scoped and travels to every device of O.
-- Agents attested by a device carry a chain: `["auth", D, conditions, sig]` plus
-  `["dev", O, D, sig]`. A replica that has the kind-120 link may accept the short form.
-- `kind 121 agent.announce`: signed by the agent's device, content
-  `{agent, name, harness, device}`. It lets other devices list and `@mention` agents
-  they don't hold. A name is shown as `reviewer@linux` only when it clashes.
+- `kind 122 agent.profile`: signed by any device of O, content `{profile_id, name,
+  harness, model, effort, skills, prompt, color, runtime_mode, policy}`, a tag
+  `["d", profile_id]`. Like kind 120 it isn't thread-scoped and travels to every device
+  of O. The latest `created_at` per `profile_id` wins, ties broken by event id, so every
+  replica settles on the same profile.
+- Instances carry a chain: `["auth", D, conditions, sig]` plus `["dev", O, D, sig]`.
+  A replica that has the kind-120 link may accept the short form.
+- `kind 121 agent.announce`: signed by the instance's device, content
+  `{instance, profile_id, device}`. It lets other devices list and `@mention` instances
+  they don't hold.
 
 ### Authorization
 
 `authorize` (`crates/store/src/log.rs:425`) keeps its order: the signer is a
 participant, or the signer's attested owner is. `attested_owner` walks one more link:
-agent → device → owner, and device → owner for human envelopes. A revoked device
+instance → device → owner, and device → owner for human envelopes. The profile plays
+no part in authorization. It is a label for instances, never a signer. A revoked device
 authorizes nothing created after the revocation. Envelopes that fail are stored with
 `rejected_reason` as today, so a later link revives them.
 
@@ -78,14 +132,36 @@ never to say what is true.
 | Need | What Rex gives (checked 2026-11-25 against API revision 19) |
 |---|---|
 | Who my machines are | `hosts.list`: each host with a label and endpoints. `server.status` gives each server a stable `host_id`, which `environments.rex_host_id` already records. |
-| Who is calling | A call through a host is authenticated by Rex's built-in Tailscale. `rex -S mini api call server.whoami` reports `kind: tailscale`, the login and the calling node. With `allow_tailnet_members: false`, only the owner's account gets in. |
+| Who is calling | Depends on the route, see "Pairing over a trusted route" below. With Rex's built-in Tailscale, `rex -S mini api call server.whoami` reports `kind: tailscale`, the login and the calling node. Over SSH it reports `kind: peer` and the Unix account. |
 | A process that outlives the laptop | `axel sync serve` runs in a Rex block on each host. Rex keeps it running with no client attached, so we need no launchd or systemd unit. |
 | A byte channel | `rex forward`: TCP to the host's `localhost`, over Rex. `rex -S HOST run --wait` only returns an exit status, so it can't carry data. |
 | A push instead of a poll | `rex -S HOST events -s SESSION --json` streams a session's events, including custom events from its blocks. The serve block can raise a program status when its `seq` moves, and a follower pulls on that event. |
-| Pairing without codes | `axel device link HOST` runs on a machine holding O. It starts `axel device init` on the new machine with `rex -S HOST run --wait`, then reads its public key over a forwarded port, then signs the link. Your Rex host list is the proof that the machine is yours. |
+| Pairing without codes | `axel device link HOST` runs on a machine holding O. It starts `axel device init` on the new machine with `rex -S HOST run --wait`, then reads its public key over a forwarded port, then signs the link. |
 
 The device link records the Rex `host_id` next to the device key, so `reviewer@linux`
 and the Rex host `linux` are the same name.
+
+### Pairing over a trusted route
+
+Linking needs the network for two things only: to reach the new machine and know it is
+the one we meant, once, and to deliver envelopes afterwards. Device keys do the rest,
+so delivery can run over anything. Only pairing needs trust, and what it needs is a
+**route that authenticates the far end**, not Tailscale in particular. Issue #40 put it
+that way.
+
+The route is a closed set, recorded on the link (`route` in the kind-120 content):
+
+| Route | What proves the far end | What proves the caller |
+|---|---|---|
+| `rex_tailscale` | Tailscale node key, checked by Rex | `server.whoami`: the owner's login, with `allow_tailnet_members: false` |
+| `ssh` | The SSH host key, checked by `ssh` against `known_hosts` | Logging in as the owner's Unix account. `axel host add` already rides this |
+| `wireguard` (NetBird, plain WireGuard) | The peer's address is bound to its public key | Nothing on its own: Rex sees an anonymous listener, so this route also needs `confirm` |
+| `confirm` | Both screens show a short code derived from the two device keys; the owner checks they match | The owner, by typing yes on both |
+
+`axel device link HOST` picks the strongest route it has, says which, and refuses a route
+that proves nothing about the far end. `confirm` is the fallback for every case, so no
+setup is locked out while Rex's planned authentication, which will accept SSH keys,
+isn't there yet.
 
 The local-only tables stay local: keys, `environments`, Rex pane ids, read frontiers.
 Conversation items keep flowing one way, from the device running the session.
@@ -123,35 +199,48 @@ back.
   and revive them when they upgrade, so phase 1 must reach every peer first.
 - Rollback: sign with O again. D's envelopes stay valid.
 
-**Phase 3: new agents attested by D.**
+**Phase 3: profiles and instances.**
+- Migration v14 splits `agents`. A new `agent_profiles (profile_id, name UNIQUE,
+  harness, model, effort, skills_json, prompt, color, runtime_mode, policy_json,
+  event_id)` takes what the agent is. `agents` keeps the pubkey, gains `profile_id`
+  and `device`, and loses `name UNIQUE`, since two instances share a name.
+- Each existing agent becomes a profile plus its one instance, with the same pubkey.
+  The migration signs a kind-122 envelope per profile.
+- `agent_policies` and `agent_hosts` stay keyed by pubkey, as per-instance overrides of
+  the profile's defaults.
+- Rollback: the old columns are kept until phase 6 has shipped.
+
+**Phase 4: new instances attested by D.**
 - `axel agent new` attests with D, and may derive A as above.
-- Existing agents keep their key and their O attestation. Re-keying would orphan their
-  history, inbox and policy, which all hang off the pubkey.
+- Existing instances keep their key and their O attestation. Re-keying would orphan
+  their history, inbox and policy, which all hang off the pubkey.
 - `axel agent rekey` is not part of this plan.
 
-**Phase 4: link a second machine.**
+**Phase 5: link a second machine.**
 - On a machine holding O, `axel device link HOST` drives the whole flow through Rex,
-  as described under "Sync, carried by Rex". The new machine makes D2 itself, and O
-  signs the kind-120 link. No pairing code is needed: the Rex host list is the trust
-  root.
+  as described under "Sync, carried by Rex", over the strongest trusted route it has.
+  The new machine makes D2 itself, and O signs the kind-120 link.
 - The new machine never holds O.
 - `axel device revoke NAME` signs the revocation.
 
-**Phase 5: owner-wide sync over Rex.**
-- Sync every thread between devices.
-- Add kind-121 agent announcements and a `known_agents` table, so the dashboard lists
-  threads and agents from every device.
-- A device's own agents stay in `agents`, where names remain unique.
+**Phase 6: owner-wide sync over Rex.**
+- Sync every thread and every profile between devices.
+- Add kind-121 announcements, so the dashboard lists threads and every profile with
+  its instances on every device.
+- An instance is created on a device the first time its profile runs there.
 
-**Phase 6: merging two existing homes (the #40 case).**
+**Phase 7: merging two existing homes (the #40 case).**
 - Pick one owner, O1. O1 signs a kind-120 link that adopts the other home's owner key
-  O2 as a device. O2 already attests that home's agents, so the chain O1 → O2 → agents
-  works with no re-signing.
+  O2 as a device. O2 already attests that home's agents, so the chain O1 → O2 →
+  instances works with no re-signing.
 - O2 stays an owner participant of its own threads.
 - O1 is added as owner to each of them with a `thread.participant` envelope signed by
   O2, so they show as O1's threads.
+- Profiles meet. Two `reviewer` profiles with the same harness, model and prompt merge
+  into one profile with two instances. Two that differ are a real choice:
+  `axel device merge` lists them and the owner keeps one or renames the other.
 
-**Phase 7: optional, cold owner.**
+**Phase 8: optional, cold owner.**
 - O moves out of the daily keystore into a recovery file or a hardware key, needed only
   to link or revoke devices.
 - A lost laptop then costs one device and its agents, not the identity.
@@ -171,11 +260,21 @@ back.
   after a restart. A sync block would give pushes and survive restarts, with no
   terminal in between. That waits on Rex publishing the block plugin protocol. Until
   then, `axel sync serve` runs in a terminal block.
-- **Derived or random keys for new agents?** Derivation needs a stable per-device seed
-  and a recovery story. It's worth it only if phase 7 happens. Decide after phase 4.
+- **Derived or random keys for new instances?** Derivation needs a stable per-device seed
+  and a recovery story. It's worth it only if phase 8 happens. Decide after phase 5.
 - **How does `axel session move` fit?** It moves Claude sessions between home and hosts.
   Between two devices of one owner it might become an ordinary handoff. Revisit in
-  phase 5.
+  phase 6.
+- **Is the inbox per instance or per profile?** A message to `@reviewer` lands in one
+  instance's inbox once resolved. A message left while no instance is reachable has
+  nowhere to go yet. Option: queue it on the profile, and the first instance to run
+  takes it. Find out by listing which `send` cases resolve to no live instance today.
+- **What may an instance override?** Model and prompt must stay the profile's, or two
+  instances stop being the same agent. A narrower reach, budget or default host on one
+  machine seems fine. Decide while writing phase 3, from what `agent edit` sets today.
+- **Is the name per owner or per thread?** Unique per owner is simple. Threads shared
+  with another owner can still hold two `reviewer`s, which `@reviewer@<owner>` would
+  disambiguate. Check how often that happens once hosts of other owners exist.
 
 ## Risks
 
@@ -187,7 +286,10 @@ back.
   but the gap is visible.
 - **Full sync is more data.** One busy database reached 300 MB. Initial sync of a new
   device has to be resumable and paged, which the `seq` cursors already allow.
-- **Two keystores to keep safe** during phases 1 to 6, until O goes cold.
+- **Profiles drift while offline.** Two devices edit one profile apart, and last write
+  wins. Losing an edit to a prompt is a surprise. Mitigation: show the overwritten
+  version in `axel agent show --history`, since the log keeps it anyway.
+- **Two keystores to keep safe** during phases 1 to 7, until O goes cold.
 
 ## What we learned
 
@@ -202,3 +304,11 @@ back.
   - It writes rows without going through `Store::append`'s verification.
   - Its engine is beta.
   The signed log already does the hard part. See the conversation behind issue #40.
+- 2026-11-25: An agent is a profile with one instance per machine. The profile is the
+  owner's and syncs. The instance holds the key and signs. This came from the owner
+  after reading #40: two homes that each run a `reviewer` run the same agent twice, not
+  two agents. It also removes the name clash without renaming anyone.
+- 2026-11-25: Pairing needs a route that authenticates the far end, not Tailscale.
+  Issue #40 runs Rex over SSH on NetBird, where `server.whoami` says `kind: peer`. The
+  SSH host key and NetBird's key-bound addresses both identify the machine, and a
+  short code compared on both screens covers every other case.
