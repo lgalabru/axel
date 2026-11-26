@@ -142,6 +142,12 @@ pub enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
+    /// Your other machines: link one so it acts for you, list, revoke.
+    #[command(visible_alias = "devices")]
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
     /// Exchange threads, transcripts and job branches with remote hosts.
     Sync {
         /// Host label; all hosts when omitted.
@@ -150,6 +156,43 @@ pub enum Command {
         #[arg(long)]
         follow: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DeviceCommand {
+    /// Make another machine one of yours: install Axel there over SSH, check
+    /// it is the machine you meant, sign the link, and sync everything.
+    Link {
+        /// Name for the machine (also its host label).
+        label: String,
+        /// SSH destination; defaults to the label.
+        #[arg(long)]
+        ssh: Option<String>,
+        /// How to prove the far end is that machine: `ssh` (its host key in
+        /// known_hosts), `confirm` or `wireguard` (compare a code).
+        #[arg(long, default_value = "ssh", value_parser = parse_route)]
+        route: axel_store::PairingRoute,
+        /// The code `axel device code` printed on the other machine.
+        #[arg(long)]
+        code: Option<String>,
+        /// Install what's missing there (Node, Claude Code) with Homebrew and npm.
+        #[arg(long)]
+        install: bool,
+    },
+    /// List the machines this one knows.
+    #[command(alias = "list")]
+    Ls,
+    /// Withdraw a machine: nothing it signs from now on speaks for you.
+    Revoke { label: String },
+    /// Print the code to compare when OWNER links this machine.
+    Code { owner: String },
+}
+
+fn parse_route(text: &str) -> Result<axel_store::PairingRoute, String> {
+    text.replace('-', "_").parse().map_err(|_| {
+        let names: Vec<&str> = axel_store::PairingRoute::ALL.iter().map(|r| r.as_str()).collect();
+        format!("one of {}", names.join(", "))
+    })
 }
 
 #[derive(Subcommand, Debug)]

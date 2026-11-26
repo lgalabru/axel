@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use axel_i18n::t;
 use axel_acp::socket;
 use axel_inbox::Envelope;
-use axel_store::{Environment, ItemChange, SessionState, SyncStream};
+use axel_store::{OwnerRecords, Environment, ItemChange, SessionState, SyncStream};
 use serde::{Deserialize, Serialize};
 
 use super::{Ctx, launch};
@@ -80,7 +80,7 @@ fn ssh_opts() -> Vec<String> {
 
 /// `ssh` as a single string, for `GIT_SSH_COMMAND`.
 fn ssh_command_line() -> String {
-    let mut s = String::from("ssh");
+    let mut s = ssh_program();
     for o in ssh_opts() {
         s.push(' ');
         s.push_str(&shell_quote(&o));
@@ -96,9 +96,16 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// The ssh program: `ssh`, or `$AXEL_SSH` when set.  The override lets the
+/// tests stand a local directory in for another machine, and lets a user
+/// put a wrapper of their own in front of ssh.
+fn ssh_program() -> String {
+    std::env::var("AXEL_SSH").ok().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| "ssh".into())
+}
+
 /// Run `remote_cmd` (a shell command line) on `target`, feeding `stdin`.
 fn ssh(target: &str, remote_cmd: &str, stdin: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new("ssh")
+    let mut child = Command::new(ssh_program())
         .args(ssh_opts())
         .arg(target)
         .arg(remote_cmd)
@@ -163,7 +170,14 @@ fn remote_axel(args: &str) -> String {
 pub enum Request {
     Hello,
     PushEvents { events: Vec<Envelope> },
-    PullEvents { cursor: i64 },
+    PullEvents {
+        cursor: i64,
+        /// The owner the caller speaks for.  When it is this machine's owner
+        /// too, the reply carries every owner record (profiles, instances);
+        /// otherwise only device links.  Absent from older builds.
+        #[serde(default)]
+        owner: Option<String>,
+    },
     PullItems { cursor: i64 },
     PrepareRepo { repo: String },
     /// Make a key for a job (the agent delegates to it).
@@ -321,6 +335,11 @@ pub struct Job {
     /// The agents it may reach, so `@name` resolves on the host.
     #[serde(default)]
     pub peers: Vec<JobAgent>,
+    /// The host is another device of the agent's owner: it runs its own
+    /// instance of the agent's profile, signing as itself, and `job_key`
+    /// and `delegation` are empty (RFD 0004).
+    #[serde(default)]
+    pub instance: bool,
 }
 
 /// A job branch on the host, and a snapshot of its uncommitted work.
@@ -376,7 +395,7 @@ fn handle(req: Request) -> Result<Response> {
             }
             Response::Pushed { applied }
         }
-        Request::PullEvents { cursor } => Response::Events { events: ctx.store.thread_events_since(cursor, None, BATCH)? },
+        Request::PullEvents { cursor, owner } => pull_events(&ctx, cursor, owner.as_deref())?,
         Request::PullItems { cursor } => {
             let env = ctx.store.local_environment()?;
             Response::Items { changes: ctx.store.item_changes_since(&env.id, cursor, BATCH)? }
@@ -425,6 +444,19 @@ fn handle(req: Request) -> Result<Response> {
 }
 
 /// Who this host is, and what it lacks to run agents.
+/// Every thread's envelopes after `cursor`, and the owner records the
+/// caller may have.  What this machine changed is signed first, so it goes.
+fn pull_events(ctx: &Ctx, cursor: i64, caller_owner: Option<&str>) -> Result<Response> {
+    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
+    let records = if caller_owner == Some(me.as_str()) {
+        super::device::publish(ctx)?;
+        OwnerRecords::All
+    } else {
+        OwnerRecords::Links
+    };
+    Ok(Response::Events { events: ctx.store.thread_events_since(cursor, None, records, BATCH)? })
+}
+
 fn hello(ctx: &Ctx) -> Result<Response> {
     let env = ctx.store.local_environment()?;
     // The Claude adapter is built into axel; node only matters to install Claude Code.
@@ -610,9 +642,17 @@ const SYNC_BATCHES_MAX: usize = 2000;
 pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncReport> {
     let mut report = SyncReport::default();
     let shared = ctx.store.shared_threads(&host.id)?;
+    // Another device of ours gets every thread and every owner record; a
+    // host of another owner only the threads we share and our device links.
+    let linked = super::device::is_linked(ctx, host)?;
+    if linked {
+        super::device::publish(ctx)?;
+    }
+    let (threads, records) = if linked { (None, OwnerRecords::All) } else { (Some(shared.as_slice()), OwnerRecords::Links) };
+    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::EventsOut)?;
     for _ in 0..SYNC_BATCHES_MAX {
-        let batch = ctx.store.thread_events_since(cursor, Some(&shared), BATCH)?;
+        let batch = ctx.store.thread_events_since(cursor, threads, records, BATCH)?;
         let Some((last, _)) = batch.last() else { break };
         let last = *last;
         let n = batch.len();
@@ -627,7 +667,7 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
     let mut cursor = ctx.store.peer_cursor(&host.id, SyncStream::EventsIn)?;
     let mut notes = Vec::new();
     for _ in 0..SYNC_BATCHES_MAX {
-        let Response::Events { events } = call(host, &Request::PullEvents { cursor })? else { bail!("{}", t!("unexpected reply")) };
+        let Response::Events { events } = call(host, &Request::PullEvents { cursor, owner: Some(me.clone()) })? else { bail!("{}", t!("unexpected reply")) };
         let n = events.len();
         for (seq, e) in &events {
             let r = ctx.store.append(e)?;
@@ -871,6 +911,12 @@ pub fn placement(ctx: &Ctx, agent: &str, asked: Option<&str>) -> Result<Placemen
         let host = ctx.store.host(h)?.with_context(|| t!("no host named {quoted}; add it with `axel host add {label}`", quoted = format!("{h:?}"), label = h))?;
         return Ok(Placement::Host(host));
     }
+    // A profile whose only instance runs on another device of ours runs there.
+    if let Some(device) = ctx.store.agent_by_pubkey(agent)?.and_then(|a| a.device)
+        && let Some(host) = ctx.store.hosts()?.into_iter().find(|h| h.host_pubkey.as_deref() == Some(device.as_str()))
+    {
+        return Ok(Placement::Host(host));
+    }
     // Delegated work runs where it was sent; only the agent's home re-routes.
     let home = agent.parse().ok().and_then(|k| ctx.keystore.agent(&k).ok().flatten()).is_some();
     Ok(match ctx.store.agent_host(agent)? {
@@ -904,33 +950,28 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
     let agent = ctx.store.agent_by_name(agent_name)?.with_context(|| t!("no agent named {name}", name = format!("{agent_name:?}")))?;
     super::policy::check_summon(ctx, &agent.pubkey).with_context(|| t!("refusing to launch {name}", name = agent.name))?;
-    let agent_kp = ctx
-        .keystore
-        .agent(&agent.pubkey.parse()?)?
-        .with_context(|| t!("{name}'s key isn't on this machine, so it can't delegate", name = agent.name))?;
     if super::claude_profile::ClaudeProfile::load(&agent.pubkey)?.is_some() {
         bail!("{}", t!("{name} has a machine-local Claude config directory and must run locally", name = agent.name));
     }
     let attachments = pack_files(files)?;
+    // Another device of ours runs its own instance; any other host works
+    // under a delegation from the agent's key here.
+    let instance = super::device::is_linked(ctx, host)?;
 
     // The thread, in full (the host may have none of it).
     ctx.store.share_thread(&host.id, &thread.id)?;
-    let events = ctx.store.thread_events(&thread.id)?;
-    for chunk in events.chunks(BATCH) {
-        call(host, &Request::PushEvents { events: chunk.to_vec() })?;
+    if instance {
+        // Every thread and the agent's profile, which the host needs first.
+        sync_host(ctx, host, false)?;
+    } else {
+        let events = ctx.store.thread_events(&thread.id)?;
+        for chunk in events.chunks(BATCH) {
+            call(host, &Request::PushEvents { events: chunk.to_vec() })?;
+        }
     }
 
     let workspace = send_workspace(ctx, host, &thread, &agent.name, carry.as_ref())?;
-
-    let Response::JobKey { pubkey: job_key } = call(host, &Request::JobKey)? else { bail!("{}", t!("unexpected reply")) };
-    let now_secs = u64::try_from(axel_tui::util::now_secs()).context("the clock is before 1970")?;
-    let delegation = axel_identity::delegate(
-        &agent_kp,
-        &job_key.parse()?,
-        &thread.id,
-        now_secs.saturating_sub(DELEGATION_CLOCK_SKEW_SECS),
-        now_secs.saturating_add(DELEGATION_SECS),
-    )?;
+    let (job_key, delegation) = if instance { (String::new(), vec![]) } else { delegate_to_host(ctx, host, &agent, &thread.id)? };
     let from = super::policy::caller_agent()
         .filter(|pk| *pk != agent.pubkey)
         .map(|pk| socket::Sender::new(pk.clone(), super::policy::name_of(ctx, &pk)));
@@ -947,7 +988,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         title: thread.title.clone(),
         agent: JobAgent::of(&agent),
         job_key,
-        delegation: delegation.to_tag(),
+        delegation,
         prompt: remote_prompt(prompt, workspace.as_ref(), &host.label),
         from,
         workspace,
@@ -956,6 +997,7 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
         reach: policy.reach,
         budget: policy.budget,
         peers,
+        instance,
     };
     let Response::Started { session_id } = call(host, &Request::StartJob { job: Box::new(job) })? else {
         bail!("{}", t!("unexpected reply"));
@@ -964,6 +1006,24 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
     let _ = sync_host(ctx, host, false);
     ensure_follower(host);
     Ok(session_id)
+}
+
+/// A key on `host` for the job, and `agent`'s delegation to it for `thread_id`.
+fn delegate_to_host(ctx: &Ctx, host: &Environment, agent: &axel_store::Agent, thread_id: &str) -> Result<(String, Vec<String>)> {
+    let agent_kp = ctx
+        .keystore
+        .agent(&agent.pubkey.parse()?)?
+        .with_context(|| t!("{name}'s key isn't on this machine, so it can't delegate", name = agent.name))?;
+    let Response::JobKey { pubkey: job_key } = call(host, &Request::JobKey)? else { bail!("{}", t!("unexpected reply")) };
+    let now_secs = u64::try_from(axel_tui::util::now_secs()).context("the clock is before 1970")?;
+    let delegation = axel_identity::delegate(
+        &agent_kp,
+        &job_key.parse()?,
+        thread_id,
+        now_secs.saturating_sub(DELEGATION_CLOCK_SKEW_SECS),
+        now_secs.saturating_add(DELEGATION_SECS),
+    )?;
+    Ok((job_key, delegation.to_tag()))
 }
 
 /// How far back a delegation's validity starts, for a host whose clock runs
@@ -1460,8 +1520,13 @@ fn record_job_agent(ctx: &Ctx, job: &Job) -> Result<()> {
 /// Run a job on this host: learn the agent, hold its delegation, check out
 /// its branch, and start a managed session in the `axel` Rex session.
 fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
-    accept_delegation(ctx, job)?;
-    record_job_agent(ctx, job)?;
+    let agent_pubkey = if job.instance {
+        job_instance(ctx, job)?
+    } else {
+        accept_delegation(ctx, job)?;
+        record_job_agent(ctx, job)?;
+        job.agent.pubkey.clone()
+    };
     let work_dir = job_work_dir(job)?;
 
     let attachments = unpack_files(&paths::home().join("attachments").join(id_prefix(&job.thread_id)), &job.attachments)?;
@@ -1475,7 +1540,7 @@ fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
     let req = axel_tui::LaunchRequest {
         title: job.title.clone(),
         projects: vec![],
-        agent_pubkey: job.agent.pubkey.clone(),
+        agent_pubkey,
         workspace: axel_store::WorkspaceKind::InPlace,
         branch: None,
         thread_id: Some(job.thread_id.clone()),
@@ -1510,6 +1575,27 @@ fn start_job(ctx: &Ctx, job: &Job) -> Result<String> {
         launch::spawn_detached(&spec, &session_id)?;
     }
     Ok(session_id)
+}
+
+/// A job from another device of our owner: this machine's own instance of
+/// the agent's profile runs it, made now if it is the first time, under the
+/// policy the job carries.  Returns the instance's key.
+fn job_instance(ctx: &Ctx, job: &Job) -> Result<String> {
+    ctx.store.get_thread(&job.thread_id)?.context("the thread hasn't arrived here yet")?;
+    let profile_id = job.agent.profile_id.as_deref().context("a job for an instance names its profile")?;
+    let profile = ctx.store.profile(profile_id)?.context("the agent's profile hasn't arrived here yet")?;
+    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
+    let owner = profile.owner.as_deref().context("the agent's profile has no owner")?;
+    if ctx.store.principal(owner)? != me {
+        bail!("{} belongs to another owner: its jobs need a delegation", profile.name);
+    }
+    let agent = super::device::local_instance(ctx, profile_id)?;
+    for p in &job.peers {
+        p.insert_if_missing(ctx, axel_store::RuntimeMode::Autopilot)?;
+    }
+    ctx.store.set_agent_policy(&agent.pubkey, &axel_store::AgentPolicy { reach: job.reach.clone(), budget: job.budget })?;
+    debug_assert_eq!(agent.profile_id, profile_id);
+    Ok(agent.pubkey)
 }
 
 /// Check a job's delegation (made here, for this thread, from its agent,
@@ -1751,6 +1837,87 @@ mod tests {
         assert_eq!(serde_json::from_value::<JobAgent>(unknown).unwrap().name, "atlas");
     }
 
+    /// A host whose key `home` linked, holding `home`'s profile `reviewer`.
+    fn linked_host(temp: &Path, home: &axel_identity::Keypair, profile_owner: &axel_identity::Keypair) -> (Ctx, String, String) {
+        use axel_inbox::EnvelopeBuilder;
+        let host = Ctx { store: axel_store::Store::open_memory().unwrap(), keystore: axel_identity::Keystore::open_at(temp.join("host-keys.json"), false).unwrap(), rex: None };
+        let host_key = host.owner().unwrap().public().to_base58();
+        let link = axel_store::DeviceRecord { op: axel_store::DeviceOp::Link, device: host_key, label: "linux".into(), route: Some(axel_store::PairingRoute::Ssh) };
+        host.store.post(&EnvelopeBuilder::new(axel_store::kind::OWNER_DEVICE, serde_json::to_string(&link).unwrap()).sign(home).unwrap()).unwrap();
+        let profile = axel_store::ProfileWire {
+            profile_id: "p-reviewer".into(),
+            owner: profile_owner.public().to_base58(),
+            name: "reviewer".into(),
+            harness: axel_store::Harness::Claude,
+            model: None,
+            effort: None,
+            skills: vec![],
+            prompt: None,
+            color: None,
+            runtime_mode: axel_store::RuntimeMode::Autopilot,
+            archived: false,
+        };
+        let env = EnvelopeBuilder::new(axel_store::kind::AGENT_PROFILE, serde_json::to_string(&profile).unwrap()).sign(profile_owner).unwrap();
+        // A stranger's profile is refused by the store; a test of the job check
+        // then needs it in place anyway, as a host that ran its jobs would have it.
+        if host.store.append(&env).unwrap().rejected_reason.is_some() {
+            host.store.insert_agent(&axel_store::NewAgent {
+                pubkey: axel_identity::Keypair::generate().public().to_base58(),
+                name: "reviewer".into(),
+                profile_id: Some("p-reviewer".into()),
+                auth_tag: Some(axel_identity::attest(profile_owner, &axel_identity::Keypair::generate().public(), "").unwrap().to_tag()),
+                ..Default::default()
+            }).unwrap();
+        }
+        let thread = host.store.create_thread(home, "t", "intent", None).unwrap();
+        (host, thread.id, "p-reviewer".into())
+    }
+
+    fn instance_job(thread_id: &str, profile_id: &str) -> Job {
+        Job {
+            thread_id: thread_id.into(),
+            title: "t".into(),
+            agent: JobAgent { pubkey: "pk-home-instance".into(), name: "reviewer".into(), harness: axel_store::Harness::Claude, model: None, effort: None, skills: vec![], prompt: None, color: None, auth_tag: None, profile_id: Some(profile_id.into()) },
+            job_key: String::new(),
+            delegation: vec![],
+            prompt: "review".into(),
+            from: None,
+            workspace: None,
+            attachments: vec![],
+            resume: None,
+            reach: axel_store::Reach::default(),
+            budget: axel_store::Budget::default(),
+            peers: vec![],
+            instance: true,
+        }
+    }
+
+    #[test]
+    fn a_job_from_another_device_of_ours_runs_this_devices_own_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = axel_identity::Keypair::generate();
+        let (host, thread_id, profile_id) = linked_host(temp.path(), &home, &home);
+        let first = job_instance(&host, &instance_job(&thread_id, &profile_id)).unwrap();
+        assert_ne!(first, "pk-home-instance", "it signs as itself, not as the home's instance");
+        let agent = host.store.agent_by_pubkey(&first).unwrap().unwrap();
+        assert_eq!((agent.profile_id.as_str(), agent.device.as_deref()), ("p-reviewer", None));
+        assert!(host.keystore.agent(&first.parse().unwrap()).unwrap().is_some(), "its key is here");
+        assert!(host.store.unannounced_instances().unwrap().is_empty(), "and it was announced");
+        let again = job_instance(&host, &instance_job(&thread_id, &profile_id)).unwrap();
+        assert_eq!(again, first, "the next job reuses it");
+    }
+
+    #[test]
+    fn a_job_for_another_owners_profile_needs_a_delegation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, stranger) = (axel_identity::Keypair::generate(), axel_identity::Keypair::generate());
+        let (host, thread_id, profile_id) = linked_host(temp.path(), &home, &stranger);
+        let refused = job_instance(&host, &instance_job(&thread_id, &profile_id)).unwrap_err();
+        assert!(format!("{refused:#}").contains("another owner"), "{refused:#}");
+        let missing = job_instance(&host, &instance_job(&thread_id, "p-unknown")).unwrap_err();
+        assert!(format!("{missing:#}").contains("hasn't arrived"), "{missing:#}");
+    }
+
     #[test]
     fn a_job_sets_effort_for_an_agent_the_host_already_knows() {
         use axel_store::{Effort, Harness};
@@ -1786,6 +1953,7 @@ mod tests {
                 reach: axel_store::Reach::default(),
                 budget: axel_store::Budget::default(),
                 peers: vec![JobAgent::of(&local_orion)],
+                instance: false,
             })
             .unwrap(),
         )
@@ -1825,6 +1993,7 @@ mod tests {
                 reach: axel_store::Reach::default(),
                 budget: axel_store::Budget::default(),
                 peers: vec![],
+                instance: false,
             })
             .unwrap(),
         )

@@ -147,7 +147,8 @@ pub const MAX_AGENT_MESSAGES: usize = 20;
 /// Refuse when agents have sent [`MAX_AGENT_MESSAGES`] on `thread_id` since
 /// the owner last wrote there.
 fn check_chatter(ctx: &Ctx, thread_id: &str) -> Result<()> {
-    let owner = ctx.owner()?.public().to_base58();
+    // The owner writes from any of its machines (RFD 0004).
+    let owner = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
     let since_ms = ctx
         .store
         .thread_items(thread_id, 2000)?
@@ -156,12 +157,12 @@ fn check_chatter(ctx: &Ctx, thread_id: &str) -> Result<()> {
         .map(|it| it.at)
         .max()
         .unwrap_or(0);
-    let sent = ctx
-        .store
-        .thread_messages(thread_id)?
-        .iter()
-        .filter(|e| e.from != owner && secs_to_ms(e.created_at) >= since_ms)
-        .count();
+    let mut sent = 0_usize;
+    for e in ctx.store.thread_messages(thread_id)? {
+        if secs_to_ms(e.created_at) >= since_ms && ctx.store.principal(&e.from)? != owner {
+            sent += 1;
+        }
+    }
     if sent >= MAX_AGENT_MESSAGES {
         bail!(
             "agents have sent {sent} messages on this thread since the owner last wrote; stop and wait for the owner (the limit is {MAX_AGENT_MESSAGES})"

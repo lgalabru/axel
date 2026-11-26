@@ -226,14 +226,19 @@ struct Cleared {
 /// Find the agent, the key that signs for it, and whether policy lets it be
 /// launched from here.
 fn clear_agent(ctx: &Ctx, req: &LaunchRequest) -> Result<Cleared> {
-    let agent = ctx
+    let mut agent = ctx
         .store
         .agent_by_pubkey(&req.agent_pubkey)?
         .with_context(|| t!("agent {key} not found", key = req.agent_pubkey))?;
+    if agent.device.is_some() {
+        // Another machine's instance: here the profile runs as this machine's
+        // own instance of it, made now if it is the first time (RFD 0004).
+        agent = super::device::local_instance(ctx, &agent.profile_id)?;
+    }
     // The agent's key, or (on a remote host) this host's key under the
     // agent's delegation for the thread.
     let agent_kp = ctx
-        .agent_signer(&req.agent_pubkey, req.thread_id.as_deref())
+        .agent_signer(&agent.pubkey, req.thread_id.as_deref())
         .with_context(|| t!("refusing to launch {name}: its key is missing from the keystore", name = agent.name))?;
     // Reach, loops, depth and budget; a summoned session never runs broader
     // than the session that summoned it.

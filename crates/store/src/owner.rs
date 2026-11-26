@@ -39,7 +39,9 @@ pub struct DeviceRecord {
     pub op: DeviceOp,
     pub device: String,
     pub label: String,
-    pub route: PairingRoute,
+    /// How the far end was proved: required to link, absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<PairingRoute>,
 }
 
 /// Kind-122 content: a whole profile.  The latest `created_at` per
@@ -173,9 +175,9 @@ pub(crate) fn project(conn: &Connection, env: &Envelope) -> Result<(), Error> {
         Err(reason) => mark_rejected(conn, &env.id, &reason),
         Ok(()) => {
             mark_applied(conn, &env.id)?;
-            let mut links_changed = env.kind == kind::OWNER_DEVICE;
-            links_changed |= revive(conn)?;
-            if links_changed {
+            let mut authorization_changed = changes_authorization(env.kind);
+            authorization_changed |= revive(conn)?;
+            if authorization_changed {
                 replay_all_threads(conn)?;
             }
             Ok(())
@@ -183,8 +185,14 @@ pub(crate) fn project(conn: &Connection, env: &Envelope) -> Result<(), Error> {
     }
 }
 
+/// Whether a record of `kind` changes who may sign on threads: a device link
+/// or revocation, or an instance attestation authorization reads.
+fn changes_authorization(kind: u32) -> bool {
+    kind == kind::OWNER_DEVICE || kind == kind::AGENT_ANNOUNCE
+}
+
 /// Re-apply owner records rejected so far, until a pass revives nothing.
-/// Returns whether a revived record changed the device links.
+/// Returns whether a revived record changed who may sign on threads.
 pub(crate) fn revive(conn: &Connection) -> Result<bool, Error> {
     let mut links_changed = false;
     for _ in 0..REVIVE_PASSES_MAX {
@@ -202,7 +210,7 @@ pub(crate) fn revive(conn: &Connection) -> Result<bool, Error> {
             if apply(conn, env)?.is_ok() {
                 mark_applied(conn, &env.id)?;
                 revived += 1;
-                links_changed |= env.kind == kind::OWNER_DEVICE;
+                links_changed |= changes_authorization(env.kind);
             }
         }
         if revived == 0 {
@@ -271,7 +279,7 @@ fn apply_label(conn: &Connection, env: &Envelope, record: &DeviceRecord, at: i64
     conn.execute(
         "INSERT INTO devices (pubkey, owner, label, route, link_event_id, linked_at) VALUES (?1, NULL, ?2, ?3, ?4, ?5)
          ON CONFLICT(pubkey) DO UPDATE SET label = excluded.label",
-        params![record.device, record.label, record.route.as_str(), env.id, at],
+        params![record.device, record.label, record.route.map(PairingRoute::as_str), env.id, at],
     )?;
     Ok(Ok(()))
 }
@@ -280,6 +288,9 @@ fn apply_link(conn: &Connection, env: &Envelope, record: &DeviceRecord, at: i64)
     if record.device == env.from {
         return Ok(Err("an owner can't link itself".into()));
     }
+    let Some(route) = record.route else {
+        return Ok(Err("a link must say how the device was proved".into()));
+    };
     let existing = device_row(conn, &record.device)?;
     if let Some(d) = &existing
         && let Some(owner) = &d.owner
@@ -295,7 +306,7 @@ fn apply_link(conn: &Connection, env: &Envelope, record: &DeviceRecord, at: i64)
         "INSERT INTO devices (pubkey, owner, label, route, link_event_id, linked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(pubkey) DO UPDATE SET owner = excluded.owner, label = excluded.label, route = excluded.route,
              link_event_id = excluded.link_event_id, linked_at = excluded.linked_at, revoked_at = NULL, revoke_event_id = NULL",
-        params![record.device, env.from, record.label, record.route.as_str(), env.id, at],
+        params![record.device, env.from, record.label, route.as_str(), env.id, at],
     )?;
     Ok(Ok(()))
 }
@@ -405,10 +416,16 @@ fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String
     if !speaks_for_owner {
         return Ok(Err(format!("device {} doesn't speak for the owner of profile {}", env.from, wire.profile_id)));
     }
-    // An instance this machine runs is never re-homed by someone's announcement.
+    // An instance this machine runs is never re-homed by someone's
+    // announcement; this machine's own announcement marks it announced.
+    conn.execute(
+        "UPDATE agents SET announced_id = COALESCE(announced_id, ?2) WHERE pubkey = ?1 AND device IS NULL",
+        params![wire.instance, env.id],
+    )?;
     conn.execute(
         "INSERT INTO agents (pubkey, profile_id, device, auth_tag_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(pubkey) DO UPDATE SET profile_id = excluded.profile_id, auth_tag_json = excluded.auth_tag_json
+         ON CONFLICT(pubkey) DO UPDATE SET device = excluded.device, profile_id = excluded.profile_id,
+             auth_tag_json = excluded.auth_tag_json
              WHERE agents.device IS NOT NULL",
         params![
             wire.instance,
@@ -424,14 +441,14 @@ fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String
 const DEVICE_COLS: &str = "pubkey, owner, label, route, linked_at, revoked_at";
 
 fn row_device(r: &Row<'_>) -> rusqlite::Result<Device> {
-    let route: String = r.get("route")?;
+    let route: Option<String> = r.get("route")?;
     Ok(Device {
         pubkey: r.get("pubkey")?,
         owner: r.get("owner")?,
         label: r.get("label")?,
         // A route this build doesn't know was refused at ingest, so this is
         // only a hand-edited row; it reads as the weakest route.
-        route: route.parse().unwrap_or(PairingRoute::Confirm),
+        route: route.map(|r| r.parse().unwrap_or(PairingRoute::Confirm)),
         linked_at: r.get("linked_at")?,
         revoked_at: r.get("revoked_at")?,
     })
@@ -490,6 +507,22 @@ impl Store {
                 row_device,
             )
             .optional()?)
+    }
+
+    /// This machine's instances that no kind-121 envelope announced yet,
+    /// with the attestation an announcement carries.
+    pub fn unannounced_instances(&self) -> Result<Vec<(String, String, Vec<String>)>, Error> {
+        let mut statement = self.conn.prepare(
+            "SELECT pubkey, profile_id, auth_tag_json FROM agents
+             WHERE device IS NULL AND announced_id IS NULL AND auth_tag_json IS NOT NULL AND archived_at IS NULL",
+        )?;
+        let rows = statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (pubkey, profile_id, auth_json) = row?;
+            out.push((pubkey, profile_id, serde_json::from_str(&auth_json)?));
+        }
+        Ok(out)
     }
 
     /// The owner `key` speaks for now: itself unless it is a live device.

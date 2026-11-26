@@ -48,7 +48,7 @@ pub use axel_identity::Keypair;
 pub use axel_inbox::{Envelope, EnvelopeBuilder};
 pub use error::Error;
 pub use log::author;
-pub use remote::{ItemChange, SyncStream};
+pub use remote::{ItemChange, OwnerRecords, SyncStream};
 pub use owner::{AnnounceWire, DeviceRecord, ProfileWire, PRINCIPAL_DEPTH_MAX};
 pub use policy::{
     AgentPolicy, Budget, DEFAULT_MAX_DEPTH, Reach, Refusal, SpendLimit, SummonCheck, local_day_start, narrower,

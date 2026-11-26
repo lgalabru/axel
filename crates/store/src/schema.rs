@@ -526,6 +526,7 @@ const MIGRATIONS: &[&str] = &[
         profile_id     TEXT NOT NULL REFERENCES agent_profiles(profile_id),
         device         TEXT,
         auth_tag_json  TEXT,
+        announced_id   TEXT,
         created_at     INTEGER NOT NULL,
         last_seen_at   INTEGER,
         archived_at    INTEGER
@@ -542,7 +543,7 @@ const MIGRATIONS: &[&str] = &[
         pubkey           TEXT PRIMARY KEY,
         owner            TEXT,
         label            TEXT NOT NULL,
-        route            TEXT NOT NULL,
+        route            TEXT,
         link_event_id    TEXT NOT NULL,
         linked_at        INTEGER NOT NULL,
         revoked_at       INTEGER,

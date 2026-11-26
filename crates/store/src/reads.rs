@@ -734,35 +734,52 @@ fn read_frontier(store: &Store, pubkey: &str) -> Result<Option<(i64, String)>, E
         .optional()?)
 }
 
+/// `same_owner(key)`: the owner `?1` and every live device that resolves to
+/// it, as many links down as authorization walks (`PRINCIPAL_DEPTH_MAX`).
+const SAME_OWNER_KEYS: &str = "WITH RECURSIVE same_owner(key, depth) AS (
+        SELECT ?1, 0
+        UNION
+        SELECT d.pubkey, s.depth + 1 FROM devices d JOIN same_owner s ON d.owner = s.key
+        WHERE d.revoked_at IS NULL AND s.depth < 4
+    )";
+
+#[cfg(test)]
+pub(crate) fn same_owner_sql() -> &'static str {
+    SAME_OWNER_KEYS
+}
+
 impl Store {
-    /// Projected envelopes that mention `pubkey`, newest first.
+    /// Projected envelopes that mention `pubkey`, newest first.  A message
+    /// to any key that speaks for the same owner (a linked device, RFD 0004)
+    /// counts: on every machine, the human's inbox is the owner's.
     pub fn inbox(&self, pubkey: &str, limit: usize) -> Result<Vec<Envelope>, Error> {
+        let owner = self.principal(pubkey)?;
         let mut st = self.conn.prepare(&format!(
-            "SELECT {EVENT_COLS} FROM events e JOIN mentions m ON m.message_id = e.id
-             WHERE m.pubkey = ?1 AND e.applied_at IS NOT NULL
+            "{SAME_OWNER_KEYS}
+             SELECT {EVENT_COLS} FROM events e
+             WHERE e.applied_at IS NOT NULL
+               AND e.id IN (SELECT message_id FROM mentions WHERE pubkey IN (SELECT key FROM same_owner))
              ORDER BY e.created_at DESC, e.id DESC LIMIT ?2"
         ))?;
-        let rows = st.query_map(params![pubkey, sql_limit(limit)], row_envelope)?;
+        let rows = st.query_map(params![owner, sql_limit(limit)], row_envelope)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Inbox entries newer than `pubkey`'s read frontier, comparing `(created_at, id)`.
     pub fn unread_count(&self, pubkey: &str) -> Result<u64, Error> {
-        let n: i64 = match read_frontier(self, pubkey)? {
-            None => self.conn.query_row(
-                "SELECT COUNT(*) FROM mentions m JOIN events e ON e.id = m.message_id
-                 WHERE m.pubkey = ?1 AND e.applied_at IS NOT NULL",
-                [pubkey],
-                |r| r.get(0),
-            )?,
-            Some((ts, id)) => self.conn.query_row(
-                "SELECT COUNT(*) FROM mentions m JOIN events e ON e.id = m.message_id
-                 WHERE m.pubkey = ?1 AND e.applied_at IS NOT NULL
-                   AND (e.created_at > ?2 OR (e.created_at = ?2 AND e.id > ?3))",
-                params![pubkey, ts, id],
-                |r| r.get(0),
-            )?,
-        };
+        let owner = self.principal(pubkey)?;
+        let (ts, id) = read_frontier(self, pubkey)?.unwrap_or((i64::MIN, String::new()));
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "{SAME_OWNER_KEYS}
+                 SELECT COUNT(*) FROM events e
+                 WHERE e.applied_at IS NOT NULL
+                   AND e.id IN (SELECT message_id FROM mentions WHERE pubkey IN (SELECT key FROM same_owner))
+                   AND (e.created_at > ?2 OR (e.created_at = ?2 AND e.id > ?3))"
+            ),
+            params![owner, ts, id],
+            |r| r.get(0),
+        )?;
         Ok(u64::try_from(n).expect("COUNT(*) is never negative"))
     }
 

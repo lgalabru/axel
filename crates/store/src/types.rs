@@ -561,7 +561,8 @@ pub struct Device {
     pub pubkey: String,
     pub owner: Option<String>,
     pub label: String,
-    pub route: PairingRoute,
+    /// How the link was proved; `None` for an owner's own label.
+    pub route: Option<PairingRoute>,
     pub linked_at: i64,
     pub revoked_at: Option<i64>,
 }

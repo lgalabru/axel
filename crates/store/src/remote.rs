@@ -50,6 +50,25 @@ impl SyncStream {
     }
 }
 
+/// Which owner records (kinds 120-129) go to a peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerRecords {
+    /// Only device links: a host of another owner needs them to know which
+    /// machines speak for us on threads we share, and nothing else of ours.
+    Links,
+    /// Everything: another device of the same owner.
+    All,
+}
+
+impl OwnerRecords {
+    fn includes(self, kind: u32) -> bool {
+        match self {
+            OwnerRecords::Links => kind == crate::kind::OWNER_DEVICE,
+            OwnerRecords::All => crate::kind::is_owner_record(kind),
+        }
+    }
+}
+
 impl Store {
     // ------------------------------------------------------- agent hosts
 
@@ -241,27 +260,34 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Envelopes on `threads` with `seq > cursor`, oldest first.  `None`
-    /// means every envelope that is on a thread.
-    pub fn thread_events_since(&self, cursor: i64, threads: Option<&[String]>, limit: usize) -> Result<Vec<(i64, Envelope)>, Error> {
+    /// Envelopes with `seq > cursor` that `peer` should get, oldest first:
+    /// those on `threads` (`None`: every thread), plus the owner records
+    /// `records` selects.  Rejected envelopes go too: sync carries everything.
+    pub fn thread_events_since(&self, cursor: i64, threads: Option<&[String]>, records: OwnerRecords, limit: usize) -> Result<Vec<(i64, Envelope)>, Error> {
         // The loop checks the limit after a push, so it would return one.
         if limit == 0 {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
         let mut st = self.conn.prepare(&format!(
-            "SELECT seq, thread_id, {EVENT_COLS} FROM events WHERE seq > ?1 AND thread_id IS NOT NULL ORDER BY seq ASC"
+            "SELECT seq, thread_id, {EVENT_COLS} FROM events
+             WHERE seq > ?1 AND (thread_id IS NOT NULL OR kind BETWEEN 120 AND 129) ORDER BY seq ASC"
         ))?;
-        let rows = st.query_map([cursor], |r| Ok((r.get::<_, i64>("seq")?, r.get::<_, String>("thread_id")?, row_envelope(r)?)))?;
+        let rows = st.query_map([cursor], |r| Ok((r.get::<_, i64>("seq")?, r.get::<_, Option<String>>("thread_id")?, row_envelope(r)?)))?;
         for row in rows {
             let (seq, thread, env) = row?;
-            if threads.is_none_or(|ts| ts.contains(&thread)) {
+            let wanted = match &thread {
+                Some(thread) => threads.is_none_or(|ts| ts.contains(thread)),
+                None => records.includes(env.kind),
+            };
+            if wanted {
                 out.push((seq, env));
                 if out.len() >= limit {
                     break;
                 }
             }
         }
+        debug_assert!(out.len() <= limit);
         Ok(out)
     }
 

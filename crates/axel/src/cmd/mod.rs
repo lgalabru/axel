@@ -3,6 +3,7 @@
 mod agent;
 mod claude_profile;
 mod convert;
+mod device;
 mod diff;
 mod effort;
 mod gc;
@@ -130,6 +131,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             crate::cli::HostCommand::Ls => host::list(),
             crate::cli::HostCommand::Rm { label } => host::remove(&label),
             crate::cli::HostCommand::Rpc => host::rpc_serve(),
+        },
+        Some(Command::Device { command }) => match command {
+            crate::cli::DeviceCommand::Link { label, ssh, route, code, install } => {
+                device::link(&label, ssh.as_deref(), route, code.as_deref(), install)
+            }
+            crate::cli::DeviceCommand::Ls => device::list(),
+            crate::cli::DeviceCommand::Revoke { label } => device::revoke(&label),
+            crate::cli::DeviceCommand::Code { owner } => device::code(&owner),
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
     }

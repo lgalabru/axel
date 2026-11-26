@@ -17,7 +17,7 @@ fn pk(kp: &Keypair) -> String {
 }
 
 fn device_record(owner: &Keypair, op: DeviceOp, device: &Keypair, label: &str, at: u64) -> Envelope {
-    let record = DeviceRecord { op, device: pk(device), label: label.into(), route: PairingRoute::Ssh };
+    let record = DeviceRecord { op, device: pk(device), label: label.into(), route: Some(PairingRoute::Ssh) };
     EnvelopeBuilder::new(kind::OWNER_DEVICE, serde_json::to_string(&record).unwrap())
         .tag(vec!["d".into(), pk(device)])
         .created_at(at)
@@ -322,4 +322,28 @@ fn migration_13_turns_each_agent_into_a_profile_and_its_instance() {
     let nova = s.agent_by_name("nova").unwrap().unwrap();
     assert_eq!(nova.owner, None, "no attestation, no known owner");
     assert_eq!(s.profiles().unwrap().len(), 2);
+}
+
+#[test]
+fn the_humans_inbox_is_the_owners_on_every_machine() {
+    let s = store();
+    let (owner, laptop, agent) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+    s.append(&device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0)).unwrap();
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    s.add_participant(&owner, &thread.id, &pk(&agent), ParticipantRole::Agent).unwrap();
+    // An agent on the laptop asks the human there: the message names the laptop's key.
+    let question = EnvelopeBuilder::new(kind::QUESTION, "which branch?").thread(&thread.id).mention(&pk(&laptop)).created_at(T0 + 5).sign(&agent).unwrap();
+    s.post(&question).unwrap();
+    assert_eq!(s.inbox(&pk(&owner), 10).unwrap().len(), 1, "the owner sees it from the home machine");
+    assert_eq!(s.inbox(&pk(&laptop), 10).unwrap().len(), 1);
+    assert_eq!(s.unread_count(&pk(&owner)).unwrap(), 1);
+
+    s.append(&device_record(&owner, DeviceOp::Revoke, &laptop, "laptop", T0 + 10)).unwrap();
+    assert!(s.inbox(&pk(&owner), 10).unwrap().is_empty(), "a revoked device's mail isn't the owner's");
+}
+
+#[test]
+fn the_inbox_walks_as_many_links_as_authorization() {
+    let sql_depth = format!("s.depth < {PRINCIPAL_DEPTH_MAX}");
+    assert!(crate::reads::same_owner_sql().contains(&sql_depth), "keep SAME_OWNER_KEYS and PRINCIPAL_DEPTH_MAX in step");
 }
