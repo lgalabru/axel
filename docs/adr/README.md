@@ -46,7 +46,7 @@ or a plan with open questions (an RFD).
 | [0001](0001-turn-checkpoints-not-commit-checkpoints.md) | Checkpoints per turn, in the working tree, not per commit | accepted |
 | [0002](0002-terminal-first-on-rex.md) | Terminal first: Rex is the window manager, Axel draws no windows | accepted |
 | [0003](0003-structured-signals-never-scraping.md) | Agent status comes from protocols, never from reading their screens | accepted |
-| [0004](0004-agents-are-ed25519-principals.md) | Agents are named Ed25519 principals attested by their owner | accepted |
+| [0004](0004-agents-are-ed25519-principals.md) | Agents are named Ed25519 principals attested by their owner | superseded by 0012 |
 | [0005](0005-signed-event-log-local-first.md) | The signed event log is the truth; local-first, replicas merge by union, no daemon | accepted |
 | [0006](0006-threads-are-the-primitive.md) | The thread is the primitive; sessions move, threads don't; ids are Axel's | accepted |
 | [0007](0007-capabilities-not-harness-names.md) | Harness behaviour is driven by capabilities, not by matching on names | accepted |
@@ -54,3 +54,4 @@ or a plan with open questions (an RFD).
 | [0009](0009-rebuild-by-importing-not-trimming.md) | Rebuild from scratch, importing modules one by one with provenance | accepted |
 | [0010](0010-native-scrollback-for-diff-reading.md) | Native terminal scrollback for reading diffs, explicit line review | accepted |
 | [0011](0011-schema-upgrades-never-lose-data.md) | Opening the database never loses data: copy before upgrading, refuse what we don't understand | accepted |
+| [0012](0012-agents-are-profiles-with-instances-per-machine.md) | An agent is a profile with an instance per machine, and a machine's key is its device key | accepted |

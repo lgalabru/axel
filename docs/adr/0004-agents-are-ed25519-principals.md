@@ -1,6 +1,6 @@
 # ADR 0004: Agents are named Ed25519 principals attested by their owner
 
-Status: accepted (retroactive, 2026-10-31). Explains `DESIGN.md` "Principles" 3
+Status: superseded by 0012 (2026-11-25); accepted (retroactive, 2026-10-31). Explains `DESIGN.md` "Principles" 3
 and "Identity and crypto".
 
 ## Context
