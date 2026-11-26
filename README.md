@@ -119,9 +119,11 @@ or with Nix:
 nix run github:scarce/axel
 ```
 
-Then run `axel` in a Rex terminal. The first run checks your machine and helps you create
-your first agent. Every commit on `main` that passes CI is a release, so run the script
-again or `brew upgrade` to update.
+Then run `axel` in a Rex terminal. The first run asks one question, your first agent's
+name, and takes sensible defaults for the rest: the harness it finds, every skill, autopilot.
+`axel setup --custom` picks each of those; `axel setup --yes` asks nothing, for scripts.
+Every commit on `main` that passes CI is a release, so run the script again or
+`brew upgrade` to update.
 
 You'll need [Rex](https://www.superlogical.com/rex) and a harness:
 [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex),
@@ -156,7 +158,7 @@ The design lives in [`docs/DESIGN.md`](docs/DESIGN.md), the wire formats in
 
 An agent runs on a harness: a coding agent's own CLI, which Axel drives over ACP. Install the
 CLI (and its ACP adapter, for Pi and Amp), log it in once, then name it when you create the
-agent, optionally with a model after a `/`. `axel setup` lists the harnesses it finds.
+agent, optionally with a model after a `/`. `axel setup --custom` lists the harnesses it finds.
 
 ```sh
 axel agent new atlas claude/opus          # Claude Code, on Opus
