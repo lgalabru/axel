@@ -9,7 +9,28 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::PublicKey;
+use crate::{Error, Keypair, PublicKey};
+
+/// Domain separation for a device's consent to being linked.
+pub const LINK_CONSENT_DOMAIN: &str = "axel:device-link:v1:";
+
+/// What a device signs to agree that `owner` may link it: without it, any
+/// key could claim any other machine as its device.
+pub fn link_consent_preimage(owner: &PublicKey, device: &PublicKey) -> Vec<u8> {
+    format!("{LINK_CONSENT_DOMAIN}{}:{}", owner.to_base58(), device.to_base58()).into_bytes()
+}
+
+/// The device's consent to `owner` linking it, as lowercase hex.
+pub fn consent_to_link(device: &Keypair, owner: &PublicKey) -> String {
+    assert_ne!(&device.public(), owner, "a key doesn't link itself");
+    crate::hex::encode(&device.sign(&link_consent_preimage(owner, &device.public())))
+}
+
+/// Check `consent_hex` is `device`'s consent to `owner` linking it.
+pub fn verify_link_consent(owner: &PublicKey, device: &PublicKey, consent_hex: &str) -> Result<(), Error> {
+    let sig: [u8; 64] = crate::hex::decode_array(consent_hex).ok_or_else(|| Error::InvalidSignature("link consent is not 64 bytes of hex".into()))?;
+    device.verify(&link_consent_preimage(owner, device), &sig)
+}
 
 /// Domain separation for the code's hash.
 pub const DOMAIN: &str = "axel:pair:v1:";
@@ -58,5 +79,16 @@ mod tests {
         assert!(code_matches(&code, &code.replace('-', " ")));
         assert!(!code_matches(&code, ""));
         assert!(!code_matches(&code, "0000-0000") || code == "0000-0000");
+    }
+
+    #[test]
+    fn only_the_device_can_consent_to_its_own_link() {
+        let (owner, device, intruder) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+        let consent = consent_to_link(&device, &owner.public());
+        assert!(verify_link_consent(&owner.public(), &device.public(), &consent).is_ok());
+        assert!(verify_link_consent(&intruder.public(), &device.public(), &consent).is_err(), "bound to the owner");
+        let forged = consent_to_link(&intruder, &owner.public());
+        assert!(verify_link_consent(&owner.public(), &device.public(), &forged).is_err());
+        assert!(verify_link_consent(&owner.public(), &device.public(), "zz").is_err());
     }
 }
