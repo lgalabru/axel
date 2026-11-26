@@ -145,22 +145,37 @@ fn run_on(mut cmd: Command, master: OwnedFd, slave: OwnedFd, until: Option<&str>
         }
     });
     let started = Instant::now();
+    let pid = i32::try_from(child.id()).expect("a pid fits an i32");
+    // The child leads its own session (setsid above), so its pid is its
+    // process group: killing the group takes whatever it started too.
+    let kill_all = || {
+        // SAFETY: kill has no memory-safety preconditions.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    };
     while child.try_wait().unwrap().is_none() {
         let text = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
         if until.is_some_and(|u| text.contains(u)) {
-            child.kill().ok();
-            child.wait().ok();
             break;
         }
         if started.elapsed() > Duration::from_secs(RUN_SECS_MAX) {
-            child.kill().ok();
+            kill_all();
             panic!("the command did not finish: {text:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    output.join().unwrap();
+    kill_all();
+    child.wait().ok();
+    // A process that left the group can still hold the terminal open, and
+    // then the read never ends: wait a moment for the last output, then go.
+    let drained = Instant::now();
+    while !output.is_finished() && drained.elapsed() < Duration::from_millis(DRAIN_MS_MAX) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     String::from_utf8_lossy(&seen.lock().unwrap()).into_owned()
 }
+
+/// How long the last output may take to arrive once the command is done.
+const DRAIN_MS_MAX: u64 = 2000;
 
 /// Every OSC 7577 report in `output`, checked against `token`, as the
 /// decoded argv (empty for a `clear`) and cwd.
