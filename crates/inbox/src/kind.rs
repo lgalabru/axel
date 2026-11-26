@@ -51,9 +51,15 @@ pub const OWNER_DEVICE: u32 = 120;
 pub const AGENT_ANNOUNCE: u32 = 121;
 /// An agent profile, the owner's and the same on every device (`["d", profile_id]`).
 pub const AGENT_PROFILE: u32 = 122;
+/// Add or cancel a schedule: messages that arrive in an inbox at a set time
+/// (RFD 0006).  Content JSON `{schedule_id, op: add|cancel, to, thread |
+/// new_thread, prompt, when, runs_max, until, device}`.  An owner record, on
+/// no thread: a schedule may open a new thread for each run, and every
+/// device of the owner sees it, though only the one it names fires it.
+pub const SCHEDULE: u32 = 124;
 
 /// All known kinds, in numeric order.
-pub const ALL: [u32; 20] = [
+pub const ALL: [u32; 21] = [
     NOTE,
     TASK,
     PERMISSION_REQUEST,
@@ -74,6 +80,7 @@ pub const ALL: [u32; 20] = [
     OWNER_DEVICE,
     AGENT_ANNOUNCE,
     AGENT_PROFILE,
+    SCHEDULE,
 ];
 
 /// Stable snake_case name of a kind; `"unknown"` for anything else.
@@ -99,6 +106,7 @@ pub fn name(k: u32) -> &'static str {
         OWNER_DEVICE => "owner.device",
         AGENT_ANNOUNCE => "agent.announce",
         AGENT_PROFILE => "agent.profile",
+        SCHEDULE => "schedule",
         _ => "unknown",
     }
 }
@@ -179,7 +187,10 @@ mod tests {
         assert_eq!(from_name("turn"), Some(40));
         assert_eq!(name(OWNER_DEVICE), "owner.device");
         assert_eq!(from_name("agent.profile"), Some(122));
-        assert_eq!(ALL.len(), 20);
+        
+        assert_eq!(name(SCHEDULE), "schedule");
+        assert_eq!(from_name("schedule"), Some(124));
+        assert_eq!(ALL.len(), 21);
         let mut sorted = ALL;
         sorted.sort_unstable();
         assert_eq!(sorted, ALL, "ALL is in numeric order");
@@ -215,7 +226,8 @@ mod tests {
             assert!(!is_message(k));
             assert!(!is_owner_record(k));
         }
-        for k in [OWNER_DEVICE, AGENT_ANNOUNCE, AGENT_PROFILE] {
+        // A schedule is the owner's, on no thread, and goes to every device.
+        for k in [OWNER_DEVICE, AGENT_ANNOUNCE, AGENT_PROFILE, SCHEDULE] {
             assert!(is_owner_record(k));
             assert!(!is_thread_event(k));
             assert!(!is_message(k));
