@@ -222,21 +222,25 @@ $ axel                               # in any Rex terminal
 
 ## Web panes (RFD 0007)
 
-Experimental, and off until `axel panes web` turns it on: a thread view can
-then be a web page in its Rex pane instead of terminal text, wherever
-Ladybird is installed. `axel web pane THREAD` serves the thread on
-`127.0.0.1` from that process and runs `Ladybird --headless=terminal
---temporary-profile URL` in the same pane, which draws the page as Kitty
-graphics. The page draws `axel_tui::load_thread_data` and sends through
-`axel_tui::thread::dispatch`, as the terminal view does, so both route a
-message the same way. A secret cookie, a `Host` check and same-origin JSON
-writes keep other pages out.
+Experimental, and off until `axel panes web` turns it on: a thread view's
+three panes can then be web pages instead of terminal text, wherever Ladybird
+is installed. The layout and Rex labels are the terminal view's: the
+conversation above, the composer below, the activity pane beside it. Each pane
+runs `axel web pane THREAD --view messages|composer|activity`, which serves
+the thread on `127.0.0.1` from that process and runs `Ladybird
+--headless=terminal --temporary-profile --device-pixel-ratio R URL` in the same
+pane. Ladybird draws the page as Kitty graphics, and `R` comes from the pane's
+pixels per cell.
+
+The pages draw `axel_tui::load_thread_data` and `load_usage_data`, and send
+through `axel_tui::thread::dispatch`, as the terminal view does. A secret
+cookie, a `Host` check and same-origin JSON writes keep other pages out.
+Closing the composer closes the view, as the terminal composer does.
 
 `axel panes web|terminal` chooses (`$AXEL_PANES` overrides it; the default is
 `terminal`). Ladybird is found at `$AXEL_LADYBIRD`, else on PATH, else as
 `Ladybird.app` in `/Applications` or `~/Applications`. Without it, or when it
-can't draw, the pane falls back to the terminal view and says why. The
-launcher, dashboard, inbox and question popups stay terminal panes for now.
+can't draw, each pane shows its terminal counterpart and says why.
 
 ## Coming back after Rex restarts (OSC 7577)
 
@@ -250,7 +254,7 @@ pane.
 
 | Pane | Comes back as |
 |---|---|
-| A thread's web pane | `axel web pane T` |
+| A thread's web panes | `axel web pane T --view V` |
 | A thread's stream, composer, tokens pane | the same command: `axel thread stream T`, `axel thread compose T`, `axel ui --screen usage --thread T` |
 | An agent's session, managed host or harness in a pane | `axel session resume S`, with the session's work directory as `cwd` |
 | The floating launcher, its threads list, the corner tokens pane, questions | nothing: they are summoned, not kept |

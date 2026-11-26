@@ -26,14 +26,20 @@ are off until the owner turns them on.
 
 What this branch builds:
 
-- **One pane, one process.** `axel web pane THREAD`:
-  - serves the thread on `127.0.0.1` from this process;
-  - runs `Ladybird --headless=terminal --temporary-profile URL` in the same
-    pane, which draws the page with the Kitty graphics protocol;
+- **The same three panes, as web pages.** A thread view keeps the terminal
+  view's layout and Rex labels: the conversation above, the composer below,
+  and the activity (tokens) pane beside the composer. Each runs
+  `axel web pane THREAD --view messages|composer|activity`, which:
+  - serves the thread on `127.0.0.1` from that pane's own process;
+  - runs `Ladybird --headless=terminal --temporary-profile
+    --device-pixel-ratio R URL` in the same pane, drawing the page with the
+    Kitty graphics protocol. `R` comes from the pane's pixels per cell, so a
+    Retina pane isn't drawn at half size;
   - ends when Ladybird closes, taking the server with it.
 
-  No daemon (ADR 0005), and the pane is the whole thread view: conversation
-  and composer in one.
+  No daemon (ADR 0005). Closing the composer closes the thread view, as the
+  terminal composer does: the tokens pane, then the conversation, bringing
+  back the shell the thread stood in for.
 - **The same model as the terminal view.** The page renders
   `axel_tui::load_thread_data`, the `ThreadData` the terminal view draws,
   serialized by `cmd/web/view.rs`. What you type goes through
@@ -66,7 +72,8 @@ What this branch builds:
   - When on, they are used only where Ladybird is installed: `$AXEL_LADYBIRD`,
     else `ladybird` on PATH, else `Ladybird.app` in `/Applications` or
     `~/Applications`. Elsewhere thread views stay terminal panes.
-- **Falling back.** The pane shows the terminal view instead, saying why, when:
+- **Falling back.** Each pane shows its terminal counterpart instead (the
+  stream, the composer, the tokens screen), saying why, when:
   - Ladybird is missing;
   - or it exits non-zero within 3 s having loaded nothing, as it would in a
     terminal without Kitty graphics.
@@ -103,9 +110,10 @@ conversation items; the view shows the newest 500.
 - **Its status line.** Terminal mode keeps the pane's last row for its own
   status line and its keys (a URL prompt). Which Axel keys collide? Try each
   composer shortcut in the real thing.
-- **Startup.** Ladybird starts eight processes for a pane, using about
-  285 MB once idle; the terminal stream starts in about 50 ms. Docking feels
-  slower; measure it.
+- **Memory and startup.** Ladybird starts eight processes for a pane, about
+  285 MB once idle, so a thread view of three web panes is about 850 MB. The
+  terminal stream starts in about 50 ms. Measure both, and consider one
+  Ladybird page for the conversation and composer together.
 - **A native web block.** Rex `0.1.0-preview.25` (API revision 24) has no
   browser block. Its creators are `terminal`, `tunnel`, `fs` and
   `onboarding`. It does load executable block plugins (`--block-dir`), whose
@@ -159,3 +167,18 @@ conversation items; the view shows the newest 500.
     `TerminalWebView` are internal classes that change weekly.
   - Web panes are an opt-in runtime flag (`axel panes web`), off by default,
     as the owner asked.
+- 2026-11-26: The first web pane held the whole thread in one page, drawn at a
+  device pixel ratio of 1. The owner found it unusable: the text was tiny on
+  Retina, and the layout was lost. It is now the terminal view's three panes,
+  each a web page drawn at the pane's own pixel ratio, redesigned. Checked in
+  a throwaway Rex `preview.25` server:
+  - `axel thread open` makes the three labelled blocks;
+  - each runs Ladybird;
+  - closing the composer closes the others, and every Ladybird exits.
+- 2026-11-26: Rex `preview.25` panes no longer export `REX_SERVER` or
+  `REX_SESSION`. A pane being closed can't ask Rex which session it is in, so
+  both composers now take their Rex address when they start, not when they
+  hang up. The terminal composer had the same bug with newer Rex.
+- 2026-11-26: Ladybird, like Chrome, applied the activity pane's `.agent` rule
+  to a turn of the conversation whose class was also `agent`. The activity
+  pane's rules are now under `#activity`.
