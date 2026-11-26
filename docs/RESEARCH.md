@@ -215,3 +215,56 @@ replacement for rewind). Different question from ours; see
 `adr/0001-turn-checkpoints-not-commit-checkpoints.md` for why we keep turn checkpoints
 and what to borrow (blob hashes, commit→turn links, packing after prune, zombie sweep).
 
+
+## terminal-browser (zenbu-labs, 2026-11-26)
+
+Chromium drawn inside a terminal pane. Read: its README, `cli/src/main.ts`,
+`shared/src/terminal-socket.ts`. Not installed here, not run.
+
+- **What it is.** Electron's offscreen rendering reads Chromium's pixels from
+  the GPU, and only the changed regions go to the terminal as Kitty graphics
+  protocol images. Input comes from the terminal's mouse and key reports; on
+  macOS a background Swift helper adds smooth trackpad scrolling. MIT.
+  Install with `brew install terminal-browser`.
+- **Terminals.** The README lists ghostty, rex, kitty, iTerm2, wezterm, cmux,
+  tmux, vscode, tty7, herdr and supacode as having built-in support. Windows
+  works only under WSL.
+- **CLI.** `terminal-browser open URL` runs in the foreground until the user
+  closes it, then exits with the session's code (0 when closed normally).
+  Other commands and flags:
+  - `--split right|left|up|down` opens it in a new pane;
+  - `--no-merge` keeps it out of a browser already running (also
+    `TERMINAL_BROWSER_NO_MERGE=1`);
+  - `--transparent`, `--allow-clipboard-read`, `--ssh=`;
+  - `ls`, `action` (an agent-browser compatible CLI), `upgrade`.
+- **What it dropped.** App mode, `--no-toolbar` and `--no-frame` were
+  removed: "app mode was removed from terminal-browser". Its bar always shows.
+- **Telemetry.** On by default; `DO_NOT_TRACK=1` or
+  `terminal-browser config set telemetry.usage off` turns it off.
+- **Terminal socket.** A terminal that wants deeper integration sets
+  `TERMINAL_BROWSER_TERMINAL_SOCKET`, a Unix socket with one JSON request per
+  connection. The methods are `hello`, `getCurrentPane`, `split`,
+  `listPanes`, `neighbor`, `sendText`, `pasteKey` and `focusPane`. Rex could
+  serve it; Axel doesn't need to.
+- **Neighbours.** awrit (Chromium, Kitty graphics, the first of these),
+  brow6el (CEF, sixel and Kitty graphics, "POC code quality"), Carbonyl
+  (Chromium drawn as text, works over SSH).
+- **What we take.** A web page as a pane, through `terminal-browser open
+  --no-merge`, with the terminal view as the fallback (RFD 0007).
+- **What we don't.** Its terminal socket, its agent CLI, and any reliance on
+  merging into a shared browser.
+
+## Rex 0.1.0-preview.25 (build 2154, 2026-11-26)
+
+Installed by the app's updater beside the running `preview.22`, and run here
+as a throwaway server (`--state-dir` in `/tmp`, `--config /dev/null`):
+- The API is at revision 24, up from 19. New methods: `client.undo_close`,
+  `session.transfer_window`, and the `com.superlogical.fs` block creator.
+- Terminals gain `program_resume_records`. `OSC7577_TOKEN` is set in each
+  pane, though not with `--restore=false`.
+- Block creators: `terminal`, `tunnel`, `fs`, `onboarding`. No browser or web
+  block. Executable block plugins load from `--block-dir`, but their protocol
+  isn't documented.
+- Program resume needs a trust rule (`rex.set("resume.trust.NAME", { command
+  = {...} })`). Rex ships rules for `claude`, `codex` and `opencode`, and
+  checks that the reporting process is the program the command starts.

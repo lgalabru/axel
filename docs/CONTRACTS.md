@@ -460,6 +460,18 @@ pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String,
 ```
 `axel_inbox::kind::TURN = 40` ("turn"); `is_message(k)` stays `k < 20`.
 
+## Web panes (RFD 0007)
+
+```rust
+// axel-tui
+pub fn load_thread_data(store: &Store, owner_pk: &str, thread_id: &str) -> anyhow::Result<model::ThreadData>;  // what both views draw
+// axel-store
+impl Store { pub fn change_marker(&self) -> Result<(i64, i64), Error>; }   // (last event seq, items revision): moves when a view might change
+// axel (bin): `axel web pane|serve THREAD`, `axel panes [auto|web|terminal]` ($AXEL_PANES overrides $AXEL_HOME/settings.json)
+// HTTP on 127.0.0.1: GET /?k=SECRET → cookie axel_web; GET / · /app.css · /app.js · /api/thread · /api/events (SSE: `data: VERSION`);
+// POST /api/send {text, steer} · /api/answer {session_id, item_id, option_id} · /api/cancel {session_id} → 200 JSON, or 409 {error}
+```
+
 ## axel-tui additions (thread view)
 
 ```rust

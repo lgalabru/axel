@@ -220,6 +220,21 @@ $ axel                               # in any Rex terminal
    blocked or unread, otherwise on the launcher. A Rex `init.lua` action
    (`rex do axel`) can bind this to a key.
 
+## Web panes (RFD 0007)
+
+A thread view can be a web page in its Rex pane instead of terminal text:
+`axel web pane THREAD` serves the thread on `127.0.0.1` from that process and
+runs `terminal-browser open --no-merge URL` in the same pane. The page draws
+`axel_tui::load_thread_data` and sends through `axel_tui::thread::dispatch`,
+as the terminal view does, so both route a message the same way. A secret
+cookie, a `Host` check and same-origin JSON writes keep other pages out.
+
+`axel panes auto|web|terminal` chooses (`$AXEL_PANES` overrides it). `auto`,
+the default, means web where `terminal-browser` is installed and we're in
+Rex. Without it, or when it can't draw, the pane falls back to the terminal
+view and says why. The launcher, dashboard, inbox and question popups stay
+terminal panes for now.
+
 ## Coming back after Rex restarts (OSC 7577)
 
 Rex's Program Resume Protocol (OSC 7577, revision 0.5) lets a program tell
@@ -232,6 +247,7 @@ pane.
 
 | Pane | Comes back as |
 |---|---|
+| A thread's web pane | `axel web pane T` |
 | A thread's stream, composer, tokens pane | the same command: `axel thread stream T`, `axel thread compose T`, `axel ui --screen usage --thread T` |
 | An agent's session, managed host or harness in a pane | `axel session resume S`, with the session's work directory as `cwd` |
 | The floating launcher, its threads list, the corner tokens pane, questions | nothing: they are summoned, not kept |
