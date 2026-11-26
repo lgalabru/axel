@@ -228,13 +228,44 @@ fn a_revoked_device_speaks_for_no_one_from_then_on() {
 }
 
 #[test]
-fn a_host_of_another_owner_gets_no_profiles_of_ours() {
+fn a_host_of_another_owner_and_we_keep_our_agents_apart() {
     let w = World::new();
     w.ok_here(&["agent", "new", "reviewer"]);
-    w.keystore_there("mini").owner().unwrap();
+    // mini is its owner's home, with an agent of its own it has published.
+    let mini_keys = w.keystore_there("mini");
+    let mini = mini_keys.owner().unwrap();
+    let theirs = Keypair::generate();
+    mini_keys.put_agent(&theirs).unwrap();
+    let mini_store = w.store_there("mini");
+    let agent = mini_store
+        .insert_agent(&NewAgent {
+            pubkey: theirs.public().to_base58(),
+            name: "intruder".into(),
+            auth_tag: Some(attest(&mini, &theirs.public(), "").unwrap().to_tag()),
+            ..Default::default()
+        })
+        .unwrap();
+    let wire = axel_store::ProfileWire::of(&mini_store.profile(&agent.profile_id).unwrap().unwrap(), &mini.public().to_base58());
+    let record = EnvelopeBuilder::new(kind::AGENT_PROFILE, serde_json::to_string(&wire).unwrap()).sign(&mini).unwrap();
+    mini_store.post(&record).unwrap();
+    // It also claims our key as its device, without our consent.
+    let claim = axel_store::DeviceRecord {
+        op: axel_store::DeviceOp::Link,
+        device: w.key_here().public().to_base58(),
+        label: "yours".into(),
+        route: Some(axel_store::PairingRoute::Ssh),
+        consent: None,
+    };
+    let claim = EnvelopeBuilder::new(kind::OWNER_DEVICE, serde_json::to_string(&claim).unwrap()).sign(&mini).unwrap();
+    mini_store.append(&claim).unwrap();
+
     w.ok_here(&["host", "add", "mini"]);
     w.ok_here(&["sync", "mini"]);
     assert!(w.store_there("mini").profile_by_name("reviewer").unwrap().is_none(), "a plain host isn't one of our devices");
+    let here = w.store_here();
+    assert!(here.profile_by_name("intruder").unwrap().is_none(), "nor are its agents ours");
+    let me = w.key_here().public().to_base58();
+    assert_eq!(here.principal(&me).unwrap(), me, "and its claim on our key went nowhere");
 }
 
 fn chrono_now() -> i64 {

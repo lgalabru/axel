@@ -1728,8 +1728,6 @@
   zh-Hans: "{label} 已关联（{route}）：它的密钥 {key} 现在代表你。已同步：发出 {pushed}，收到 {pulled}。"
 "{label} is revoked: nothing it signs from now on speaks for you":
   zh-Hans: "{label} 已撤销：从现在起它签署的任何内容都不再代表你"
-"{label} wasn't linked from this machine's key; revoke it from the machine that linked it":
-  zh-Hans: "{label} 不是由本机的密钥关联的；请在关联它的那台机器上撤销"
 "{name} was removed":
   zh-Hans: "{name} 已被删除"
 "this machine":
@@ -1777,3 +1775,7 @@
   zh-Hans: "自身规则与团队规则取更严格者；单独列出的智能体另外允许"
 "its own reach sets no rule, so its teams' applies; agents it names come on top":
   zh-Hans: "自身可联系范围未设规则，因此按团队规则；单独列出的智能体另外允许"
+"{name} is another owner's agent: it doesn't run as one of yours":
+  zh-Hans: "{name} 是其他所有者的智能体：它不能作为你的智能体运行"
+"{host} answered with another key than the one it said it has":
+  zh-Hans: "{host} 用了与它声明的不同的密钥作答"

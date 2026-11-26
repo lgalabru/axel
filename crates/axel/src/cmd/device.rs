@@ -33,7 +33,9 @@ pub fn link(label: &str, ssh_target: Option<&str>, route: PairingRoute, code: Op
         bail!("{}", t!("{label} has this machine's own key: it is this machine", label = label));
     }
     check_route(route, &owner.public(), &device, code, label)?;
-    let record = DeviceRecord { op: DeviceOp::Link, device: device_key.clone(), label: label.into(), route: Some(route) };
+    let consent = super::host::ask_consent(&host, &owner.public())?;
+    let record =
+        DeviceRecord { op: DeviceOp::Link, device: device_key.clone(), label: label.into(), route: Some(route), consent: Some(consent) };
     ctx.store.post(&sign_record(&owner, &record)?).context(t!("recording the link"))?;
     publish(&ctx)?;
     let report = super::host::sync_host(&ctx, &host, false)?;
@@ -106,12 +108,10 @@ pub fn list() -> Result<()> {
 /// `axel device revoke LABEL`.
 pub fn revoke(label: &str) -> Result<()> {
     let ctx = Ctx::open()?;
-    let device = ctx.store.device_by_label(label)?.with_context(|| t!("no device named {name}", name = label))?;
     let owner = ctx.owner()?;
-    if device.owner.as_deref() != Some(owner.public().to_base58().as_str()) {
-        bail!("{}", t!("{label} wasn't linked from this machine's key; revoke it from the machine that linked it", label = label));
-    }
-    let record = DeviceRecord { op: DeviceOp::Revoke, device: device.pubkey.clone(), label: label.into(), route: None };
+    let me = ctx.store.principal(&owner.public().to_base58())?;
+    let device = ctx.store.device_by_label(label, &me)?.with_context(|| t!("no device named {name}", name = label))?;
+    let record = DeviceRecord { op: DeviceOp::Revoke, device: device.pubkey.clone(), label: label.into(), route: None, consent: None };
     ctx.store.post(&sign_record(&owner, &record)?)?;
     // The other devices learn it on their next sync; this pushes it now.
     for host in ctx.store.hosts()? {
@@ -150,7 +150,7 @@ pub fn publish(ctx: &Ctx) -> Result<usize> {
     let mut signed = 0_usize;
     if ctx.store.device(&me)?.is_none() {
         let label = ctx.store.local_environment()?.label;
-        let record = DeviceRecord { op: DeviceOp::Label, device: me.clone(), label, route: None };
+        let record = DeviceRecord { op: DeviceOp::Label, device: me.clone(), label, route: None, consent: None };
         ctx.store.post(&sign_record(&key, &record)?)?;
         signed += 1;
     }
@@ -191,6 +191,11 @@ pub fn local_instance(ctx: &Ctx, profile_id: &str) -> Result<Agent> {
         }
     }
     let profile = ctx.store.profile(profile_id)?.with_context(|| t!("no agent profile {id}", id = profile_id))?;
+    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
+    let owner = profile.owner.as_deref().map(|o| ctx.store.principal(o)).transpose()?;
+    if owner.as_deref() != Some(me.as_str()) {
+        bail!("{}", t!("{name} is another owner's agent: it doesn't run as one of yours", name = profile.name));
+    }
     if profile.archived_at.is_some() {
         bail!("{}", t!("{name} was removed", name = profile.name));
     }

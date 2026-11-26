@@ -182,6 +182,9 @@ pub enum Request {
     PrepareRepo { repo: String },
     /// Make a key for a job (the agent delegates to it).
     JobKey,
+    /// Sign this machine's consent to `owner` linking it (RFD 0004).  Whoever
+    /// can run this over SSH can already act as this machine's user.
+    ConsentLink { owner: String },
     StartJob { job: Box<Job> },
     SessionCommand {
         session_id: String,
@@ -207,6 +210,7 @@ pub enum Response {
     Items { changes: Vec<ItemChange> },
     Repo { path: String },
     JobKey { pubkey: String },
+    Consent { device: String, consent: String },
     Started { session_id: String },
     Reply { reply: socket::Reply },
     Branches { branches: Vec<RemoteBranch> },
@@ -387,13 +391,13 @@ fn handle(req: Request) -> Result<Response> {
     Ok(match req {
         Request::Hello => hello(&ctx)?,
         Request::PushEvents { events } => {
-            let mut applied = 0;
-            for e in &events {
-                if ctx.store.append(e)?.projected {
-                    applied += 1;
-                }
-            }
+            let applied = ingest(&ctx, &events)?.iter().filter(|(_, r)| r.projected).count();
             Response::Pushed { applied }
+        }
+        Request::ConsentLink { owner } => {
+            let owner: axel_identity::PublicKey = owner.parse()?;
+            let key = ctx.owner()?;
+            Response::Consent { device: key.public().to_base58(), consent: axel_identity::consent_to_link(&key, &owner) }
         }
         Request::PullEvents { cursor, owner } => pull_events(&ctx, cursor, owner.as_deref())?,
         Request::PullItems { cursor } => {
@@ -444,6 +448,28 @@ fn handle(req: Request) -> Result<Response> {
 }
 
 /// Who this host is, and what it lacks to run agents.
+/// Store envelopes from another machine.  Device links go first, so the
+/// owner records after them are judged with them in place; then a profile,
+/// team, instance or schedule is kept only from a key that speaks for this
+/// machine's owner.  Another owner's records are never ours to keep: they
+/// would put their agents in our lists, and our launcher.
+fn ingest(ctx: &Ctx, events: &[Envelope]) -> Result<Vec<(Envelope, axel_store::Appended)>> {
+    let mut out = Vec::with_capacity(events.len());
+    let (links, rest): (Vec<&Envelope>, Vec<&Envelope>) = events.iter().partition(|e| e.kind == axel_store::kind::OWNER_DEVICE);
+    for e in links {
+        out.push((e.clone(), ctx.store.append(e)?));
+    }
+    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
+    for e in rest {
+        if axel_inbox::kind::is_owner_record(e.kind) && ctx.store.principal(&e.from)? != me {
+            continue;
+        }
+        out.push((e.clone(), ctx.store.append(e)?));
+    }
+    debug_assert!(out.len() <= events.len());
+    Ok(out)
+}
+
 /// Every thread's envelopes after `cursor`, and the owner records the
 /// caller may have.  What this machine changed is signed first, so it goes.
 fn pull_events(ctx: &Ctx, cursor: i64, caller_owner: Option<&str>) -> Result<Response> {
@@ -656,7 +682,15 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
         let Some((last, _)) = batch.last() else { break };
         let last = *last;
         let n = batch.len();
-        call(host, &Request::PushEvents { events: batch.into_iter().map(|(_, e)| e).collect() })?;
+        let mut events = Vec::with_capacity(n);
+        for (_, e) in batch {
+            // A host of another owner gets our own device links only, not
+            // the links of third parties we happen to hold.
+            if linked || !axel_inbox::kind::is_owner_record(e.kind) || ctx.store.principal(&e.from)? == me {
+                events.push(e);
+            }
+        }
+        call(host, &Request::PushEvents { events })?;
         report.pushed += n;
         cursor = last;
         ctx.store.set_peer_cursor(&host.id, SyncStream::EventsOut, cursor)?;
@@ -669,14 +703,16 @@ pub fn sync_host(ctx: &Ctx, host: &Environment, with_git: bool) -> Result<SyncRe
     for _ in 0..SYNC_BATCHES_MAX {
         let Response::Events { events } = call(host, &Request::PullEvents { cursor, owner: Some(me.clone()) })? else { bail!("{}", t!("unexpected reply")) };
         let n = events.len();
-        for (seq, e) in &events {
-            let r = ctx.store.append(e)?;
+        let envelopes: Vec<Envelope> = events.iter().map(|(_, e)| e.clone()).collect();
+        for (e, r) in ingest(ctx, &envelopes)? {
             if r.inserted {
                 report.pulled += 1;
                 if r.projected && e.kind == axel_inbox::kind::NOTE {
                     notes.push(e.clone());
                 }
             }
+        }
+        if let Some((seq, _)) = events.last() {
             cursor = *seq;
         }
         ctx.store.set_peer_cursor(&host.id, SyncStream::EventsIn, cursor)?;
@@ -1021,6 +1057,19 @@ fn start_remote(ctx: &Ctx, host: &Environment, thread_id: &str, agent_name: &str
     let _ = sync_host(ctx, host, false);
     ensure_follower(host);
     Ok(session_id)
+}
+
+/// `host`'s consent to `owner` linking it, checked to be from the key the
+/// host said it has.
+pub fn ask_consent(host: &Environment, owner: &axel_identity::PublicKey) -> Result<String> {
+    let Response::Consent { device, consent } = call(host, &Request::ConsentLink { owner: owner.to_base58() })? else {
+        bail!("{}", t!("unexpected reply"));
+    };
+    if host.host_pubkey.as_deref() != Some(device.as_str()) {
+        bail!("{}", t!("{host} answered with another key than the one it said it has", host = host.label));
+    }
+    axel_identity::verify_link_consent(owner, &device.parse()?, &consent)?;
+    Ok(consent)
 }
 
 /// A key on `host` for the job, and `agent`'s delegation to it for `thread_id`.
@@ -1856,8 +1905,9 @@ mod tests {
     fn linked_host(temp: &Path, home: &axel_identity::Keypair, profile_owner: &axel_identity::Keypair) -> (Ctx, String, String) {
         use axel_inbox::EnvelopeBuilder;
         let host = Ctx { store: axel_store::Store::open_memory().unwrap(), keystore: axel_identity::Keystore::open_at(temp.join("host-keys.json"), false).unwrap(), rex: None };
-        let host_key = host.owner().unwrap().public().to_base58();
-        let link = axel_store::DeviceRecord { op: axel_store::DeviceOp::Link, device: host_key, label: "linux".into(), route: Some(axel_store::PairingRoute::Ssh) };
+        let host_kp = host.owner().unwrap();
+        let consent = Some(axel_identity::consent_to_link(&host_kp, &home.public()));
+        let link = axel_store::DeviceRecord { op: axel_store::DeviceOp::Link, device: host_kp.public().to_base58(), label: "linux".into(), route: Some(axel_store::PairingRoute::Ssh), consent };
         host.store.post(&EnvelopeBuilder::new(axel_store::kind::OWNER_DEVICE, serde_json::to_string(&link).unwrap()).sign(home).unwrap()).unwrap();
         let profile = axel_store::ProfileWire {
             profile_id: "p-reviewer".into(),
