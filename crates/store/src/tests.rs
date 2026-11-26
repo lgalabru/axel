@@ -3219,3 +3219,24 @@ fn an_envelope_dated_past_i64_is_refused_not_wrapped() {
     assert!(s.append(&edge).unwrap().projected);
     assert_eq!(s.get_event(&edge.id).unwrap().unwrap(), edge, "read back unchanged");
 }
+
+#[test]
+fn the_change_marker_moves_with_every_event_and_every_item_change_and_not_otherwise() {
+    let s = store();
+    let owner = Keypair::generate();
+    let agent = Keypair::generate();
+    let first = s.change_marker().unwrap();
+    assert_eq!(s.change_marker().unwrap(), first, "reading changes nothing");
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    let after_thread = s.change_marker().unwrap();
+    assert!(after_thread.0 > first.0, "an event moves the first counter");
+    s.add_participant(&owner, &thread.id, &pk(&agent), ParticipantRole::Agent).unwrap();
+    let session = s.start_session(&agent, &new_session(&thread.id, &agent, "mac")).unwrap();
+    let before_item = s.change_marker().unwrap();
+    let pushed = s.push_item(&item(&session, 1, ItemKind::AssistantMessage, None, None, serde_json::json!({ "text": "hi" }))).unwrap();
+    let after_item = s.change_marker().unwrap();
+    assert_eq!(after_item.0, before_item.0, "an item is no event");
+    assert!(after_item.1 > before_item.1, "but it moves the second counter");
+    s.update_item(&pushed.id, None, Some(serde_json::json!({ "text": "hi there" }))).unwrap();
+    assert!(s.change_marker().unwrap().1 > after_item.1, "and so does editing it while it streams");
+}

@@ -270,6 +270,15 @@ impl Store {
         Ok(self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))?)
     }
 
+    /// Two counters that move whenever anything a view shows does: the last
+    /// event's `seq` (threads, sessions, status, usage, messages) and the
+    /// conversation items' revision.  Two single-row reads, for a view that
+    /// polls to skip a full reload while nothing changed.
+    pub fn change_marker(&self) -> Result<(i64, i64), Error> {
+        let items: i64 = self.conn.query_row("SELECT COALESCE(MAX(n), 0) FROM item_rev", [], |r| r.get(0))?;
+        Ok((self.last_event_seq()?, items))
+    }
+
     // -------------------------------------------------------------- items
 
     /// Changes to the conversation items of sessions that run on
