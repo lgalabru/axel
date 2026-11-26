@@ -142,10 +142,10 @@ pub enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
-    /// How thread views are drawn: `web` (a page in the pane, through
-    /// terminal-browser), `terminal` (text), or `auto` (web when it can).
+    /// How thread views are drawn: `terminal` (text, the default) or `web`
+    /// (experimental: a web page drawn by Ladybird, where it is installed).
     Panes {
-        #[arg(value_name = "auto|web|terminal")]
+        #[arg(value_name = "terminal|web")]
         choice: Option<String>,
     },
     /// A thread's view as a web page (RFD 0007).

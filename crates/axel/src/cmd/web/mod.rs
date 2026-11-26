@@ -1,15 +1,16 @@
 //! Web panes (RFD 0007): a thread's view drawn as a web page in its Rex
-//! pane, by `terminal-browser` (Chromium, drawn with the Kitty graphics
-//! protocol), instead of as terminal text.
+//! pane by Ladybird's terminal mode (`--headless=terminal`: frames as Kitty
+//! graphics, input from the terminal's mouse and key reports), instead of as
+//! terminal text.
 //!
 //! `axel web pane THREAD` is the pane's whole program.  It serves the
-//! thread on `127.0.0.1` from this process and runs `terminal-browser`
-//! in the same pane; when the browser closes, the server goes with it, so
-//! nothing outlives the pane.  The page shows the model the terminal view
+//! thread on `127.0.0.1` from this process and runs Ladybird in the same
+//! pane; when Ladybird closes, the server goes with it, so nothing outlives
+//! the pane.  The page shows the model the terminal view
 //! draws (`axel_tui::load_thread_data`) and sends what you type the way the
-//! terminal composer does (`axel_tui::thread::dispatch`).  Without
-//! `terminal-browser`, or where it can't start, the pane falls back to the
-//! terminal view; `axel panes terminal` makes that the choice.
+//! terminal composer does (`axel_tui::thread::dispatch`).  Where Ladybird
+//! isn't installed, or can't draw, the pane is the terminal view; `axel
+//! panes terminal` makes that the choice everywhere.
 
 mod assets;
 mod server;
@@ -28,43 +29,66 @@ use serde_json::{Value, json};
 use super::Ctx;
 use server::Action;
 
-/// The program that draws web pages in a terminal pane.
-pub const BROWSER: &str = "terminal-browser";
+/// Where Ladybird is looked for, after `$AXEL_LADYBIRD`: on PATH (Linux
+/// packages), then the macOS app in `/Applications` and `~/Applications`.
+const LADYBIRD_ON_PATH: [&str; 2] = ["ladybird", "Ladybird"];
+const LADYBIRD_APP: &str = "Ladybird.app/Contents/MacOS/Ladybird";
 
-/// A browser that gives up within this long of starting couldn't draw in
-/// this terminal: the pane falls back to the terminal view.  Chromium takes
-/// about a second to come up; a refusal comes well before three.
+/// Ladybird's executable, when it is installed.  `$AXEL_LADYBIRD`, when
+/// set, is the only place looked at: a path, or anything that isn't one to
+/// mean "none" (what the tests use).
+pub fn ladybird() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("AXEL_LADYBIRD") {
+        let path = PathBuf::from(explicit);
+        return path.is_file().then_some(path);
+    }
+    if let Some(found) = LADYBIRD_ON_PATH.iter().find_map(|name| super::launch::which(name)) {
+        return Some(found);
+    }
+    let homes = [Some(PathBuf::from("/Applications")), dirs::home_dir().map(|h| h.join("Applications"))];
+    homes.into_iter().flatten().map(|dir| dir.join(LADYBIRD_APP)).find(|p| p.is_file())
+}
+
+/// Ladybird that gives up within this long of starting couldn't draw in
+/// this terminal: the pane falls back to the terminal view.  It comes up in
+/// well under a second; a refusal comes well before three.
 const FALLBACK_WINDOW_SECS: u64 = 3;
 
 /// The most text one message may carry from the page (bytes): the body
 /// limit of the server, which also holds the JSON around it.
 const MESSAGE_BYTES_MAX: usize = server::BODY_BYTES_MAX;
 
-/// How a thread's panes are drawn.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How a thread's panes are drawn.  Web panes are experimental, so they
+/// are off until the owner turns them on, and then used only where Ladybird
+/// is installed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneChoice {
-    /// A web page where `terminal-browser` is installed and we're in Rex;
-    /// the terminal view elsewhere.
+    /// Terminal text: the default.
     #[default]
-    Auto,
-    /// A web page wherever `terminal-browser` can draw one.
-    Web,
-    /// Terminal text, always.
     Terminal,
+    /// A web page wherever Ladybird is installed; terminal text elsewhere.
+    Web,
 }
 
 impl PaneChoice {
     pub fn as_str(self) -> &'static str {
         match self {
-            PaneChoice::Auto => "auto",
-            PaneChoice::Web => "web",
             PaneChoice::Terminal => "terminal",
+            PaneChoice::Web => "web",
         }
     }
 
     pub fn parse(text: &str) -> Option<PaneChoice> {
-        [PaneChoice::Auto, PaneChoice::Web, PaneChoice::Terminal].into_iter().find(|c| c.as_str() == text.trim())
+        [PaneChoice::Terminal, PaneChoice::Web].into_iter().find(|c| c.as_str() == text.trim())
+    }
+}
+
+/// A saved choice this build doesn't know (a newer build's) reads as the
+/// default rather than making the whole settings file unreadable.
+impl<'de> Deserialize<'de> for PaneChoice {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<PaneChoice, D::Error> {
+        Ok(PaneChoice::parse(&String::deserialize(d)?).unwrap_or_default())
     }
 }
 
@@ -92,14 +116,10 @@ pub fn pane_choice() -> PaneChoice {
     std::env::var("AXEL_PANES").ok().and_then(|v| PaneChoice::parse(&v)).unwrap_or_else(|| load_settings().panes)
 }
 
-/// Whether this thread view should open as a web pane, given `in_rex`.
-pub fn web_panes(in_rex: bool) -> bool {
-    let has_browser = super::launch::which(BROWSER).is_some();
-    match pane_choice() {
-        PaneChoice::Terminal => false,
-        PaneChoice::Web => has_browser,
-        PaneChoice::Auto => has_browser && in_rex,
-    }
+/// Whether a thread view opens as a web pane: the owner turned web panes
+/// on, and Ladybird is here to draw them.
+pub fn web_panes() -> bool {
+    pane_choice() == PaneChoice::Web && ladybird().is_some()
 }
 
 /// What a thread's pane runs when it is a web pane.
@@ -112,11 +132,11 @@ pub fn pane_command(thread_id: &str) -> Vec<String> {
 pub fn panes(choice: Option<&str>) -> Result<()> {
     let Some(choice) = choice else {
         let current = pane_choice();
-        let browser = super::launch::which(BROWSER).map_or_else(|| t!("not installed").to_string(), |p| p.display().to_string());
-        println!("{}", t!("panes: {choice} (terminal-browser: {browser})", choice = current.as_str(), browser = browser));
+        let browser = ladybird().map_or_else(|| t!("not installed").to_string(), |p| p.display().to_string());
+        println!("{}", t!("panes: {choice} (Ladybird: {browser})", choice = current.as_str(), browser = browser));
         return Ok(());
     };
-    let choice = PaneChoice::parse(choice).with_context(|| t!("panes are auto, web or terminal"))?;
+    let choice = PaneChoice::parse(choice).with_context(|| t!("panes are web or terminal"))?;
     let mut settings = load_settings();
     settings.panes = choice;
     let path = settings_path();
@@ -125,8 +145,8 @@ pub fn panes(choice: Option<&str>) -> Result<()> {
     serde_json::to_writer_pretty(tmp.as_file_mut(), &settings)?;
     tmp.persist(&path)?;
     println!("{}", t!("thread views open as {choice} panes from now on", choice = choice.as_str()));
-    if choice == PaneChoice::Web && super::launch::which(BROWSER).is_none() {
-        println!("{}", t!("terminal-browser isn't installed, so they stay terminal panes until it is: brew install terminal-browser"));
+    if choice == PaneChoice::Web && ladybird().is_none() {
+        println!("{}", t!("Ladybird isn't installed, so they stay terminal panes until it is: ladybird.org"));
     }
     Ok(())
 }
@@ -134,22 +154,22 @@ pub fn panes(choice: Option<&str>) -> Result<()> {
 /// `axel web pane THREAD`: this pane shows the thread as a web page.
 pub fn pane(thread_id: &str) -> Result<()> {
     let backend = ThreadBackend::open(thread_id)?;
-    let Some(browser) = super::launch::which(BROWSER) else {
-        return fall_back(thread_id, t!("terminal-browser isn't installed"));
+    let Some(browser) = ladybird() else {
+        return fall_back(thread_id, t!("Ladybird isn't installed"));
     };
     // After a Rex restart this pane comes back as a web pane again.
     super::resume::come_back_as(&["web", "pane", thread_id], std::env::current_dir().ok().as_deref());
     let running = server::start(Arc::new(backend))?;
     let started = Instant::now();
-    // `--no-merge`: this pane's own browser, not a tab in one open elsewhere,
-    // so it lives and dies with the pane (and with this server).
+    // Terminal mode draws in this pane.  A temporary profile keeps each pane
+    // apart from the owner's Ladybird (cookies, history) and from each other.
     let status = std::process::Command::new(&browser)
-        .args(["open", "--no-merge", &running.url()])
+        .args(["--headless=terminal", "--temporary-profile", &running.url()])
         .status()
         .with_context(|| t!("starting {program}", program = browser.display()))?;
     let gave_up = !status.success() && started.elapsed() < Duration::from_secs(FALLBACK_WINDOW_SECS) && running.served() == 0;
     if gave_up {
-        return fall_back(thread_id, &t!("terminal-browser couldn't draw here ({status})", status = status));
+        return fall_back(thread_id, &t!("Ladybird couldn't draw here ({status})", status = status));
     }
     Ok(())
 }

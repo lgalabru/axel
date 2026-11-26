@@ -397,7 +397,7 @@ fn open_thread_here(ctx: &Ctx, thread_id: &str) -> Result<()> {
         }
         label_block_with_thread(ctx, rex, &block, thread_id);
         name_window_after_thread(ctx, rex, thread_id);
-        if super::web::web_panes(true) {
+        if super::web::web_panes() {
             return super::web::pane(thread_id);
         }
         return split_here(ctx, rex, thread_id);
@@ -524,7 +524,7 @@ pub fn open_split(thread_id: &str) -> Result<()> {
 /// (RFD 0007), or the stream with the composer below; outside Rex, the full
 /// in-TUI view.
 pub fn open_here(thread_id: &str) -> Result<()> {
-    if super::web::web_panes(axel_rex::detect().is_some()) {
+    if super::web::web_panes() {
         return super::web::pane(thread_id);
     }
     open_here_as_text(thread_id)
@@ -624,7 +624,7 @@ fn composer_below(view: &serde_json::Value, stream: &str) -> Option<String> {
 /// shell is busy (or unknown), the thread docks as a column on the right.
 /// Then Axel's floating panes close, this one last (which ends this process).
 pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
-    if super::web::web_panes(true) {
+    if super::web::web_panes() {
         return dock_web_thread(ctx, rex, thread_id);
     }
     let me = rex.env().block.clone();
@@ -838,7 +838,7 @@ fn find_split(node: &serde_json::Value, want: &dyn Fn(&str, &str) -> bool) -> Op
 fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let rex = ctx.rex.as_ref().context(t!("not inside Rex"))?;
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
-    if super::web::web_panes(true) {
+    if super::web::web_panes() {
         // One web pane holds the whole thread.
         let label = axel_tui::util::ellipsize(&thread.title, 40);
         rex.new_window(&label, &super::web::pane_command(&thread.id), None, &passthrough_env(), true)?;

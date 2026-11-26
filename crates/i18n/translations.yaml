@@ -1700,22 +1700,22 @@
   zh-Hans: "未安装"
 "nothing to send":
   zh-Hans: "没有要发送的内容"
-"panes are auto, web or terminal":
-  zh-Hans: "窗格可以是 auto、web 或 terminal"
-"panes: {choice} (terminal-browser: {browser})":
-  zh-Hans: "窗格：{choice}（terminal-browser：{browser}）"
+"panes are web or terminal":
+  zh-Hans: "窗格可以是 web 或 terminal"
+"panes: {choice} (Ladybird: {browser})":
+  zh-Hans: "窗格：{choice}（Ladybird：{browser}）"
 "queued: it goes in when the running turn ends":
   zh-Hans: "已排队：当前轮次结束后发送"
 "sent into the running turn: read at its next step":
   zh-Hans: "已发送到当前轮次：会在下一步读取"
 "starting {program}":
   zh-Hans: "启动 {program}"
-"terminal-browser couldn't draw here ({status})":
-  zh-Hans: "terminal-browser 无法在这里绘制（{status}）"
-"terminal-browser isn't installed":
-  zh-Hans: "未安装 terminal-browser"
-"terminal-browser isn't installed, so they stay terminal panes until it is: brew install terminal-browser":
-  zh-Hans: "未安装 terminal-browser，因此在安装前仍为终端窗格：brew install terminal-browser"
+"Ladybird couldn't draw here ({status})":
+  zh-Hans: "Ladybird 无法在这里绘制（{status}）"
+"Ladybird isn't installed":
+  zh-Hans: "未安装 Ladybird"
+"Ladybird isn't installed, so they stay terminal panes until it is: ladybird.org":
+  zh-Hans: "未安装 Ladybird，因此在安装前仍为终端窗格：ladybird.org"
 "that message is longer than {max} bytes":
   zh-Hans: "这条消息超过 {max} 字节"
 "that session is on another thread":

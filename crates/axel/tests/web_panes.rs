@@ -1,15 +1,16 @@
 //! Web panes (RFD 0007) through the binary: `axel web pane` serves the
-//! thread and hands its address to `terminal-browser`; without one, or when
-//! it can't draw, the pane falls back to the terminal view; `axel panes`
-//! chooses.  A stand-in `terminal-browser` loads the page the way the real
-//! one would, with `curl`.
+//! thread and hands its address to Ladybird's terminal mode; without
+//! Ladybird, or when it can't draw, the pane falls back to the terminal
+//! view; `axel panes` turns web panes on.  A stand-in Ladybird
+//! (`$AXEL_LADYBIRD`) loads the page the way the real one would, with `curl`,
+//! and keeps the Ladybird installed on the machine out of the tests.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-/// A stand-in terminal-browser: records its arguments, then loads the page
+/// A stand-in Ladybird: records its arguments, then loads the page
 /// it was given (following the secret's redirect, keeping the cookie) and
 /// saves what it got.
 const FAKE_BROWSER: &str = r#"#!/bin/sh
@@ -22,7 +23,7 @@ curl -s -b "$HOME/jar" "$base/api/thread" > "$HOME/thread.json"
 curl -s -o /dev/null -w '%{http_code}' "$base/api/thread" > "$HOME/no-cookie.status"
 "#;
 
-/// A terminal-browser that can't draw here: it gives up at once.
+/// A Ladybird that can't draw here: it gives up at once.
 const REFUSING_BROWSER: &str = "#!/bin/sh\necho 'no kitty graphics here' >&2\nexit 1\n";
 
 struct Home {
@@ -41,7 +42,7 @@ impl Home {
     }
 
     fn browser(&self, body: &str) {
-        let path = self.path().join("bin").join("terminal-browser");
+        let path = self.path().join("bin").join("ladybird");
         std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
@@ -53,6 +54,7 @@ impl Home {
             .env("AXEL_HOME", self.path().join(".axel"))
             .env("AXEL_KEYSTORE", "file")
             .env("PATH", format!("{}:/usr/bin:/bin", self.path().join("bin").display()))
+            .env("AXEL_LADYBIRD", self.path().join("bin").join("ladybird"))
             .args(args)
             .stdin(Stdio::null());
         if let Some(p) = panes {
@@ -80,7 +82,7 @@ impl Home {
 }
 
 #[test]
-fn a_web_pane_serves_its_thread_to_terminal_browser_and_only_to_it() {
+fn a_web_pane_serves_its_thread_to_ladybird_and_only_to_it() {
     let home = Home::new();
     home.browser(FAKE_BROWSER);
     let thread = home.thread();
@@ -88,7 +90,7 @@ fn a_web_pane_serves_its_thread_to_terminal_browser_and_only_to_it() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 
     let argv: Vec<String> = home.read("browser.argv").lines().map(String::from).collect();
-    assert_eq!(argv[..2], ["open", "--no-merge"], "its own browser, not a tab in another: {argv:?}");
+    assert_eq!(argv[..2], ["--headless=terminal", "--temporary-profile"], "drawn in this pane, with a profile of its own: {argv:?}");
     assert!(argv[2].starts_with("http://127.0.0.1:") && argv[2].contains("/?k="), "{argv:?}");
     assert!(home.read("page.html").contains("<title>Axel</title>"), "the page loaded");
     let view: serde_json::Value = serde_json::from_str(&home.read("thread.json")).unwrap();
@@ -98,30 +100,32 @@ fn a_web_pane_serves_its_thread_to_terminal_browser_and_only_to_it() {
 }
 
 #[test]
-fn a_pane_without_terminal_browser_or_where_it_cant_draw_falls_back_to_text() {
+fn a_pane_without_ladybird_or_where_it_cant_draw_falls_back_to_text() {
     let home = Home::new();
     let thread = home.thread();
     let missing = home.run(&["web", "pane", &thread], None);
     let said = String::from_utf8_lossy(&missing.stderr);
-    assert!(said.contains("terminal-browser isn't installed; showing the thread as terminal text"), "{said}");
+    assert!(said.contains("Ladybird isn't installed; showing the thread as terminal text"), "{said}");
 
     home.browser(REFUSING_BROWSER);
     let refused = home.run(&["web", "pane", &thread], None);
     let said = String::from_utf8_lossy(&refused.stderr);
-    assert!(said.contains("terminal-browser couldn't draw here") && said.contains("showing the thread as terminal text"), "{said}");
+    assert!(said.contains("Ladybird couldn't draw here") && said.contains("showing the thread as terminal text"), "{said}");
 }
 
 #[test]
-fn the_pane_choice_is_saved_and_the_environment_overrides_it() {
+fn web_panes_are_off_until_turned_on_and_need_ladybird() {
     let home = Home::new();
     let shown = home.ok(&["panes"]);
-    assert!(shown.contains("panes: auto") && shown.contains("terminal-browser: not installed"), "{shown}");
+    assert!(shown.contains("panes: terminal") && shown.contains("Ladybird: not installed"), "off by default: {shown}");
     let set = home.ok(&["panes", "web"]);
-    assert!(set.contains("isn't installed"), "it says web needs terminal-browser: {set}");
+    assert!(set.contains("Ladybird isn't installed"), "it says web needs Ladybird: {set}");
     assert!(home.ok(&["panes"]).contains("panes: web"));
+    home.browser(FAKE_BROWSER);
+    assert!(home.ok(&["panes"]).contains(&format!("Ladybird: {}", home.path().join("bin").join("ladybird").display())));
     let o = home.run(&["panes"], Some("terminal"));
     assert!(String::from_utf8_lossy(&o.stdout).contains("panes: terminal"), "AXEL_PANES wins");
-    assert!(!home.run(&["panes", "sideways"], None).status.success());
+    assert!(!home.run(&["panes", "auto"], None).status.success(), "only web or terminal");
     let saved: serde_json::Value = serde_json::from_str(&home.read(".axel/settings.json")).unwrap();
     assert_eq!(saved["panes"], "web");
 }
