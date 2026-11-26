@@ -45,3 +45,4 @@ An RFD can be rough. It cannot be vague about what question it is asking.
 | [0002](0002-verified-agent-graphs.md) | Verified agent graphs with one final review | discussion |
 | [0003](0003-rex-native-axel.md) | Axel as a Rex-native citizen: native client, palette and prompts, own blocks | discussion |
 | [0004](0004-linked-devices.md) | Linked devices: one owner, many machines, one log | discussion |
+| [0005](0005-teams.md) | Teams: a named set of agent profiles with skills of its own | idea |
