@@ -579,6 +579,35 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (schedule_id, run_number)
     );
     "#,
+    // v15: teams, a named set of an owner's agent profiles with skills and a
+    // reach rule of their own (RFD 0005).  Projected from kind-123 envelopes,
+    // and edited here unsigned (`updated_id` NULL) until the next publish, as
+    // `agent_profiles` are.  Members are profile ids; `position` keeps the
+    // order they were added in, for the roster.
+    r#"
+    CREATE TABLE teams (
+        team_id      TEXT PRIMARY KEY,
+        owner        TEXT NOT NULL,
+        name         TEXT NOT NULL,
+        skills_json  TEXT NOT NULL DEFAULT '[]',
+        reach        TEXT NOT NULL DEFAULT 'none',
+        lead         TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        updated_id   TEXT,
+        archived_at  INTEGER
+    );
+    CREATE INDEX teams_name ON teams(name);
+
+    CREATE TABLE team_members (
+        team_id     TEXT NOT NULL REFERENCES teams(team_id) ON DELETE CASCADE,
+        profile_id  TEXT NOT NULL,
+        role        TEXT NOT NULL DEFAULT '',
+        position    INTEGER NOT NULL,
+        PRIMARY KEY (team_id, profile_id)
+    );
+    CREATE INDEX team_members_profile ON team_members(profile_id);
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.

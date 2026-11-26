@@ -8,7 +8,8 @@
 //! - `100..120`: thread event-log entries ([`is_thread_event`]); see
 //!   `docs/DESIGN.md`, "Multiplayer: a thread is a signed event log".
 //! - `120..`: owner-wide records on no thread ([`is_owner_record`]): device
-//!   links, agent profiles and instance announcements (RFD 0004).
+//!   links, agent profiles and instance announcements (RFD 0004), and teams
+//!   (RFD 0005).
 
 /// A free-form note.
 pub const NOTE: u32 = 1;
@@ -51,6 +52,9 @@ pub const OWNER_DEVICE: u32 = 120;
 pub const AGENT_ANNOUNCE: u32 = 121;
 /// An agent profile, the owner's and the same on every device (`["d", profile_id]`).
 pub const AGENT_PROFILE: u32 = 122;
+/// A team: a named set of the owner's agent profiles with skills and a reach
+/// policy of its own (`["d", team_id]`, RFD 0005).
+pub const TEAM: u32 = 123;
 /// Add or cancel a schedule: messages that arrive in an inbox at a set time
 /// (RFD 0006).  Content JSON `{schedule_id, op: add|cancel, to, thread |
 /// new_thread, prompt, when, runs_max, until, device}`.  An owner record, on
@@ -59,7 +63,7 @@ pub const AGENT_PROFILE: u32 = 122;
 pub const SCHEDULE: u32 = 124;
 
 /// All known kinds, in numeric order.
-pub const ALL: [u32; 21] = [
+pub const ALL: [u32; 22] = [
     NOTE,
     TASK,
     PERMISSION_REQUEST,
@@ -80,6 +84,7 @@ pub const ALL: [u32; 21] = [
     OWNER_DEVICE,
     AGENT_ANNOUNCE,
     AGENT_PROFILE,
+    TEAM,
     SCHEDULE,
 ];
 
@@ -106,6 +111,7 @@ pub fn name(k: u32) -> &'static str {
         OWNER_DEVICE => "owner.device",
         AGENT_ANNOUNCE => "agent.announce",
         AGENT_PROFILE => "agent.profile",
+        TEAM => "team",
         SCHEDULE => "schedule",
         _ => "unknown",
     }
@@ -187,10 +193,11 @@ mod tests {
         assert_eq!(from_name("turn"), Some(40));
         assert_eq!(name(OWNER_DEVICE), "owner.device");
         assert_eq!(from_name("agent.profile"), Some(122));
-        
         assert_eq!(name(SCHEDULE), "schedule");
         assert_eq!(from_name("schedule"), Some(124));
-        assert_eq!(ALL.len(), 21);
+        assert_eq!(name(TEAM), "team");
+        assert_eq!(from_name("team"), Some(123));
+        assert_eq!(ALL.len(), 22);
         let mut sorted = ALL;
         sorted.sort_unstable();
         assert_eq!(sorted, ALL, "ALL is in numeric order");
@@ -226,8 +233,8 @@ mod tests {
             assert!(!is_message(k));
             assert!(!is_owner_record(k));
         }
-        // A schedule is the owner's, on no thread, and goes to every device.
-        for k in [OWNER_DEVICE, AGENT_ANNOUNCE, AGENT_PROFILE, SCHEDULE] {
+        // Schedules and teams are the owner's, on no thread, and go to every device.
+        for k in [OWNER_DEVICE, AGENT_ANNOUNCE, AGENT_PROFILE, TEAM, SCHEDULE] {
             assert!(is_owner_record(k));
             assert!(!is_thread_event(k));
             assert!(!is_message(k));

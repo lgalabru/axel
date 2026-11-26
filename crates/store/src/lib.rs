@@ -27,6 +27,7 @@ mod native_usage;
 mod log;
 mod owner;
 mod policy;
+mod team;
 mod reads;
 mod schedule;
 mod remote;
@@ -42,6 +43,8 @@ mod tests;
 mod owner_tests;
 #[cfg(test)]
 mod schedule_tests;
+#[cfg(test)]
+mod team_tests;
 
 use std::path::{Path, PathBuf};
 
@@ -52,14 +55,19 @@ pub use axel_inbox::{Envelope, EnvelopeBuilder};
 pub use error::Error;
 pub use log::author;
 pub use remote::{ItemChange, OwnerRecords, SyncStream};
-pub use owner::{AnnounceWire, DeviceRecord, ProfileWire, PRINCIPAL_DEPTH_MAX};
+pub use owner::{AnnounceWire, DeviceRecord, ProfileWire, TeamPolicyWire, TeamWire, PRINCIPAL_DEPTH_MAX};
+pub use team::{
+    TEAM_MEMBERS_MAX, TEAM_NAME_BYTES_MAX, TEAM_ROLE_BYTES_MAX, TEAM_SKILLS_MAX, TEAM_SKILL_SOURCE_BYTES_MAX, TEAMS_MAX,
+    is_valid_team_name,
+};
 pub use policy::{
-    AgentPolicy, Budget, DEFAULT_MAX_DEPTH, Reach, Refusal, SpendLimit, SummonCheck, local_day_start, narrower,
+    AgentPolicy, Budget, DEFAULT_MAX_DEPTH, EffectiveReach, Reach, Refusal, SpendLimit, SummonCheck, TeamReachPart,
+    local_day_start, narrower,
 };
 pub use guard::{SCHEMA_BACKUPS_KEPT_MAX, schema_backup_path};
 pub use schema::SCHEMA_VERSION;
 pub use types::{
-    Agent, AgentColor, AgentProfile, Appended, Device, DeviceOp, PairingRoute, BlockedKind, ConversationItem, Effort, Environment, Harness, ItemKind, parse_harness_model,
+    Agent, AgentColor, AgentProfile, Appended, NewTeam, Team, TeamEdit, TeamMember, TeamReach, Device, DeviceOp, PairingRoute, BlockedKind, ConversationItem, Effort, Environment, Harness, ItemKind, parse_harness_model,
     ItemStatus, NewAgent, NewItem, NewSession, Participant, ParticipantRole, Project, Relationship,
     RuntimeMode, Session, SessionFilter, SessionRuntime, SessionState, SessionUpdate, Status,
     StatusReport, StatusState, Thread, ThreadFilter, ThreadProject, ThreadState, ThreadSummary,

@@ -1,6 +1,8 @@
 //! Owner records (RFD 0004): which machines belong to which owner (kind 120),
 //! agent profiles (kind 122), the agent instances each device runs
-//! (kind 121), and schedules (kind 124, projected by `crate::schedule`).  They are on no thread and travel to every device of an owner.
+//! (kind 121), teams of profiles (kind 123, RFD 0005) and schedules (kind
+//! 124, projected by `crate::schedule`).  They are on no thread and travel to
+//! every device of an owner.
 //!
 //! A machine signs with its own key.  Once its owner links it, that key
 //! speaks for the owner: [`Principals::resolve`] walks device → owner, and
@@ -19,7 +21,7 @@ use crate::log::{EVENT_COLS, mark_applied, mark_rejected, replay_thread, row_env
 use crate::types::lenient;
 use crate::{
     AgentColor, AgentProfile, Device, DeviceOp, Effort, Error, Harness, PairingRoute, RuntimeMode,
-    Store, kind, now,
+    Store, Team, TeamMember, TeamReach, kind, now,
 };
 
 /// The most links between a key and the owner it speaks for.  A device of a
@@ -83,6 +85,50 @@ impl ProfileWire {
             color: profile.color,
             runtime_mode: profile.runtime_mode,
             archived: profile.archived_at.is_some(),
+        }
+    }
+}
+
+/// The policy part of a kind-123 team.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamPolicyWire {
+    /// A rule this build doesn't know reads as `none`: members keep their
+    /// own policy, and nobody's reach widens.
+    #[serde(default, deserialize_with = "lenient::or_default")]
+    pub reach: TeamReach,
+}
+
+/// Kind-123 content: a whole team.  The latest `created_at` per `team_id`
+/// wins, ties broken by envelope id, as for profiles.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamWire {
+    pub team_id: String,
+    pub owner: String,
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<TeamMember>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub policy: TeamPolicyWire,
+    #[serde(default)]
+    pub lead: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl TeamWire {
+    /// The wire form of a stored team, for its owner to sign.
+    pub fn of(team: &Team) -> TeamWire {
+        TeamWire {
+            team_id: team.team_id.clone(),
+            owner: team.owner.clone(),
+            name: team.name.clone(),
+            members: team.members.clone(),
+            skills: team.skills.clone(),
+            policy: TeamPolicyWire { reach: team.reach },
+            lead: team.lead.clone(),
+            archived: team.archived_at.is_some(),
         }
     }
 }
@@ -244,6 +290,7 @@ fn apply(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error>
         kind::OWNER_DEVICE => apply_device(conn, env),
         kind::AGENT_ANNOUNCE => apply_announce(conn, env),
         kind::AGENT_PROFILE => apply_profile(conn, env),
+        kind::TEAM => apply_team(conn, env),
         kind::SCHEDULE => Ok(match crate::schedule::project_schedule(conn, env)? {
             Some(reason) => Err(reason),
             None => Ok(()),
@@ -386,6 +433,49 @@ fn write_profile(conn: &Connection, wire: &ProfileWire, at: i64, event_id: &str)
         ],
     )?;
     Ok(())
+}
+
+fn apply_team(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error> {
+    let wire: TeamWire = match parse(env) {
+        Ok(w) => w,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    if wire.team_id.is_empty() {
+        return Ok(Err("a team needs an id".into()));
+    }
+    if let Err(reason) = crate::team::check_shape(&wire.name, &wire.members, &wire.skills, wire.lead.as_deref()) {
+        return Ok(Err(reason));
+    }
+    let principals = Principals::load(conn)?;
+    let owner = principals.resolve(&wire.owner, env.created_at);
+    if principals.resolve(&env.from, env.created_at) != owner {
+        return Ok(Err(format!("signer {} doesn't speak for owner {}", env.from, wire.owner)));
+    }
+    if let Err(reason) = crate::team::check_members(conn, &principals, owner, &wire.members, env.created_at)? {
+        return Ok(Err(reason));
+    }
+    let at = crate::sql_integer(env.created_at, "envelope created_at")?;
+    let current = crate::team::read_team(conn, &wire.team_id)?;
+    let is_newer = current.as_ref().is_none_or(|team| {
+        (at, env.id.as_str()) > (team.updated_at, team.updated_id.as_deref().unwrap_or(""))
+    });
+    if is_newer {
+        let team = Team {
+            team_id: wire.team_id,
+            owner: wire.owner,
+            name: wire.name,
+            members: wire.members,
+            skills: wire.skills,
+            reach: wire.policy.reach,
+            lead: wire.lead,
+            created_at: current.as_ref().map_or(at, |t| t.created_at.min(at)),
+            updated_at: at,
+            updated_id: Some(env.id.clone()),
+            archived_at: wire.archived.then(|| current.as_ref().and_then(|t| t.archived_at).unwrap_or(at)),
+        };
+        crate::team::write_team(conn, &team)?;
+    }
+    Ok(Ok(()))
 }
 
 fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String>, Error> {

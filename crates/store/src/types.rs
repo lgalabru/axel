@@ -529,6 +529,89 @@ pub struct AgentProfile {
 }
 
 str_enum! {
+    /// The reach rule a team sets for its members (RFD 0005, "Policy
+    /// template").  `none` sets no rule: each member's own policy alone applies.
+    #[derive(Default)]
+    TeamReach {
+        #[default]
+        None => "none",
+        /// A member may reach the other members of the team.
+        Team => "team",
+        /// The lead may reach every member; a member may reach the lead alone.
+        Lead => "lead",
+    }
+}
+
+/// One member of a team: a profile, not an instance, so a team doesn't care
+/// which machine a member runs on.  The role is free text Axel shows and
+/// writes into the roster; it never acts on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub profile_id: String,
+    #[serde(default)]
+    pub role: String,
+}
+
+/// A named set of the owner's agent profiles, with skills and a reach rule
+/// they share (RFD 0005).  The same on every device of its owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Team {
+    pub team_id: String,
+    pub owner: String,
+    pub name: String,
+    /// In the order they were added.
+    pub members: Vec<TeamMember>,
+    /// Skill sources in the `skills:` syntax of `AXEL.md`, installed for
+    /// every member when it runs.
+    pub skills: Vec<String>,
+    pub reach: TeamReach,
+    /// The lead's profile id; always one of `members`.
+    pub lead: Option<String>,
+    pub created_at: i64,
+    /// `created_at` of the kind-123 envelope that set it, or of the last
+    /// local edit not yet signed.
+    pub updated_at: i64,
+    /// The kind-123 envelope that set it; `None` while a local edit waits to
+    /// be signed and published.
+    pub updated_id: Option<String>,
+    pub archived_at: Option<i64>,
+}
+
+impl Team {
+    /// Whether `profile_id` is one of the members.
+    pub fn has_member(&self, profile_id: &str) -> bool {
+        self.members.iter().any(|m| m.profile_id == profile_id)
+    }
+}
+
+/// A team to create, for [`crate::Store::create_team`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewTeam {
+    /// The principal that owns it (the owner key, not a device).
+    pub owner: String,
+    pub name: String,
+    pub members: Vec<TeamMember>,
+    pub skills: Vec<String>,
+    pub reach: TeamReach,
+    /// Added as a member when it isn't one.
+    pub lead: Option<String>,
+}
+
+/// A change to a team, for [`crate::Store::edit_team`].  Removals apply
+/// before additions; adding a member already there changes its role.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TeamEdit {
+    pub add: Vec<TeamMember>,
+    /// Profile ids.
+    pub remove: Vec<String>,
+    /// A new lead, added as a member when it isn't one.
+    pub lead: Option<String>,
+    /// Replaces the skill sources.
+    pub skills: Option<Vec<String>>,
+    pub reach: Option<TeamReach>,
+}
+
+str_enum! {
     /// How a device link proved that the far end is the machine we meant
     /// (RFD 0004, "Pairing over a trusted route").
     PairingRoute {
