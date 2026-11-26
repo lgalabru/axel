@@ -1,6 +1,6 @@
 # RFD 0004: Linked devices: one owner, many machines, one log
 
-State: discussion
+State: adopted (ADR 0012)
 Authors: Ludo  ·  Started: 2026-11-25
 
 ## Problem
@@ -312,3 +312,11 @@ back.
   Issue #40 runs Rex over SSH on NetBird, where `server.whoami` says `kind: peer`. The
   SSH host key and NetBird's key-bound addresses both identify the machine, and a
   short code compared on both screens covers every other case.
+- 2026-11-25: Implemented phases 0 to 7, with one change from the sketch: a machine's own
+  key is its device key, so we mint no separate key D. The root machine's key stays the
+  owner key, and phase 8 would add a separate device key there. `axel device link`
+  pairs over SSH (the host key, checked with `BatchMode=yes`) or with an eight-digit
+  code; `rex_tailscale` is refused until `axel` can read Rex's caller identity. Sync
+  rides `axel host rpc` over SSH, not `rex forward`. The Rex questions under "Open
+  questions" stay open. Tests stand a directory in for the second machine with
+  `$AXEL_SSH` (`crates/axel/tests/devices.rs`).
