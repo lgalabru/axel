@@ -1,6 +1,6 @@
 # RFD 0005: Teams: a named set of agent profiles with skills of its own
 
-State: idea
+State: discussion
 Authors: Ludo  ·  Started: 2026-11-25
 
 ## Problem
@@ -75,3 +75,12 @@ Not in scope: `@core` as an address, and teams spanning owners.
 - 2026-11-25: The owner asked for team-level skills in #40, next to user, project and
   agent skills. Jon Leopard offered an example-team docs page, which can describe
   today's per-agent setup and move to `axel team` once it exists.
+- 2026-11-25: Built on RFD 0004's profiles, so members are profile ids from the start.
+  "The stricter wins" can't treat an agent's own `nobody` as a rule: it is the default,
+  and an untouched agent can't be told from one set to nobody on purpose. Treated as a
+  rule, it would make every team rule a no-op until each member was edited, the nine
+  edits the template was meant to remove. So `nobody` and a bare `--allow` list set no
+  rule, `anyone`/`team`/`lead` do, and names the owner allowed one by one come on top.
+  Otherwise the owner's "always allow" answer to a refused send would do nothing for a
+  team member. A host gets the reach as names, since it knows no teams. Remote team
+  skills aren't pinned, since a team has no `AXEL.lock`.

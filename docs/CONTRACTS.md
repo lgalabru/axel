@@ -352,6 +352,64 @@ kind-124 content is stored and rejected.
 treat the owner as the caller. `cmd::schedule::tick(ctx, now) -> Vec<(Schedule, Fired)>`, with
 `Fired { Sent { run_number, missed_runs, report }, Busy { session_id }, Refused { error } }`.
 
+## axel-store additions (teams, RFD 0005)
+
+```rust
+// axel-inbox kind: TEAM = 123 ("team"), an owner record (120..130) on no thread, tag ["d", team_id].
+#[serde(rename_all="snake_case")] #[derive(Default)] pub enum TeamReach { #[default] None, Team, Lead }  // str_enum: "none" | "team" | "lead"
+pub struct TeamMember { pub profile_id: String, #[serde(default)] pub role: String }
+pub struct Team { pub team_id: String, pub owner: String, pub name: String, pub members: Vec<TeamMember>, pub skills: Vec<String>,
+    pub reach: TeamReach, pub lead: Option<String> /* profile id, always a member */, pub created_at: i64, pub updated_at: i64,
+    pub updated_id: Option<String> /* None until signed */, pub archived_at: Option<i64> }
+impl Team { pub fn has_member(&self, profile_id: &str) -> bool; }
+#[derive(Default)] pub struct NewTeam { pub owner: String /* principal */, pub name: String, pub members: Vec<TeamMember>, pub skills: Vec<String>, pub reach: TeamReach, pub lead: Option<String> }
+#[derive(Default)] pub struct TeamEdit { pub add: Vec<TeamMember>, pub remove: Vec<String>, pub lead: Option<String>, pub skills: Option<Vec<String>>, pub reach: Option<TeamReach> }
+
+// Kind-123 content. Latest (created_at, id) per team_id wins; an unknown policy.reach reads as None.
+pub struct TeamWire { pub team_id: String, pub owner: String, pub name: String, pub members: Vec<TeamMember>, pub skills: Vec<String>,
+    pub policy: TeamPolicyWire, pub lead: Option<String>, pub archived: bool }
+pub struct TeamPolicyWire { pub reach: TeamReach }
+impl TeamWire { pub fn of(team: &Team) -> TeamWire; }
+
+pub const TEAM_MEMBERS_MAX: usize;            // 32
+pub const TEAM_SKILLS_MAX: usize;             // 16 sources
+pub const TEAM_NAME_BYTES_MAX: usize;         // 64; names are letters, digits, - and _
+pub const TEAM_ROLE_BYTES_MAX: usize;         // 200, one line
+pub const TEAM_SKILL_SOURCE_BYTES_MAX: usize; // 512
+pub const TEAMS_MAX: usize;                   // 256, the most one read returns
+pub fn is_valid_team_name(name: &str) -> bool;
+
+impl Store {
+    pub fn create_team(&self, new: &NewTeam) -> Result<Team, Error>;       // unsigned; Conflict on a live name of the same owner, Invalid past a limit or for a member that isn't the owner's profile
+    pub fn edit_team(&self, team_id: &str, edit: &TeamEdit) -> Result<Team, Error>;  // unsigned, newer than what it changes; removing the lead needs another
+    pub fn archive_team(&self, team_id: &str) -> Result<Team, Error>;      // unsigned; rule and skills stop applying
+    pub fn team(&self, team_id: &str) -> Result<Option<Team>, Error>;      // archived ones too
+    pub fn team_by_name(&self, name: &str) -> Result<Option<Team>, Error>; // live, oldest first
+    pub fn teams(&self) -> Result<Vec<Team>, Error>;                       // live, by name
+    pub fn teams_of_profile(&self, profile_id: &str) -> Result<Vec<Team>, Error>;  // live
+    pub fn unsigned_teams(&self, owner: &str) -> Result<Vec<Team>, Error>; // what the next publish signs
+    pub fn effective_reach(&self, pubkey: &str) -> Result<EffectiveReach, Error>;
+    pub fn may_reach(&self, from: &str, to: &str) -> Result<bool, Error>;  // check_summon uses it
+}
+
+// Reach gains two values; the list is agents allowed on top. Serialized {"kind":"team","agents":[…]}.
+pub enum Reach { Nobody, Anyone, Only(Vec<String>), Team(Vec<String>), Lead(Vec<String>) }
+impl Reach { pub fn listed(&self) -> &[String]; /* allows/allow/disallow as before */ }
+pub struct TeamReachPart { pub team_id: String, pub team_name: String, pub reach: TeamReach, pub lead: Option<String>, pub profiles: Vec<String> }
+#[derive(Default)] pub struct EffectiveReach { pub own: Reach, pub own_profiles: Vec<String>, pub teams: Vec<TeamReachPart> }
+impl EffectiveReach { pub fn allows(&self, target: &str, target_profile: Option<&str>) -> bool; pub fn from_teams(&self) -> bool; }
+```
+
+Schema v14 adds `teams (team_id PK, owner, name, skills_json, reach, lead, created_at, updated_at,
+updated_id, archived_at)` and `team_members (team_id, profile_id, role, position; PK (team_id,
+profile_id))`. Neither is a projection table that `rebuild_projections` empties: unsigned local edits
+live there, as in `agent_profiles`.
+
+`axel` (bin): `axel team new|edit|show|ls|rm` (`cmd/team.rs`) publish a kind-123 envelope signed
+with the owner key after every change. `launch::install_skills(driver, work_dir, &SkillLevels {
+requested, config, global, team })` installs the agent's skills and its teams'; `launch::system_prompt(agent,
+dir, roster)` takes the roster `team::roster(store, profile_id)` writes.
+
 ## axel-rex (shells out to the `rex` CLI with `--json`; no WS yet)
 
 ```rust

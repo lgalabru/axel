@@ -41,6 +41,9 @@ aren't decisions yet are in `rfd/`.
 | **Agent profile** | What an agent is: name, harness, model, reasoning effort, skills, default prompt, colour, runtime mode. The owner's, the same on every device, no key. Names are unique per owner. |
 | **Agent instance** | A profile on one machine: an Ed25519 keypair attested by that machine's key. It signs, it has the inbox, its sessions hang off its pubkey. `@name@device` names one. |
 | **Device** | A machine whose key an owner linked (kind 120): its key then speaks for that owner. |
+
+| **Agent** | A named identity (Ed25519 keypair, owner attestation) plus a *profile*: harness, model, reasoning effort, skills, default prompt, colour. Reusable across threads. Has an inbox. |
+| **Team** | A named set of the owner's agent profiles, with skill sources and a reach rule they share, and a free-text role per member (RFD 0005). See *Teams*. |
 | **Harness** | The program that runs the agent: `claude`, `codex`, `opencode`, or a custom command. |
 | **Thread** | **The primitive.** An intent (the initial prompt) and everything done in its name: attached to 0..n projects, realized by many agent *sessions* over time, on one or many environments. States: `open → done → archived`. Live state is derived from its sessions. |
 | **Session** | One agent instance working on a thread: agent + environment + (optional) project + harness process. Owns the Rex block, the harness's own session id (for `--resume`), the transcript, status and token usage. States: `starting → running ⇄ blocked ⇄ idle → ended`. |
@@ -135,6 +138,7 @@ signed-event lineage, minus the relay.
   | 120 | `owner.device` | no `t` tag; tag `["d", device]`; content = JSON `{op: link\|revoke\|label, device, label, route?}` (see *Linked devices*) |
   | 121 | `agent.announce` | no `t` tag; tag `["d", instance]`; content = JSON `{instance, profile_id, auth}` |
   | 122 | `agent.profile` | no `t` tag; tag `["d", profile_id]`; content = JSON profile `{profile_id, owner, name, harness, model, effort, skills, prompt, color, runtime_mode, archived}` |
+  | 123 | `team` | no `t` tag; tag `["d", team_id]`; content = JSON `{team_id, owner, name, members, skills, policy, lead, archived}` (see *Teams*) |
   | 124 | `schedule` | no `t` tag; content = JSON `{schedule_id, op: add\|cancel, to, thread \| new_thread, prompt, when, runs_max, until, device}` (see *Scheduled work*) |
 
   All thread-scoped envelopes carry `["t", thread_id]`. Session ids are ULIDs minted by
@@ -240,7 +244,10 @@ $ axel                               # in any Rex terminal
      `AXEL.md`: directories, and skills.sh / GitHub skills pinned to a commit in
      `AXEL.lock`; a directory skill is linked whole, scripts and all), and links
      `AXEL.md` as `CLAUDE.md` / `AGENTS.md` (relative; when the project has its own,
-     `AXEL.md` goes into the appended system prompt instead),
+     `AXEL.md` goes into the appended system prompt instead), then every skill of every
+     live team the agent belongs to (see *Teams*),
+   - writes a **roster** of each of the agent's teams into the appended system prompt:
+     the team's name, every member's name and role, and the team's reach rule,
    - writes the owner's **standing rules** into that appended system prompt, in full:
      every global skill (`~/.config/axel/skills`) whose frontmatter says `always: true`,
      such as the coding style and the commit convention. Skills are otherwise loaded
@@ -468,6 +475,63 @@ meant, and signs a kind-120 link with this machine's key. From then on:
   machine.
 - **Out of scope:** an offline owner key (RFD 0004 phase 8), Rex's caller identity as a
   route, and refusing backdated envelopes from a revoked device.
+
+## Teams
+
+A team is the owner's, like an agent profile: a named set of profiles plus what they
+share (RFD 0005). Issue #40's nine-agent setup is one team instead of nine hand-kept
+policies and a coordinator prompt.
+
+```
+axel team new core --lead coordinator --member scout:"code reconnaissance" \
+    --member reviewer-spec:"reviews against the spec" --skills ./skills/core --reach lead
+axel team edit core --add auditor --remove scout --reach team
+axel team show core · axel team ls · axel team rm core
+```
+
+- **Members are profiles, not instances.** A team doesn't care which machine a member
+  runs on, and a profile may be in several teams. Members are named by agent and
+  stored as profile ids. A team has at most 32 members (`TEAM_MEMBERS_MAX`: #40's
+  team is nine). The lead is always a member; naming one adds it.
+- **Roles are text.** Axel shows them and writes them into each member's roster; it
+  never acts on a role, and never routes by one. The orchestration stays in prompts
+  and skills.
+- **Team skills** are a level between project and agent: global, project, team,
+  agent. When a member launches, every skill in every source of each of its live
+  teams is installed, parsed as `AXEL.md`'s `skills:` entries (`SkillSource`) and
+  installed the same way as the agent's. A relative directory is taken from the
+  session's work directory. A remote source is fetched as a project's is but not
+  pinned: a team has no `AXEL.lock`. A team skill wins over a project or global
+  skill of the same name.
+- **Reach.** A team's rule is `team` (members may reach each other), `lead` (the
+  lead may reach every member; members may reach the lead alone) or `none`. An
+  agent's own reach may also be `team` or `lead` (`axel agent edit --reach team`),
+  meaning the same across all its teams. The **effective reach** combines them:
+  - the agent's own rule is `anyone`, `team` or `lead`. `nobody` and a bare `--allow`
+    list set no rule: `nobody` is the default, and an untouched agent can't be told
+    from one set to nobody on purpose;
+  - its teams' rule is the union of every live team whose rule isn't `none`;
+  - with both, the stricter wins (both must allow). With one, that one applies.
+    With neither, the agent reaches nobody;
+  - the agents its own reach names (`--allow`, or the owner's "always allow") are
+    allowed on top: the owner named each one.
+
+  `axel send`, summons (`check_summon`) and the "may answer whoever may reach it"
+  rule all use the effective reach. `axel agent show` prints each team's part and
+  how they combine. A remote job carries the reach as the names it allows today,
+  since a host knows no teams.
+- **Wire.** Kind 123, on no thread, signed by the owner or one of its devices, tag
+  `["d", team_id]`, content `{team_id, owner, name, members: [{profile_id, role}],
+  skills, policy: {reach}, lead, archived}`. Latest `(created_at, id)` wins per
+  `team_id`, as for profiles. A record whose signer doesn't speak for `owner`, or
+  that names another owner's profile, is refused. One that names a profile not
+  received yet waits and is revived when the profile arrives. Local edits are
+  unsigned (`updated_id` NULL) until published; every `axel team` change publishes
+  at once, with the owner key.
+- **Archive.** `axel team rm` archives the team on every device. Its rule and its
+  skills stop applying, and members get no roster for it.
+
+Not yet: `@core` as an address, teams spanning owners, and teams scoped to a thread.
 
 ## Identity and crypto
 
