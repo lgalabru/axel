@@ -1,6 +1,6 @@
 # RFD 0006: Scheduled work: messages that arrive in an inbox at a set time
 
-State: idea
+State: discussion
 Authors: Ludo  ·  Started: 2026-11-25
 
 ## Problem
@@ -79,3 +79,11 @@ Not in scope: event triggers (on push, on CI failure). A bot or a webhook can ca
 - 2026-11-25: #40 proposed cron or a chat bot calling the CLI, and the owner asked to
   build on inboxes. Both fit: `axel schedule tick` under cron is the first step, and the
   run is an inbox message.
+- 2026-11-25: Built everything above except the open questions. Hand-rolled time math was
+  enough: with a fixed UTC offset, `daily` is a Euclidean division on Unix seconds, so
+  neither `jiff` nor `time` is needed (the cost is no daylight saving: a `daily` keeps its
+  offset). Recording runs at ingest makes `tick` idempotent and drops a second device's
+  duplicate in one place. A schedule can't carry a `t` tag, since a `new_thread` one has
+  no thread yet, so its participants don't see it on the thread; `axel schedule ls` is
+  where it shows. "The previous run is still working" has to mean status `working` or
+  session `running`: a session stuck `starting` would otherwise hold a schedule forever.

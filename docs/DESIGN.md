@@ -128,6 +128,7 @@ signed-event lineage, minus the relay.
   | 20 | `status` | tags `s`; content = JSON `{state, kind?, title?, msg?, progress?}` |
   | 21 | `usage` | tags `s`; content = JSON delta `{input, output, cache_read, cache_write, turns, cost_usd_est}` |
   | 1,2,10–13,30 | notes, tasks, requests, replies, handoff | as before, tags `t` and optionally `s` |
+  | 124 | `schedule` | no `t` tag; content = JSON `{schedule_id, op: add\|cancel, to, thread \| new_thread, prompt, when, runs_max, until, device}` (see *Scheduled work*) |
 
   All thread-scoped envelopes carry `["t", thread_id]`. Session ids are ULIDs minted by
   the starting replica (unique enough; the `s` tag binds them to the signer).
@@ -153,6 +154,43 @@ The `axel-store` crate therefore holds: `events` (the log: every envelope, with
 `thread_participants`, `sessions`, `status`, `usage`, `usage_samples`, `mentions`,
 `message_refs`, `read_frontiers`), and local-only `agents`, `environments`, `projects`.
 Writes go through typed methods that build, sign and append envelopes, then project them.
+
+## Scheduled work
+
+A **schedule** is a signed `kind 124` envelope; a **run** is an ordinary message that
+arrives in the recipient's inbox when it falls due (RFD 0006).
+
+```
+axel schedule add @reviewer --thread 01JD… --daily 09:00 [--tz +01:00] "review yesterday's merges"
+axel schedule add @scout --new "Dependency audit" --project ~/Coding/axel --every 7d "…"
+axel schedule add @atlas --thread 01JD… --at 2026-11-26T15:00:00+01:00 [--runs-max N] [--until T] "…"
+axel schedule ls [--all]  |  rm ID  |  tick
+```
+
+- **When** is a closed set: `once {at}`, `every {interval_s}` (60 s to a year, counted
+  from the schedule's `created_at`), `daily {hh, mm, tz_offset_minutes}` (a fixed offset;
+  it doesn't follow daylight saving). No cron syntax, and the time math is hand-rolled.
+- **A run** is a kind-1 note from the schedule's author to `to`, tagged `["sched",
+  schedule_id, run_number]`, sent through the same path as `axel send`: reach, chatter,
+  budget and depth, then a live note or a summons. A `new_thread` schedule opens a fresh
+  thread for every run, the way `axel thread new` records one.
+- **`axel schedule tick`** sends every run that is due on this device, as the owner
+  (whatever `$AXEL_AGENT` says). A run is recorded when its note is ingested, so a
+  second tick sends nothing new. A cron job calling it every minute is all a timer needs.
+- **Missed runs coalesce.** Occurrences are counted after the newest run, so a device
+  that slept through several sends one run whose text says how many it stands for.
+- **Limits.** `runs_max` defaults to 1000 (at most 100 000). No run fires once `until`
+  has passed. A run waits while the previous run's session is still working
+  (status `working` or session `running`); the next tick coalesces what fell due.
+- **One device fires.** The schedule names a device: today the local environment id. At
+  ingest a second run with the same `(schedule_id, run_number)` is dropped, not stored,
+  so two firing devices still deliver each run once.
+- **Who.** Only the owner arms and cancels schedules (`add`/`rm` refuse an agent's
+  process); only the author's cancel counts. A schedule signed by one of this machine's
+  agents fires under that agent's reach; anyone else's never fires here.
+- **Store.** Two projections: `schedules` (one row per schedule: the first valid `add` in
+  `(created_at, id)` order, `cancelled_at` from its author's cancel in any order) and
+  `schedule_runs (schedule_id, run_number, event_id, fired_at)`.
 
 ## The launch flow
 

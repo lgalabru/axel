@@ -43,7 +43,8 @@ pub enum Error { ... }  // thiserror
 ```rust
 pub mod kind { pub const NOTE: u32 = 1; pub const TASK: u32 = 2; pub const PERMISSION_REQUEST: u32 = 10;
   pub const PERMISSION_REPLY: u32 = 11; pub const QUESTION: u32 = 12; pub const ANSWER: u32 = 13;
-  pub const STATUS: u32 = 20; pub const HANDOFF: u32 = 30; pub fn name(k: u32) -> &'static str; }
+  pub const STATUS: u32 = 20; pub const HANDOFF: u32 = 30; pub const SCHEDULE: u32 = 124 /* "schedule"; no t tag */;
+  pub fn name(k: u32) -> &'static str; }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Envelope { pub id: String /*hex sha256*/, pub from: String /*b58*/, pub created_at: u64,
@@ -253,6 +254,59 @@ quota buckets, so each bucket is a plan of its own, keyed `Harness::Custom("<pre
 reported as `disabled` is cleared.
 
 Authorization in `append`: kind 100 → always (signer becomes owner). Other thread kinds → signer is a participant of `t`, or an agent whose `agents.auth_tag` owner is a participant, or (kinds 20/21/110–112) signer is one of this replica's own agents. Non-thread kinds (notes etc. without `t`) → always. Rejected envelopes are kept with `rejected_reason` and re-tried by `rebuild_projections`.
+
+## axel-store additions (scheduled work, RFD 0006)
+
+```rust
+pub const SCHEDULE_RUN_TAG: &str = "sched";      // a run's tag: ["sched", schedule_id, run_number]
+pub const RUNS_MAX_DEFAULT: u32 = 1000; pub const RUNS_MAX_LIMIT: u32 = 100_000;
+pub const INTERVAL_SECS_MIN: u64 = 60; pub const INTERVAL_SECS_MAX: u64 /* 366 days */;
+pub const TZ_OFFSET_MINUTES_MAX: i32 = 840; pub const PROMPT_BYTES_MAX: usize = 65_536;
+pub const SCHEDULE_ID_CHARS_MAX: usize = 64; pub const NEW_THREAD_PROJECTS_MAX: usize = 16;
+pub const TIMESTAMP_MAX: i64 /* 9999-12-31T23:59:59Z */; pub const SCHEDULES_LIST_MAX: usize = 1000;
+pub enum ScheduleAction { Add, Cancel }                       // str_enum: as_str, FromStr, Display, ALL
+pub enum FinishReason { Cancelled, RunsMax, Until, Done }     // str_enum
+#[serde(rename_all="snake_case")] pub enum ScheduleWhen {     // {"once":{"at":..}} {"every":{"interval_s":..}} {"daily":{"hh","mm","tz_offset_minutes"}}
+    Once { at: i64 }, Every { #[serde(rename="interval_s")] interval_secs: u64 }, Daily { hh: u8, mm: u8, tz_offset_minutes: i32 } }
+impl ScheduleWhen { pub fn validate(self) -> Result<(), Error>;
+    pub fn occurrences_between(self, anchor: i64, after: i64, through: i64) -> u64;   // in (after, through]; every counts from anchor
+    pub fn next_after(self, anchor: i64, after: i64) -> Option<i64>; }
+pub struct NewThreadSpec { pub title: String, pub projects: Vec<String> }
+pub enum RunThread { Existing(String), New(NewThreadSpec) }
+pub struct ScheduleWire { pub schedule_id: String, pub op: ScheduleAction, pub to, thread: Option<String>, pub new_thread: Option<NewThreadSpec>,
+    pub prompt: Option<String>, pub when: Option<ScheduleWhen>, pub runs_max: Option<u32>, pub until: Option<i64>, pub device: Option<String> }   // kind 124 content
+impl ScheduleWire { pub fn cancel(schedule_id: &str) -> ScheduleWire; }
+pub struct ScheduleSpec { pub schedule_id: String, pub to: String, pub thread: RunThread, pub prompt: String, pub when: ScheduleWhen,
+    pub runs_max: u32, pub until: Option<i64>, pub device: String /* environment id */ }
+impl ScheduleSpec { pub fn validate(&self) -> Result<(), Error>; pub fn to_wire(&self) -> ScheduleWire; pub fn from_wire(w: ScheduleWire) -> Result<ScheduleSpec, Error>; }
+pub struct Schedule { pub spec: ScheduleSpec, pub event_id: String, pub author: String, pub created_at: i64, pub cancelled_at: Option<i64> }
+pub struct ScheduleRun { pub schedule_id: String, pub run_number: u32, pub event_id: String, pub fired_at: i64 }
+pub enum RunCheck { Due { run_number: u32, missed_runs: u64 }, Busy { session_id: String }, NotDue { next_at: i64 }, Finished(FinishReason) }
+pub fn plan_run(s: &Schedule, last_run: Option<&ScheduleRun>, now: i64) -> RunCheck;   // pure; never Busy; nothing fires once now > until
+pub fn run_text(prompt: &str, missed_runs: u64) -> String;   // the prompt, plus how many runs it stands for
+pub fn run_tag(schedule_id: &str, run_number: u32) -> Vec<String>;
+pub fn parse_run_tag(env: &Envelope) -> Option<(String, u32)>;   // kind 1 only
+impl Store {
+    pub fn add_schedule(&self, signer: &Keypair, spec: &ScheduleSpec, now: i64) -> Result<Schedule, Error>;   // envelope created_at = now
+    pub fn cancel_schedule(&self, signer: &Keypair, schedule_id: &str, now: i64) -> Result<(), Error>;      // author only (Unauthorized otherwise)
+    pub fn schedule(&self, id: &str) -> Result<Option<Schedule>, Error>;
+    pub fn schedules(&self, limit: usize) -> Result<Vec<Schedule>, Error>;                                  // created_at asc, capped at SCHEDULES_LIST_MAX
+    pub fn schedule_runs(&self, id: &str, limit: usize) -> Result<Vec<ScheduleRun>, Error>;                 // run_number desc
+    pub fn last_schedule_run(&self, id: &str) -> Result<Option<ScheduleRun>, Error>;
+    pub fn check_schedule(&self, s: &Schedule, now: i64) -> Result<RunCheck, Error>;   // plan_run + Busy when the last run's session is working/running
+}
+```
+
+Projections `schedules(schedule_id PK, event_id, author, to_pubkey, device, created_at, cancelled_at, content)` and
+`schedule_runs(schedule_id, run_number, event_id UNIQUE, fired_at, PRIMARY KEY(schedule_id, run_number))`, one migration.
+`append` drops (does not store) a kind-1 note whose `["sched", id, n]` is already recorded under another event id:
+`Appended { inserted: false, projected: false, rejected_reason: Some(..) }`, so `post` fails. Malformed or unfireable
+kind-124 content is stored and rejected.
+
+`axel` (bin): `cmd::inbox::send_from(ctx, &Origin { thread_id, tags, created_at }, recipients, hosts, text, kind)` is
+`send_message` with an explicit thread, extra tags and timestamp; `cmd::policy::act_as_owner()` makes policy checks
+treat the owner as the caller. `cmd::schedule::tick(ctx, now) -> Vec<(Schedule, Fired)>`, with
+`Fired { Sent { run_number, missed_runs, report }, Busy { session_id }, Refused { error } }`.
 
 ## axel-rex (shells out to the `rex` CLI with `--json`; no WS yet)
 
