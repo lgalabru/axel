@@ -24,9 +24,11 @@ mod error;
 pub mod hex;
 mod key;
 pub mod keystore;
+pub mod pairing;
 
 pub use attest::{AuthTag, DOMAIN as ATTESTATION_DOMAIN, attest, verify_attestation};
 pub use delegate::{Delegation, delegate};
 pub use error::Error;
+pub use pairing::{code_matches, confirm_code};
 pub use key::{Keypair, PublicKey};
 pub use keystore::Keystore;
