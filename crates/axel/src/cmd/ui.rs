@@ -973,13 +973,11 @@ pub fn run_compose(thread_id: &str) -> Result<()> {
     let leave = move |rex: &axel_rex::Rex, stream: Option<&str>| undock(rex, stream, usage.as_deref(), origin.as_deref());
     // Closing the pane (its × in Rex) hangs us up, about a second before we're
     // killed: leave right away, from a thread of our own.
-    if ctx.rex.is_some() {
+    // Rex's address for this pane is taken now: once the pane is closing,
+    // Rex no longer says which session its block belongs to.
+    if let Some(env) = ctx.rex.as_ref().map(|r| r.env().clone()) {
         let (leave, stream) = (leave.clone(), stream.clone());
-        on_hangup(move || {
-            if let Some(env) = axel_rex::detect() {
-                leave(&axel_rex::Rex::new(env), stream.as_deref());
-            }
-        });
+        on_hangup(move || leave(&axel_rex::Rex::new(env), stream.as_deref()));
     }
     // A question an agent asks you floats in front of the thread, centered.
     let ask = |item_id: &str| {
