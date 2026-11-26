@@ -1692,3 +1692,41 @@
   zh-Hans: "已在会话 {id} 中运行"
 "session {id} has no conversation to continue":
   zh-Hans: "会话 {id} 没有可继续的对话"
+
+# --- web panes (RFD 0007) ---
+"no agent is on this thread yet: start with @name and what you want done":
+  zh-Hans: "此话题上还没有智能体：以 @名字 开头，写下你要做的事"
+"not installed":
+  zh-Hans: "未安装"
+"nothing to send":
+  zh-Hans: "没有要发送的内容"
+"panes are auto, web or terminal":
+  zh-Hans: "窗格可以是 auto、web 或 terminal"
+"panes: {choice} (terminal-browser: {browser})":
+  zh-Hans: "窗格：{choice}（terminal-browser：{browser}）"
+"queued: it goes in when the running turn ends":
+  zh-Hans: "已排队：当前轮次结束后发送"
+"sent into the running turn: read at its next step":
+  zh-Hans: "已发送到当前轮次：会在下一步读取"
+"starting {program}":
+  zh-Hans: "启动 {program}"
+"terminal-browser couldn't draw here ({status})":
+  zh-Hans: "terminal-browser 无法在这里绘制（{status}）"
+"terminal-browser isn't installed":
+  zh-Hans: "未安装 terminal-browser"
+"terminal-browser isn't installed, so they stay terminal panes until it is: brew install terminal-browser":
+  zh-Hans: "未安装 terminal-browser，因此在安装前仍为终端窗格：brew install terminal-browser"
+"that message is longer than {max} bytes":
+  zh-Hans: "这条消息超过 {max} 字节"
+"that session is on another thread":
+  zh-Hans: "该会话属于另一个话题"
+"thread views open as {choice} panes from now on":
+  zh-Hans: "从现在起，话题视图以 {choice} 窗格打开"
+"which answer?":
+  zh-Hans: "哪个答案？"
+"which question?":
+  zh-Hans: "哪个问题？"
+"which session?":
+  zh-Hans: "哪个会话？"
+"{why}; showing the thread as terminal text":
+  zh-Hans: "{why}；以终端文本显示该话题"

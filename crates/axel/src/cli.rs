@@ -142,6 +142,18 @@ pub enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
+    /// How thread views are drawn: `web` (a page in the pane, through
+    /// terminal-browser), `terminal` (text), or `auto` (web when it can).
+    Panes {
+        #[arg(value_name = "auto|web|terminal")]
+        choice: Option<String>,
+    },
+    /// A thread's view as a web page (RFD 0007).
+    #[command(hide = true)]
+    Web {
+        #[command(subcommand)]
+        command: WebCommand,
+    },
     /// Exchange threads, transcripts and job branches with remote hosts.
     Sync {
         /// Host label; all hosts when omitted.
@@ -150,6 +162,14 @@ pub enum Command {
         #[arg(long)]
         follow: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebCommand {
+    /// This pane shows the thread as a web page (what a web pane runs).
+    Pane { thread: String },
+    /// Serve the thread's page and print its address, for a desktop browser.
+    Serve { thread: String },
 }
 
 #[derive(Subcommand, Debug)]

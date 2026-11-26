@@ -397,6 +397,9 @@ fn open_thread_here(ctx: &Ctx, thread_id: &str) -> Result<()> {
         }
         label_block_with_thread(ctx, rex, &block, thread_id);
         name_window_after_thread(ctx, rex, thread_id);
+        if super::web::web_panes(true) {
+            return super::web::pane(thread_id);
+        }
         return split_here(ctx, rex, thread_id);
     }
     let exe = std::env::current_exe()?;
@@ -517,9 +520,19 @@ pub fn open_split(thread_id: &str) -> Result<()> {
     open_split_tab(&ctx, thread_id)
 }
 
-/// `axel thread open` inside Rex: this pane becomes the stream with the
-/// composer below; outside Rex, the full in-TUI view.
+/// `axel thread open` inside Rex: this pane becomes the thread's web pane
+/// (RFD 0007), or the stream with the composer below; outside Rex, the full
+/// in-TUI view.
 pub fn open_here(thread_id: &str) -> Result<()> {
+    if super::web::web_panes(axel_rex::detect().is_some()) {
+        return super::web::pane(thread_id);
+    }
+    open_here_as_text(thread_id)
+}
+
+/// [`open_here`] as terminal text, whatever the pane choice: what a web
+/// pane falls back to.
+pub fn open_here_as_text(thread_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
     let Some(rex) = ctx.rex.as_ref() else {
         drop(ctx);
@@ -611,6 +624,9 @@ fn composer_below(view: &serde_json::Value, stream: &str) -> Option<String> {
 /// shell is busy (or unknown), the thread docks as a column on the right.
 /// Then Axel's floating panes close, this one last (which ends this process).
 pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
+    if super::web::web_panes(true) {
+        return dock_web_thread(ctx, rex, thread_id);
+    }
     let me = rex.env().block.clone();
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
@@ -641,6 +657,32 @@ pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Re
         return Ok(());
     };
     let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": ids[1] }));
+    name_window_after_thread(ctx, rex, thread_id);
+    close_axel_layers(ctx, rex);
+    Ok(())
+}
+
+/// [`dock_thread`] as one web pane (RFD 0007): a column on the right of the
+/// shell `axel` was typed in, or of the window's tiles, holding the whole
+/// thread (conversation and composer).  The shell stays where it is.
+fn dock_web_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Result<()> {
+    let me = rex.env().block.clone();
+    let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
+    let title = axel_tui::util::ellipsize(&thread.title, 48);
+    let command = super::web::pane_command(&thread.id);
+    let cwd = std::env::current_dir().ok();
+    let anchor = std::env::var(ORIGIN_BLOCK_ENV)
+        .ok()
+        .filter(|o| !o.is_empty() && *o != me)
+        .or_else(|| rex.view().ok().and_then(|v| tiled_root(&v, &me)));
+    let Some(anchor) = anchor else {
+        // A window with nothing tiled in it: open the thread in its own tab.
+        open_split_tab(ctx, thread_id)?;
+        close_axel_layers(ctx, rex);
+        return Ok(());
+    };
+    let block = rex.split_right(&anchor, &title, &command, DOCK_KEEP, cwd.as_deref(), &passthrough_env(), true)?;
+    let _ = rex.api_call("session.focus_block", serde_json::json!({ "block_id": block }));
     name_window_after_thread(ctx, rex, thread_id);
     close_axel_layers(ctx, rex);
     Ok(())
@@ -796,6 +838,12 @@ fn find_split(node: &serde_json::Value, want: &dyn Fn(&str, &str) -> bool) -> Op
 fn open_split_tab(ctx: &Ctx, thread_id: &str) -> Result<()> {
     let rex = ctx.rex.as_ref().context(t!("not inside Rex"))?;
     let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
+    if super::web::web_panes(true) {
+        // One web pane holds the whole thread.
+        let label = axel_tui::util::ellipsize(&thread.title, 40);
+        rex.new_window(&label, &super::web::pane_command(&thread.id), None, &passthrough_env(), true)?;
+        return Ok(());
+    }
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
     let stream: Vec<String> = vec![exe.clone(), "thread".into(), "stream".into(), thread.id.clone()];
     let compose: Vec<String> = vec![exe, "thread".into(), "compose".into(), thread.id.clone()];

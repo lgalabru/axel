@@ -28,6 +28,7 @@ mod thread;
 mod ui;
 mod undo;
 mod usage;
+mod web;
 mod update;
 mod mcp;
 
@@ -131,6 +132,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             crate::cli::HostCommand::Ls => host::list(),
             crate::cli::HostCommand::Rm { label } => host::remove(&label),
             crate::cli::HostCommand::Rpc => host::rpc_serve(),
+        },
+        Some(Command::Panes { choice }) => web::panes(choice.as_deref()),
+        Some(Command::Web { command }) => match command {
+            crate::cli::WebCommand::Pane { thread } => web::pane(&thread),
+            crate::cli::WebCommand::Serve { thread } => web::serve(&thread),
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
     }

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Axel</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="top">
+  <div class="title"><span class="mark" aria-hidden="true">a</span><h1 id="title">Loading…</h1></div>
+  <div id="agents" class="agents"></div>
+  <div id="spend" class="spend"></div>
+</header>
+<main id="timeline" aria-live="polite"></main>
+<button id="jump" class="jump" hidden>↓ New messages</button>
+<footer id="composer">
+  <div id="status" class="status"></div>
+  <form id="form" autocomplete="off">
+    <div id="suggest" class="suggest" hidden></div>
+    <textarea id="input" rows="1" placeholder="Message the thread · @name to ask an agent" spellcheck="true"></textarea>
+    <div class="actions">
+      <button type="button" id="stop" class="ghost" hidden title="Stop the running turn (Esc)">Stop</button>
+      <button type="submit" id="send" title="Send (Enter) · interrupt and send (⌘/Ctrl+Enter)">Send</button>
+    </div>
+  </form>
+  <div class="hint">Enter sends · Shift+Enter new line · ⌘/Ctrl+Enter interrupts and sends · Esc stops</div>
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>
