@@ -46,6 +46,12 @@ pub use stream::{RedirectInputFn, StreamInput, run_stream};
 pub use thread::{SendCommand, SendReply};
 pub use util::{relative_time, slugify};
 
+/// Everything the thread view shows, as the terminal view loads it: what a
+/// web pane renders too (`axel web`, RFD 0007), so both views agree.
+pub fn load_thread_data(store: &axel_store::Store, owner_pk: &str, thread_id: &str) -> anyhow::Result<model::ThreadData> {
+    glue::load_thread(store, owner_pk, thread_id, util::now_secs())
+}
+
 /// Which screen the UI opens on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Screen {
