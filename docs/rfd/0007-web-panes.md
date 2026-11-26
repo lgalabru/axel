@@ -17,8 +17,10 @@ The terminal view also takes three panes (stream, composer, tokens), kept in
 step by hand (`settle_thread_row`, `fit_compose_pane`, the hang-up handler).
 
 Someone in the community ran a web view in a pane with `terminal-browser`
-(see `RESEARCH.md`, "terminal-browser"). The owner asked for a spike: web
-panes by default, terminal panes kept as an option.
+(see `RESEARCH.md`, "terminal-browser"). The owner asked for a spike of web
+panes, with terminal panes kept as an option. The renderer is now Ladybird's
+own terminal mode instead (see "What we learned", 2026-11-26), and web panes
+are off until the owner turns them on.
 
 ## Sketch
 
@@ -26,9 +28,9 @@ What this branch builds:
 
 - **One pane, one process.** `axel web pane THREAD`:
   - serves the thread on `127.0.0.1` from this process;
-  - runs `terminal-browser open --no-merge URL` in the same pane, which
-    draws Chromium with the Kitty graphics protocol;
-  - ends when the browser closes, taking the server with it.
+  - runs `Ladybird --headless=terminal --temporary-profile URL` in the same
+    pane, which draws the page with the Kitty graphics protocol;
+  - ends when Ladybird closes, taking the server with it.
 
   No daemon (ADR 0005), and the pane is the whole thread view: conversation
   and composer in one.
@@ -58,13 +60,15 @@ What this branch builds:
     connections, 8 event streams, 10 s read timeout.
 - **Where it's used.** Docking a thread from the launcher, a thread in its own
   tab, and `axel thread open`.
-  - The choice is `axel panes auto|web|terminal`, kept in
-    `$AXEL_HOME/settings.json`; `$AXEL_PANES` wins over it.
-  - `auto` (the default) means web where `terminal-browser` is installed and
-    we're in Rex, else terminal.
+  - Web panes are an experimental runtime flag, off by default:
+    `axel panes web` turns them on, `axel panes terminal` off. The choice is
+    kept in `$AXEL_HOME/settings.json`, and `$AXEL_PANES` wins over it.
+  - When on, they are used only where Ladybird is installed: `$AXEL_LADYBIRD`,
+    else `ladybird` on PATH, else `Ladybird.app` in `/Applications` or
+    `~/Applications`. Elsewhere thread views stay terminal panes.
 - **Falling back.** The pane shows the terminal view instead, saying why, when:
-  - `terminal-browser` is missing;
-  - or it exits non-zero within 3 s having loaded nothing, as it does in a
+  - Ladybird is missing;
+  - or it exits non-zero within 3 s having loaded nothing, as it would in a
     terminal without Kitty graphics.
 - **Debugging.** `axel web serve THREAD` prints the address and serves until
   interrupted, for a desktop browser.
@@ -88,22 +92,20 @@ conversation items; the view shows the newest 500.
 
 ## Open questions
 
-- **Does `terminal-browser` draw in Rex as it does in Ghostty?** Its README
-  lists Rex among supported terminals, but Rex's docs say nothing about the
-  Kitty graphics protocol. It isn't installed on this machine, so the spike
-  only checks the contract: the arguments, the page, the cookie, the fallback.
-  To find out, `brew install terminal-browser` and `axel panes web`, then dock
-  a thread.
-- **Startup time.** Electron's offscreen rendering takes about a second to
-  come up, against about 50 ms for the terminal stream. Docking feels slower.
-  A warm browser per window, opening tabs with `--no-merge` off, would hide
-  it, but then the pane and the browser no longer share a lifetime.
-- **Telemetry.** `terminal-browser` reports usage by default
-  (`terminal-browser config set telemetry.usage off` to stop). Should Axel set
-  `DO_NOT_TRACK=1` for the panes it starts, or leave that to the user?
-- **Keyboard.** `terminal-browser` takes `cmd+l` and others for its own UI,
-  and it has no option to hide its bar ("app mode was removed"). Which Axel
-  keys collide? Try each composer shortcut in the real thing.
+- **How does it look in a real Rex window?** Rex answers the Kitty graphics
+  query with `OK`, and Ladybird draws frames into a pseudo-terminal through
+  `axel web pane` (37 frames in 8 s). Nothing here could show those frames in
+  a Rex client. To find out, `axel panes web` and dock a thread.
+- **Frames by file or inline.** In the pseudo-terminal Ladybird sent full
+  frames through temporary files (`t=t`), not just damaged regions. A real
+  terminal acknowledges, and Ladybird then patches (`a=f`). A remote Rex
+  client gets the server's frames: watch the bandwidth over Tailscale.
+- **Its status line.** Terminal mode keeps the pane's last row for its own
+  status line and its keys (a URL prompt). Which Axel keys collide? Try each
+  composer shortcut in the real thing.
+- **Startup.** Ladybird starts eight processes for a pane, using about
+  285 MB once idle; the terminal stream starts in about 50 ms. Docking feels
+  slower; measure it.
 - **A native web block.** Rex `0.1.0-preview.25` (API revision 24) has no
   browser block. Its creators are `terminal`, `tunnel`, `fs` and
   `onboarding`. It does load executable block plugins (`--block-dir`), whose
@@ -121,9 +123,10 @@ conversation items; the view shows the newest 500.
 - **A local server is attack surface.** It is bounded and locked down as
   above, but it is a socket any local process can reach. Without the secret it
   gets 403s; with it, it can do what the owner can on that one thread.
-- **A dependency we don't control.** `terminal-browser` is young (MIT, 77 open
-  issues on 2026-11-26) and its CLI already changed once. The fallback keeps
-  Axel working when it breaks.
+- **A dependency we don't control.** Ladybird is an alpha (2026-11-23), its
+  terminal mode landed on 2026-11-09, and it takes pull requests from
+  maintainers only. The fallback keeps Axel working when it breaks, and the
+  flag keeps it off unless the owner wants it.
 
 ## What we learned
 
@@ -140,3 +143,19 @@ conversation items; the view shows the newest 500.
   - So Axel must ship trust rules in its Rex module, and an agent's pane
     session, which `exec`s the harness after reporting, fails that check.
     That is a follow-up to #45, not part of this RFD.
+- 2026-11-26: Ladybird replaces terminal-browser as the renderer.
+  - Ladybird 2026.47.7 has `--headless=terminal` (`LibWebView/TerminalWebView`,
+    added on 2026-11-09). It draws frames as Kitty graphics, patching only
+    damaged regions; reads SGR-pixel mouse and the Kitty keyboard protocol;
+    and follows `SIGWINCH`.
+  - It renders this page the same as Chrome, cookie handshake and event
+    stream included (a headless screenshot), and costs about 285 MB in
+    eight processes, idle. It is BSD-2-Clause, and nothing is bundled.
+  - terminal-browser is dropped: it is Electron (136 MB download), reports
+    usage by default, and needs installing apart; the owner didn't want Axel
+    to manage it either.
+  - Embedding Ladybird as a library isn't possible today. Its Rust crates
+    are internal to its C++ build, and `HeadlessWebView` and
+    `TerminalWebView` are internal classes that change weekly.
+  - Web panes are an opt-in runtime flag (`axel panes web`), off by default,
+    as the owner asked.
