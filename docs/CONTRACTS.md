@@ -128,6 +128,10 @@ impl Store {
 
     // ---- the log ----
     pub fn append(&self, env: &Envelope) -> Result<Appended, Error>;   // verify sig; INSERT OR IGNORE into events; authorize; project. Idempotent.
+    pub fn append_all(&self, envs: &[Envelope], keep: impl FnMut(&Envelope) -> Result<bool, Error>) -> Result<Vec<Option<Appended>>, Error>;
+    // append for each, in order, in one transaction; each touched thread replayed once at the end (every thread once
+    // if a link or announcement changed who may sign). keep is asked right before each is stored (None = not stored).
+    // Outcomes are read after the replays. Any error stores nothing. More than 10 000 envelopes → Invalid.
     pub fn events_since(&self, cursor: i64, limit: usize) -> Result<Vec<(i64 /*seq*/, Envelope)>, Error>;   // for sync
     pub fn thread_events(&self, thread_id: &str) -> Result<Vec<Envelope>, Error>;                            // (created_at, id) order
     pub fn rebuild_projections(&self) -> Result<(), Error>;                                                   // replay the whole log

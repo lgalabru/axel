@@ -9,7 +9,7 @@
 //! the log and are re-evaluated on every replay, so a later participant-add
 //! revives them without a manual rebuild.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use axel_identity::{AuthTag, Delegation, PublicKey, verify_attestation};
 use axel_inbox::Envelope;
@@ -57,6 +57,35 @@ fn is_scoped(env: &Envelope) -> bool {
 }
 
 const DELEGATED_WITHOUT_THREAD: &str = "a delegated envelope must be on a thread";
+
+/// The most envelopes one [`Store::append_all`] takes.  Sync moves 500 per
+/// batch; a caller past this many is holding a transaction open too long.
+pub(crate) const APPEND_ALL_ENVELOPES_MAX: usize = 10_000;
+
+/// The thread replays appends owe, paid once by [`Replays::settle`].
+#[derive(Debug, Default)]
+struct Replays {
+    /// Threads that took a new envelope.
+    threads: BTreeSet<String>,
+    /// Whether who may sign changed, so every thread is owed one.
+    all: bool,
+}
+
+impl Replays {
+    fn settle(self, conn: &Connection) -> Result<(), Error> {
+        let threads: Vec<String> = if self.all {
+            let mut st = conn.prepare_cached("SELECT DISTINCT thread_id FROM events WHERE thread_id IS NOT NULL")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        } else {
+            self.threads.into_iter().collect()
+        };
+        for thread_id in &threads {
+            replay_thread(conn, thread_id, None)?;
+        }
+        Ok(())
+    }
+}
 const NO_THREAD_TAG: &str = "thread-scoped envelope without a [\"t\", thread_id] tag";
 
 impl Store {
@@ -66,11 +95,66 @@ impl Store {
     /// that fail authorization are stored with `rejected_reason` and revisited
     /// on later replays.
     pub fn append(&self, env: &Envelope) -> Result<Appended, Error> {
-        env.verify()?;
+        let mut appended = self.append_all(std::slice::from_ref(env), |_| Ok(true))?;
+        assert_eq!(appended.len(), 1, "one outcome per envelope");
+        Ok(appended.pop().flatten().expect("an envelope every caller keeps is appended"))
+    }
+
+    /// [`Store::append`] for many envelopes, in one transaction and in order.
+    /// Each thread they touch is replayed once at the end, and every thread
+    /// at most once when a link or an announcement among them changed who may
+    /// sign: one at a time, the initial sync of a large home replays every
+    /// thread once per announced agent.
+    ///
+    /// `keep` is asked about each envelope right before it is stored, so it
+    /// sees the device links stored before it (sync keeps owner records only
+    /// from keys that speak for this machine's owner).  An envelope it turns
+    /// away is not stored, and its outcome is `None`.  Outcomes are read once
+    /// the replays are done.  Any error stores none of them.
+    pub fn append_all(
+        &self,
+        envs: &[Envelope],
+        mut keep: impl FnMut(&Envelope) -> Result<bool, Error>,
+    ) -> Result<Vec<Option<Appended>>, Error> {
+        if envs.len() > APPEND_ALL_ENVELOPES_MAX {
+            return Err(Error::Invalid(format!(
+                "{} envelopes in one append, past the {APPEND_ALL_ENVELOPES_MAX} allowed",
+                envs.len()
+            )));
+        }
         let tx = self.conn.unchecked_transaction()?;
-        let appended = append_in(&tx, env)?;
+        let mut owed = Replays::default();
+        let mut stored: Vec<Option<Stored>> = Vec::with_capacity(envs.len());
+        for env in envs {
+            if !keep(env)? {
+                stored.push(None);
+                continue;
+            }
+            env.verify()?;
+            stored.push(Some(append_in(&tx, env, &mut owed)?));
+        }
+        owed.settle(&tx)?;
+        let mut outcomes = Vec::with_capacity(envs.len());
+        for (env, stored) in envs.iter().zip(stored) {
+            let outcome = match stored {
+                None => None,
+                Some(Stored::Dropped(reason)) => Some(Appended { inserted: false, projected: false, rejected_reason: Some(reason) }),
+                Some(Stored::Already) => {
+                    let (projected, rejected_reason) = event_state(&tx, &env.id)?;
+                    Some(Appended { inserted: false, projected, rejected_reason })
+                }
+                Some(Stored::New) => {
+                    let (projected, rejected_reason) = event_state(&tx, &env.id)?;
+                    // The replays above settle every new event one way or the other.
+                    assert!(projected != rejected_reason.is_some(), "event {} is exactly one of projected or rejected", env.id);
+                    Some(Appended { inserted: true, projected, rejected_reason })
+                }
+            };
+            outcomes.push(outcome);
+        }
         tx.commit()?;
-        Ok(appended)
+        assert_eq!(outcomes.len(), envs.len(), "one outcome per envelope, in order");
+        Ok(outcomes)
     }
 
     /// [`Store::append`] for a message built elsewhere, failing loudly when it
@@ -204,8 +288,22 @@ impl Store {
     }
 }
 
-fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
-    // Only `Store::append` calls this, after checking id and signature.
+/// What [`append_in`] did with an envelope.
+#[derive(Debug)]
+enum Stored {
+    /// New to the log.
+    New,
+    /// Already in the log; nothing changed.
+    Already,
+    /// Not stored, for this reason: a second run of a schedule.
+    Dropped(String),
+}
+
+/// Store one verified envelope and settle what it can settle now: owner
+/// records and plain envelopes are projected, a thread envelope's replay is
+/// added to `owed`.
+fn append_in(conn: &Connection, env: &Envelope, owed: &mut Replays) -> Result<Stored, Error> {
+    // Only `Store::append_all` calls this, after checking id and signature.
     debug_assert!(env.verify().is_ok(), "an envelope is verified before it is stored");
     // Refused before storing, like a bad signature: a `created_at` past
     // `i64::MAX` would be stored negative and replay before everything.
@@ -213,11 +311,7 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
     // A second run with a number another note already took (two devices
     // firing one schedule) is dropped, not stored: sync never spreads it.
     if let Some(reason) = crate::schedule::duplicate_run(conn, env)? {
-        return Ok(Appended {
-            inserted: false,
-            projected: false,
-            rejected_reason: Some(reason),
-        });
+        return Ok(Stored::Dropped(reason));
     }
     let tags_json = serde_json::to_string(&env.tags)?;
     let thread_id = thread_id_of(env);
@@ -239,17 +333,14 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
         ],
     )?;
     if inserted == 0 {
-        let (projected, rejected_reason) = event_state(conn, &env.id)?;
-        return Ok(Appended {
-            inserted: false,
-            projected,
-            rejected_reason,
-        });
+        return Ok(Stored::Already);
     }
     crate::schedule::record_run(conn, env)?;
     if is_scoped(env) {
         match &thread_id {
-            Some(t) => replay_thread(conn, t, None)?,
+            Some(t) => {
+                owed.threads.insert(t.clone());
+            }
             None => mark_rejected(conn, &env.id, NO_THREAD_TAG)?,
         }
     } else if has_delegation(env) && thread_id.is_none() {
@@ -257,22 +348,11 @@ fn append_in(conn: &Connection, env: &Envelope) -> Result<Appended, Error> {
     } else if let Some(r) = thread_id.as_deref().and_then(|t| delegation_problem(env, t)) {
         mark_rejected(conn, &env.id, &r)?;
     } else if kind::is_owner_record(env.kind) {
-        crate::owner::project(conn, env)?;
+        owed.all |= crate::owner::project(conn, env)?;
     } else {
         project_plain(conn, env)?;
     }
-    let (projected, rejected_reason) = event_state(conn, &env.id)?;
-    // Each branch above settles the new event one way or the other.
-    assert!(
-        projected != rejected_reason.is_some(),
-        "event {} is exactly one of projected or rejected",
-        env.id
-    );
-    Ok(Appended {
-        inserted: true,
-        projected,
-        rejected_reason,
-    })
+    Ok(Stored::New)
 }
 
 fn event_state(conn: &Connection, id: &str) -> Result<(bool, Option<String>), Error> {

@@ -453,19 +453,25 @@ fn handle(req: Request) -> Result<Response> {
 /// team, instance or schedule is kept only from a key that speaks for this
 /// machine's owner.  Another owner's records are never ours to keep: they
 /// would put their agents in our lists, and our launcher.
+///
+/// One `append_all` for the whole batch, so the initial sync of a large home
+/// replays every thread once, not once per agent it announces.
 fn ingest(ctx: &Ctx, events: &[Envelope]) -> Result<Vec<(Envelope, axel_store::Appended)>> {
-    let mut out = Vec::with_capacity(events.len());
-    let (links, rest): (Vec<&Envelope>, Vec<&Envelope>) = events.iter().partition(|e| e.kind == axel_store::kind::OWNER_DEVICE);
-    for e in links {
-        out.push((e.clone(), ctx.store.append(e)?));
-    }
-    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
-    for e in rest {
-        if axel_inbox::kind::is_owner_record(e.kind) && ctx.store.principal(&e.from)? != me {
-            continue;
+    let (links, rest): (Vec<Envelope>, Vec<Envelope>) = events.iter().cloned().partition(|e| e.kind == axel_store::kind::OWNER_DEVICE);
+    let ordered: Vec<Envelope> = links.into_iter().chain(rest).collect();
+    let my_key = ctx.owner()?.public().to_base58();
+    // Asked right before each envelope is stored, so the links above it are
+    // in place when an owner record's signer is resolved.
+    let keep = |e: &Envelope| -> Result<bool, axel_store::Error> {
+        if e.kind == axel_store::kind::OWNER_DEVICE || !axel_inbox::kind::is_owner_record(e.kind) {
+            return Ok(true);
         }
-        out.push((e.clone(), ctx.store.append(e)?));
-    }
+        Ok(ctx.store.principal(&e.from)? == ctx.store.principal(&my_key)?)
+    };
+    let outcomes = ctx.store.append_all(&ordered, keep)?;
+    assert_eq!(outcomes.len(), ordered.len(), "one outcome per envelope");
+    let out: Vec<(Envelope, axel_store::Appended)> =
+        ordered.into_iter().zip(outcomes).filter_map(|(e, outcome)| outcome.map(|o| (e, o))).collect();
     debug_assert!(out.len() <= events.len());
     Ok(out)
 }

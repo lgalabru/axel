@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use crate::devices::Principals;
 pub use crate::devices::{DeviceRecord, PRINCIPAL_DEPTH_MAX};
-use crate::log::{EVENT_COLS, mark_applied, mark_rejected, replay_thread, row_envelope};
+use crate::log::{EVENT_COLS, mark_applied, mark_rejected, row_envelope};
 use crate::types::lenient;
 use crate::{
     AgentColor, AgentProfile, Effort, Error, Harness, RuntimeMode,
@@ -125,13 +125,17 @@ pub struct AnnounceWire {
     pub auth: Vec<String>,
 }
 
-/// Project one owner record and settle it as applied or rejected.  When a
-/// link changes who speaks for whom, every thread is replayed, and records
-/// that waited for it are revived.
-pub(crate) fn project(conn: &Connection, env: &Envelope) -> Result<(), Error> {
+/// Project one owner record and settle it as applied or rejected, reviving
+/// records that waited for it.  Returns whether it changed who may sign on
+/// threads, in which case the caller owes every thread a replay: it does
+/// that once per batch of appends, not once per record.
+pub(crate) fn project(conn: &Connection, env: &Envelope) -> Result<bool, Error> {
     assert!(kind::is_owner_record(env.kind), "kind {} is no owner record", env.kind);
     match apply(conn, env)? {
-        Err(reason) => mark_rejected(conn, &env.id, &reason),
+        Err(reason) => {
+            mark_rejected(conn, &env.id, &reason)?;
+            Ok(false)
+        }
         Ok(()) => {
             mark_applied(conn, &env.id)?;
             let mut authorization_changed = changes_authorization(env.kind);
@@ -141,10 +145,7 @@ pub(crate) fn project(conn: &Connection, env: &Envelope) -> Result<(), Error> {
                 // records that arrived before the revocation did.
                 revalidate(conn)?;
             }
-            if authorization_changed {
-                replay_all_threads(conn)?;
-            }
-            Ok(())
+            Ok(authorization_changed)
         }
     }
 }
@@ -304,19 +305,6 @@ fn restore_team(conn: &Connection, team_id: &str) -> Result<(), Error> {
             Ok(())
         }
     }
-}
-
-fn replay_all_threads(conn: &Connection) -> Result<(), Error> {
-    let threads: Vec<String> = {
-        let mut statement =
-            conn.prepare_cached("SELECT DISTINCT thread_id FROM events WHERE thread_id IS NOT NULL")?;
-        let rows = statement.query_map([], |r| r.get(0))?;
-        rows.collect::<Result<_, _>>()?
-    };
-    for thread_id in &threads {
-        replay_thread(conn, thread_id, None)?;
-    }
-    Ok(())
 }
 
 /// [`apply`] for a full rebuild, which replays every thread afterwards.

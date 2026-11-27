@@ -489,3 +489,83 @@ fn a_rebuild_settles_every_record_as_arriving_did() {
     assert_eq!(state(&s), before);
     assert_eq!(s.devices().unwrap(), devices_before);
 }
+
+/// What `append_all` stores and settles is what appending one at a time
+/// does, and the outcome it reports for each envelope is the settled one.
+#[test]
+fn a_batch_settles_as_one_at_a_time_and_reports_the_final_outcome() {
+    let (owner, laptop, stranger) = (Keypair::generate(), Keypair::generate(), Keypair::generate());
+    let one_at_a_time = store();
+    let thread = one_at_a_time.create_thread(&owner, "t", "intent", None).unwrap();
+    let root = one_at_a_time.get_event(&thread.id).unwrap().unwrap();
+    let scout = Keypair::generate();
+    let envelopes = vec![
+        root,
+        note_at(&laptop, "before the link arrived", &thread.id, T0 + 20),
+        profile_record(&laptop, &profile_wire("p-1", &owner, "reviewer", "early"), T0 + 5),
+        announce(&laptop, &scout, "p-1", T0 + 6),
+        device_record(&owner, DeviceOp::Link, &laptop, "laptop", T0),
+        link_without_consent(&stranger, &laptop, T0 + 1),
+        note_at(&stranger, "never a participant", &thread.id, T0 + 30),
+        device_record(&owner, DeviceOp::Revoke, &laptop, "laptop", T0 + 100),
+        note_at(&laptop, "after the revocation", &thread.id, T0 + 150),
+    ];
+    for env in &envelopes[1..] {
+        one_at_a_time.append(env).unwrap();
+    }
+
+    let batched = store();
+    let outcomes = batched.append_all(&envelopes, |_| Ok(true)).unwrap();
+    assert_eq!(outcomes.len(), envelopes.len());
+    for (env, outcome) in envelopes.iter().zip(&outcomes) {
+        let outcome = outcome.as_ref().expect("every envelope was kept");
+        assert!(outcome.inserted);
+        let settled = batched.rejected_reason(&env.id).unwrap();
+        assert_eq!(outcome.rejected_reason, settled, "the outcome is read after the replays");
+        assert_eq!(outcome.projected, settled.is_none());
+        assert_eq!(settled, one_at_a_time.rejected_reason(&env.id).unwrap(), "kind {} settles as one at a time", env.kind);
+    }
+    assert!(outcomes[1].as_ref().unwrap().projected, "the note before its link is revived within the batch");
+    assert!(outcomes[8].as_ref().unwrap().rejected_reason.is_some(), "what a revoked device signs after is refused");
+    assert_eq!(batched.devices().unwrap(), one_at_a_time.devices().unwrap());
+
+    // A second batch of the same envelopes changes nothing and says so.
+    let again = batched.append_all(&envelopes, |_| Ok(true)).unwrap();
+    assert!(again.iter().all(|o| o.as_ref().is_some_and(|o| !o.inserted)));
+}
+
+#[test]
+fn a_batch_stores_only_what_keep_keeps() {
+    let s = store();
+    let owner = Keypair::generate();
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    let kept = note_at(&owner, "kept", &thread.id, T0 + 1);
+    let turned_away = note_at(&owner, "turned away", &thread.id, T0 + 2);
+    let outcomes = s.append_all(&[kept.clone(), turned_away.clone()], |e| Ok(e.id != turned_away.id)).unwrap();
+    assert!(outcomes[0].as_ref().is_some_and(|o| o.inserted && o.projected));
+    assert!(outcomes[1].is_none());
+    assert!(s.get_event(&turned_away.id).unwrap().is_none(), "an envelope keep turned away is not stored");
+}
+
+#[test]
+fn a_batch_with_a_forged_envelope_stores_none_of_it() {
+    let s = store();
+    let owner = Keypair::generate();
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    let good = note_at(&owner, "good", &thread.id, T0 + 1);
+    let mut forged = note_at(&owner, "forged", &thread.id, T0 + 2);
+    forged.content = "changed after signing".into();
+    assert!(matches!(s.append_all(&[good.clone(), forged], |_| Ok(true)), Err(Error::Envelope(_))));
+    assert!(s.get_event(&good.id).unwrap().is_none(), "the whole batch rolled back");
+}
+
+#[test]
+fn a_batch_past_the_limit_is_refused_before_anything_is_stored() {
+    let s = store();
+    let owner = Keypair::generate();
+    let thread = s.create_thread(&owner, "t", "intent", None).unwrap();
+    let note = note_at(&owner, "one too many", &thread.id, T0 + 1);
+    let too_many = vec![note.clone(); crate::log::APPEND_ALL_ENVELOPES_MAX + 1];
+    assert!(matches!(s.append_all(&too_many, |_| Ok(true)), Err(Error::Invalid(_))));
+    assert!(s.get_event(&note.id).unwrap().is_none());
+}

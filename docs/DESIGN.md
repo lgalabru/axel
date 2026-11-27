@@ -473,6 +473,10 @@ claim another machine. From then on:
   record (kinds 120-129: links, profiles, instances, schedules); a host of another owner
   gets only the threads shared with it plus our device links. Sync first signs what
   changed here (`device::publish`): edited profiles, new instances, this machine's label.
+  Each batch that arrives is stored with one `Store::append_all`: every thread it touches
+  is replayed once at the end, and every thread at most once when a link or an
+  announcement in it changed who may sign. The first sync of a large home therefore
+  replays each thread once, not once per agent it announces.
 - **Profiles and instances.** A profile edit is unsigned (`updated_id NULL`) until the
   next publish; the newest `(created_at, id)` per profile wins. A profile that runs on a
   machine for the first time gets that machine's own instance: a new key, attested by

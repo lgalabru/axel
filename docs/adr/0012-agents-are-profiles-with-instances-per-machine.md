@@ -42,7 +42,8 @@ instance of a profile on a given machine.
 - Policy (`reach`, budget, default host) stays per instance. A reach list names instance
   keys, so an instance on another machine needs its own entry.
 - Records that arrive before what they depend on are stored rejected and revived. A link
-  or an announcement replays every thread, which is affordable because both are rare.
+  or an announcement replays every thread, once per batch of appends (`append_all`), so
+  the first sync of a home with many agents replays each thread once.
 
 ## Possible future improvements
 
