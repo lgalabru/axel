@@ -144,3 +144,98 @@ fn a_web_pane_for_a_thread_that_doesnt_exist_says_so() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("no thread nope"));
     assert_eq!(home.read("browser.argv"), "", "the browser never started");
 }
+
+/// A stand-in Ladybird on a terminal: records its arguments and the size
+/// its terminal says, draws a "frame" at the top and a status line on its
+/// last row, the way terminal mode does, then waits to be ended.
+const STATUS_LINE_BROWSER: &str = r#"#!/bin/sh
+printf '%s\n' "$@" > "$HOME/browser.argv"
+size=$(stty size)
+rows=${size%% *}
+printf '\033[1;1Hframe %s\n' "$size"
+printf '\033[%s;1H\033[2K\033[2m status http://127.0.0.1:1234/ ctrl-l url\033[0m' "$rows"
+printf '\033[3;1Hafter\n'
+sleep 30
+"#;
+
+/// The rows, columns and pixels of the pane a test runs a web pane in: 20
+/// rows of 34-pixel cells, a Retina pane.
+const PANE: [u16; 4] = [20, 80, 1280, 680];
+
+/// Run `axel` on a pseudo-terminal of `PANE`'s size and return what it drew
+/// within `secs`, then hang the pane up.
+fn on_a_pane(home: &Home, args: &[&str], secs: u64) -> String {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    let (mut master, mut slave) = (0, 0);
+    let mut size = libc::winsize { ws_row: PANE[0], ws_col: PANE[1], ws_xpixel: PANE[2], ws_ypixel: PANE[3] };
+    // SAFETY: openpty writes two descriptors into the integers given.
+    assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) }, 0);
+    // SAFETY: both descriptors were just opened and are owned here.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    // SAFETY: a flag on a descriptor owned here: the pane must not hold our end.
+    assert_eq!(unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+    let mut c = Command::new(env!("CARGO_BIN_EXE_axel"));
+    c.env_clear()
+        .env("HOME", home.path())
+        .env("AXEL_HOME", home.path().join(".axel"))
+        .env("AXEL_KEYSTORE", "file")
+        .env("PATH", format!("{}:/usr/bin:/bin", home.path().join("bin").display()))
+        .env("AXEL_LADYBIRD", home.path().join("bin").join("ladybird"))
+        .args(args)
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave.try_clone().unwrap());
+    // SAFETY: setsid and TIOCSCTTY are async-signal-safe; they make the
+    // pseudo-terminal this child's controlling terminal, as a pane's is.
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+            Ok(())
+        });
+    }
+    let mut child = c.spawn().unwrap();
+    // The command holds the pane's end too: dropped, closing ours hangs it up.
+    drop(c);
+    drop(slave);
+    let fd = master.as_raw_fd();
+    let mut reader = std::fs::File::from(master);
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one pollfd, owned here, for the duration of the call.
+        if unsafe { libc::poll(&mut poll, 1, 100) } > 0 {
+            let mut chunk = [0_u8; 4096];
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => seen.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+    // Closing the pane hangs it up, as Rex does.
+    drop(reader);
+    let _ = child.wait();
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+#[test]
+fn ladybirds_status_line_never_reaches_the_pane_and_the_page_fills_it() {
+    let started = std::time::Instant::now();
+    let home = Home::new();
+    home.browser(STATUS_LINE_BROWSER);
+    let thread = home.thread();
+    let drawn = on_a_pane(&home, &["web", "pane", &thread, "--view", "messages"], 3);
+    assert!(drawn.contains("frame 21 80"), "Ladybird is told one row more than the pane: {drawn:?}");
+    assert!(!drawn.contains("status") && !drawn.contains("127.0.0.1"), "its status line is dropped: {drawn:?}");
+    assert!(drawn.contains("\x1b[3;1Hafter"), "what follows it is kept: {drawn:?}");
+    let argv = home.read("browser.argv");
+    assert!(argv.contains("--device-pixel-ratio\n2\n"), "a Retina pane draws at 2: {argv}");
+    // The pane hung up well before the stand-in's 30 seconds: none is left.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let left = Command::new("pgrep").args(["-f", &home.path().join("bin").join("ladybird").display().to_string()]).output().unwrap();
+    assert!(left.stdout.is_empty(), "Ladybird ends with its pane: {}", String::from_utf8_lossy(&left.stdout));
+    assert!(started.elapsed() < std::time::Duration::from_secs(15), "ended by the hangup, not by its own end");
+}

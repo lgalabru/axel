@@ -14,6 +14,7 @@
 
 mod assets;
 mod server;
+mod terminal;
 mod view;
 
 use std::path::PathBuf;
@@ -158,20 +159,14 @@ pub fn pane_command(thread_id: &str, view: WebView) -> Vec<String> {
     vec![exe, "web".into(), "pane".into(), thread_id.to_string(), "--view".into(), view.as_str().into()]
 }
 
-/// Device pixels per CSS pixel: a Retina display reports twice the pixels per
-/// cell, so without this the page is drawn at half size.  Read from the
-/// pane's size in cells and pixels; `$AXEL_WEB_SCALE` overrides it.
-fn device_pixel_ratio() -> f64 {
+/// Device pixels per CSS pixel for a pane of `size`: a Retina display, or a
+/// phone, draws more pixels per cell, so without this the page is drawn
+/// small.  `$AXEL_WEB_SCALE` overrides it.
+fn device_pixel_ratio(size: &terminal::PaneSize) -> f64 {
     if let Some(scale) = std::env::var("AXEL_WEB_SCALE").ok().and_then(|v| v.parse::<f64>().ok()) {
         return scale.clamp(DEVICE_PIXEL_RATIO_MIN, DEVICE_PIXEL_RATIO_MAX);
     }
-    let mut size = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
-    // SAFETY: TIOCGWINSZ fills the struct we pass; a failed call leaves it zeroed.
-    let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
-    if !ok || size.ws_row == 0 || size.ws_ypixel == 0 {
-        return DEVICE_PIXEL_RATIO_MIN;
-    }
-    ratio_for_cell_height(f64::from(size.ws_ypixel) / f64::from(size.ws_row))
+    size.cell_height_px().map_or(DEVICE_PIXEL_RATIO_MIN, ratio_for_cell_height)
 }
 
 /// The ratio a terminal cell `cell_height` device pixels tall implies.  A
@@ -238,24 +233,31 @@ pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
     // After a Rex restart this pane comes back as the same web pane.
     super::resume::come_back_as(&["web", "pane", thread_id, "--view", view.as_str()], std::env::current_dir().ok().as_deref());
     // The composer closes the whole thread view, as the terminal one does.
+    // Every view ends its Ladybird when the pane goes.
     let undock = (view == WebView::Composer).then(Undock::find).flatten();
-    if let Some(u) = &undock {
-        let u = u.clone();
-        super::ui::on_hangup(move || u.run());
-    }
+    let on_close = undock.clone();
+    super::ui::on_hangup(move || {
+        terminal::end_running();
+        if let Some(u) = on_close {
+            u.run();
+        }
+    });
     let running = server::start(Arc::new(backend), view)?;
     let started = Instant::now();
     // Terminal mode draws in this pane.  A temporary profile keeps each pane
     // apart from the owner's Ladybird (cookies, history) and from each other.
-    let ratio = device_pixel_ratio().to_string();
-    let status = std::process::Command::new(&browser)
-        .args(["--headless=terminal", "--temporary-profile", "--device-pixel-ratio", &ratio, &running.url()])
-        .status()
-        .with_context(|| t!("starting {program}", program = browser.display()))?;
-    let gave_up = !status.success() && started.elapsed() < Duration::from_secs(FALLBACK_WINDOW_SECS) && running.served() == 0;
-    if gave_up {
-        return fall_back(thread_id, view, &t!("Ladybird couldn't draw here ({status})", status = status));
+    let outcome = terminal::run(&browser, &["--headless=terminal", "--temporary-profile"], &running.url(), device_pixel_ratio);
+    // Only a Ladybird that gave up at once, before loading the page, means
+    // it can't draw here; a pane that went later just went.
+    let early = started.elapsed() < Duration::from_secs(FALLBACK_WINDOW_SECS) && running.served() == 0;
+    match &outcome {
+        Ok(status) if early && !status.success() => {
+            return fall_back(thread_id, view, &t!("Ladybird couldn't draw here ({status})", status = status));
+        }
+        Err(e) if early => return fall_back(thread_id, view, &t!("Ladybird couldn't draw here ({status})", status = format!("{e:#}"))),
+        _ => {}
     }
+    outcome?;
     if let Some(u) = undock {
         u.run();
     }
