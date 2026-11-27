@@ -170,8 +170,9 @@ fn on_a_pane(home: &Home, args: &[&str], secs: u64) -> String {
     use std::os::unix::process::CommandExt;
     let (mut master, mut slave) = (0, 0);
     let mut size = libc::winsize { ws_row: PANE[0], ws_col: PANE[1], ws_xpixel: PANE[2], ws_ypixel: PANE[3] };
-    // SAFETY: openpty writes two descriptors into the integers given.
-    assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) }, 0);
+    // Darwin declares the input size mutable; Linux declares it const.
+    // SAFETY: openpty writes the descriptors and reads this live size value.
+    assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut size) }, 0);
     // SAFETY: both descriptors were just opened and are owned here.
     let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     // SAFETY: a flag on a descriptor owned here: the pane must not hold our end.

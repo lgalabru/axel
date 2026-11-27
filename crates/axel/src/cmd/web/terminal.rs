@@ -544,9 +544,9 @@ fn parse_pixels_reply(reply: &[u8]) -> Option<(u16, u16)> {
 fn open_pty(size: &libc::winsize) -> Result<(OwnedFd, OwnedFd)> {
     let (mut master, mut slave) = (0, 0);
     let mut size = *size;
-    // SAFETY: openpty writes two descriptors into the integers given and
-    // reads the size we pass.
-    let opened = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) };
+    // Darwin declares the input size mutable; Linux declares it const.
+    // SAFETY: openpty writes the descriptors and reads this live size value.
+    let opened = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut size) };
     if opened != 0 {
         bail!("opening a terminal for Ladybird: {}", std::io::Error::last_os_error());
     }
