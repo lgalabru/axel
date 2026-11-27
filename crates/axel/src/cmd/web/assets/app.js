@@ -79,7 +79,6 @@ function renderMessages() {
   document.title = `${thread.title} · Axel`;
   $("live").innerHTML = thread.agents.map(liveHtml).join("");
   const timeline = $("timeline");
-  const atBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
   let column = timeline.firstElementChild;
   if (!column) {
     column = document.createElement("div");
@@ -87,8 +86,20 @@ function renderMessages() {
     timeline.appendChild(column);
   }
   patch(column, timelineBlocks());
-  if (atBottom) timeline.scrollTop = timeline.scrollHeight;
-  $("jump").hidden = atBottom;
+  followLatest();
+}
+
+// Whether the reader is at the latest message, as of their last scroll.
+// Read from scrolling, not worked out at each render: the page's font
+// arrives after the first one and lengthens every line, and a pane opened
+// on a long thread must still end up at its latest message.
+let atLatest = true;
+const LATEST_SLACK_PX = 80;
+
+function followLatest() {
+  const timeline = $("timeline");
+  if (atLatest) timeline.scrollTop = timeline.scrollHeight;
+  $("jump").hidden = atLatest;
 }
 
 function liveHtml(a) {
@@ -238,12 +249,16 @@ function setupMessages() {
     }
   });
   timeline.addEventListener("scroll", () => {
-    if (timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80) $("jump").hidden = true;
+    atLatest = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < LATEST_SLACK_PX;
+    $("jump").hidden = atLatest;
   }, { passive: true });
   $("jump").addEventListener("click", () => {
-    timeline.scrollTop = timeline.scrollHeight;
-    $("jump").hidden = true;
+    atLatest = true;
+    followLatest();
   });
+  // A late font, or a pane resized while docking, moves the latest message.
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(followLatest);
+  window.addEventListener("resize", followLatest);
 }
 
 // ---------------------------------------------------------------- composer
