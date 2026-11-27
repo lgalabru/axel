@@ -1,6 +1,7 @@
 //! Local tables: environments, projects, and agents (profiles and their
 //! instances).  Profiles are also projected from kind-122 envelopes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{OptionalExtension, Row, params};
@@ -214,7 +215,15 @@ const AGENT_SELECT: &str = "SELECT a.pubkey, p.name, p.harness, p.model, p.effor
 const AGENT_ORDER: &str =
     "ORDER BY a.device IS NOT NULL, COALESCE(a.archived_at, p.archived_at) IS NOT NULL, a.last_seen_at IS NULL, a.last_seen_at DESC, a.created_at";
 
-const PROFILE_COLS: &str = "profile_id, owner, name, harness, model, effort, skills_json, prompt, color, runtime_mode, created_at, updated_at, updated_id, archived_at";
+/// The most live profiles one name lookup reads.  Each owner has at most
+/// one per name once merged; more than this many owners sharing a name on
+/// one machine is not a case we serve.
+const PROFILES_PER_NAME_MAX: i64 = 1_000;
+/// The most profiles [`Store::name_clashes`] reads.  Linking two homes of
+/// twenty agents each clashes on at most forty.
+const CLASHING_PROFILES_MAX: i64 = 10_000;
+
+const PROFILE_COLS: &str = "profile_id, owner, name, harness, model, effort, skills_json, prompt, color, runtime_mode, created_at, updated_at, updated_id, archived_at, merged_into";
 
 fn json_error(e: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -261,6 +270,7 @@ fn row_profile(r: &Row<'_>) -> rusqlite::Result<AgentProfile> {
         updated_at: r.get("updated_at")?,
         updated_id: r.get("updated_id")?,
         archived_at: r.get("archived_at")?,
+        merged_into: r.get("merged_into")?,
     })
 }
 
@@ -286,6 +296,7 @@ impl Store {
             given => {
                 let id = given.clone().unwrap_or_else(|| format!("p-{}", new_id()));
                 let owner = attester(a.auth_tag.as_ref()).map(|o| self.principal_in(&tx, &o)).transpose()?;
+                self.check_name_free(&a.name, owner.as_deref())?;
                 insert_profile(&tx, &id, owner.as_deref(), a, created_at)?;
                 id
             }
@@ -300,6 +311,18 @@ impl Store {
         let agent = self.agent_by_pubkey(&a.pubkey)?.ok_or_else(|| Error::NotFound(format!("agent {}", a.pubkey)))?;
         debug_assert_eq!(agent.profile_id, profile_id);
         Ok(agent)
+    }
+
+    /// Refuse a new profile named like a live one of the same owner.  Owners
+    /// compare as principals: a linked home's profiles carry its own key.
+    fn check_name_free(&self, name: &str, owner: Option<&str>) -> Result<(), Error> {
+        for profile in self.live_profiles_named(name)? {
+            let profile_owner = profile.owner.as_deref().map(|o| self.principal(o)).transpose()?;
+            if profile_owner.as_deref() == owner {
+                return Err(Error::Conflict(format!("agent name {name:?} already exists")));
+            }
+        }
+        Ok(())
     }
 
     /// Refuse an instance whose attester doesn't speak for the owner of the
@@ -391,17 +414,121 @@ impl Store {
             .optional()?)
     }
 
-    /// The live profile named `name`, oldest first when two devices made one
-    /// each while apart.
+    /// The live profile named `name`, the oldest when several owners each
+    /// have one.  Two of the same owner (two homes linked, each with its
+    /// own) are a choice for the owner, not for us: [`Error::Conflict`],
+    /// until `axel device merge` settles it.
     pub fn profile_by_name(&self, name: &str) -> Result<Option<AgentProfile>, Error> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!("SELECT {PROFILE_COLS} FROM agent_profiles WHERE name = ?1 AND archived_at IS NULL ORDER BY created_at, profile_id LIMIT 1"),
-                [name],
-                row_profile,
-            )
-            .optional()?)
+        let named = self.live_profiles_named(name)?;
+        if let Some(clash) = self.clashes_among(&named)?.into_iter().next() {
+            let ids: Vec<&str> = clash.iter().map(|p| p.profile_id.as_str()).collect();
+            return Err(Error::Conflict(format!(
+                "{} agents are named {name:?} ({}); run `axel device merge {name}`",
+                ids.len(),
+                ids.join(", ")
+            )));
+        }
+        Ok(named.into_iter().next())
+    }
+
+    /// Live profiles named `name`, oldest first.
+    fn live_profiles_named(&self, name: &str) -> Result<Vec<AgentProfile>, Error> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {PROFILE_COLS} FROM agent_profiles WHERE name = ?1 AND archived_at IS NULL
+             ORDER BY created_at, profile_id LIMIT ?2"
+        ))?;
+        let rows = st.query_map(params![name, PROFILES_PER_NAME_MAX], row_profile)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Groups of two or more of `profiles` whose owners are one principal,
+    /// each oldest first.
+    fn clashes_among(&self, profiles: &[AgentProfile]) -> Result<Vec<Vec<AgentProfile>>, Error> {
+        let mut by_owner: BTreeMap<(String, String), Vec<AgentProfile>> = BTreeMap::new();
+        for profile in profiles {
+            // A profile with no known owner is no one's: it clashes with nothing.
+            let Some(owner) = &profile.owner else { continue };
+            by_owner.entry((profile.name.clone(), self.principal(owner)?)).or_default().push(profile.clone());
+        }
+        let mut clashes: Vec<Vec<AgentProfile>> = by_owner.into_values().filter(|group| group.len() > 1).collect();
+        for group in &mut clashes {
+            group.sort_by(|a, b| (a.created_at, &a.profile_id).cmp(&(b.created_at, &b.profile_id)));
+        }
+        Ok(clashes)
+    }
+
+    /// Every name that two or more live profiles of `owner` (a principal)
+    /// share, each group oldest first: what linking two homes leaves for
+    /// `axel device merge`.
+    pub fn name_clashes(&self, owner: &str) -> Result<Vec<Vec<AgentProfile>>, Error> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {PROFILE_COLS} FROM agent_profiles WHERE archived_at IS NULL AND name IN
+                 (SELECT name FROM agent_profiles WHERE archived_at IS NULL GROUP BY name HAVING COUNT(*) > 1)
+             ORDER BY name, created_at, profile_id LIMIT ?1"
+        ))?;
+        let rows = st.query_map([CLASHING_PROFILES_MAX], row_profile)?;
+        let shared: Vec<AgentProfile> = rows.collect::<Result<_, _>>()?;
+        let clashes = self.clashes_among(&shared)?;
+        let mut mine = Vec::with_capacity(clashes.len());
+        for group in clashes {
+            let first_owner = group[0].owner.as_deref().expect("a clash is between owned profiles");
+            if self.principal(first_owner)? == owner {
+                mine.push(group);
+            }
+        }
+        Ok(mine)
+    }
+
+    /// Merge the live profile `from` into `into`, both `owner`'s (a
+    /// principal): `from` is archived and remembers `into`, and every
+    /// instance of `from` becomes one of `into`'s.  Unsigned until the next
+    /// publish, which also announces this machine's moved instances again.
+    pub fn merge_profile(&self, from: &str, into: &str, owner: &str) -> Result<(), Error> {
+        if from == into {
+            return Err(Error::Invalid(format!("profile {from} can't merge into itself")));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        for id in [from, into] {
+            let profile = self.profile(id)?.ok_or_else(|| Error::NotFound(format!("profile {id}")))?;
+            if profile.archived_at.is_some() {
+                return Err(Error::Invalid(format!("profile {id} ({}) was removed", profile.name)));
+            }
+            let profile_owner = profile.owner.as_deref().map(|o| self.principal(o)).transpose()?;
+            if profile_owner.as_deref() != Some(owner) {
+                return Err(Error::Invalid(format!("profile {id} ({}) is another owner's", profile.name)));
+            }
+        }
+        let at = now();
+        tx.execute(
+            "UPDATE agent_profiles SET merged_into = ?2, archived_at = ?3, updated_at = MAX(updated_at + 1, ?3), updated_id = NULL
+             WHERE profile_id = ?1",
+            params![from, into, at],
+        )?;
+        crate::owner::move_instances(&tx, from, into)?;
+        tx.commit()?;
+        debug_assert!(self.profile_instances(from)?.is_empty(), "every instance moved");
+        Ok(())
+    }
+
+    /// Rename the profile `profile_id`, which must stay the only live one of
+    /// its owner with that name.  Unsigned until the next publish.
+    pub fn rename_profile(&self, profile_id: &str, name: &str) -> Result<(), Error> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Invalid("an agent needs a name".into()));
+        }
+        let profile = self.profile(profile_id)?.ok_or_else(|| Error::NotFound(format!("profile {profile_id}")))?;
+        let mut named = self.live_profiles_named(name)?;
+        named.retain(|p| p.profile_id != profile_id);
+        named.push(AgentProfile { name: name.to_string(), ..profile });
+        if !self.clashes_among(&named)?.is_empty() {
+            return Err(Error::Conflict(format!("agent name {name:?} already exists")));
+        }
+        self.conn.execute(
+            "UPDATE agent_profiles SET name = ?2, updated_at = MAX(updated_at + 1, ?3), updated_id = NULL WHERE profile_id = ?1",
+            params![profile_id, name, now()],
+        )?;
+        Ok(())
     }
 
     /// Every profile, archived ones included, by name.
@@ -549,19 +676,9 @@ fn profile_exists(conn: &rusqlite::Connection, profile_id: &str) -> Result<bool,
 
 /// A new profile from `a`'s fields.  Refused when a live profile of the same
 /// owner already has the name: names are unique per owner.
+/// Insert a profile whose name [`Store::check_name_free`] checked.
 fn insert_profile(conn: &rusqlite::Connection, id: &str, owner: Option<&str>, a: &NewAgent, at: i64) -> Result<(), Error> {
     assert!(!a.name.trim().is_empty(), "an agent has a name");
-    let taken: bool = conn
-        .query_row(
-            "SELECT 1 FROM agent_profiles WHERE name = ?1 AND archived_at IS NULL AND owner IS ?2",
-            params![a.name, owner],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if taken {
-        return Err(Error::Conflict(format!("agent name {:?} already exists", a.name)));
-    }
     conn.execute(
         "INSERT INTO agent_profiles (profile_id, owner, name, harness, model, effort, skills_json, prompt, color, runtime_mode, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",

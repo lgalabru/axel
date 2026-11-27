@@ -68,6 +68,7 @@ fn profile_record(owner: &Keypair, profile_id: &str, name: &str, at: u64) -> Env
         color: None,
         runtime_mode: RuntimeMode::Autopilot,
         archived: false,
+        merged_into: None,
     };
     EnvelopeBuilder::new(kind::AGENT_PROFILE, serde_json::to_string(&wire).unwrap())
         .tag(vec!["d".into(), profile_id.into()])

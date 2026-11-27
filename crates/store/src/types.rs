@@ -526,6 +526,28 @@ pub struct AgentProfile {
     /// be signed and published.
     pub updated_id: Option<String>,
     pub archived_at: Option<i64>,
+    /// The profile this one was merged into (RFD 0004 phase 7).  A merged
+    /// profile is archived, and its instances are the other one's.
+    pub merged_into: Option<String>,
+}
+
+impl AgentProfile {
+    /// Whether `self` and `other` define the same agent: what it runs and
+    /// how it behaves.  Colour is left out: it is picked at random when a
+    /// profile is made, so two homes' `reviewer`s rarely share one.
+    pub fn same_definition(&self, other: &AgentProfile) -> bool {
+        let sorted = |skills: &[String]| {
+            let mut skills = skills.to_vec();
+            skills.sort();
+            skills
+        };
+        self.harness == other.harness
+            && self.model == other.model
+            && self.effort == other.effort
+            && sorted(&self.skills) == sorted(&other.skills)
+            && self.prompt == other.prompt
+            && self.runtime_mode == other.runtime_mode
+    }
 }
 
 str_enum! {

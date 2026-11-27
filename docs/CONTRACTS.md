@@ -268,10 +268,12 @@ pub const PRINCIPAL_DEPTH_MAX: usize = 4;         // device → owner links auth
 str_enum PairingRoute { RexTailscale => "rex_tailscale", Ssh => "ssh", Wireguard => "wireguard", Confirm => "confirm" }
 str_enum DeviceOp { Link => "link", Revoke => "revoke", Label => "label" }
 pub struct DeviceRecord { pub op: DeviceOp, pub device: String, pub label: String, pub route: Option<PairingRoute>, pub consent: Option<String> }   // kind 120; route and the device's consent required to link
-pub struct ProfileWire { pub profile_id, pub owner, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub archived: bool }  // kind 122
+pub struct ProfileWire { pub profile_id, pub owner, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub archived: bool, pub merged_into: Option<String> }  // kind 122; merged_into left out when None
+pub const MERGE_CHAIN_MAX: usize = 8;             // merges followed from a profile to the one that survives
 impl ProfileWire { pub fn of(p: &AgentProfile, owner: &str) -> ProfileWire; }
 pub struct AnnounceWire { pub instance: String, pub profile_id: String, pub auth: Vec<String> }   // kind 121, signed by the device
-pub struct AgentProfile { pub profile_id, pub owner: Option<String>, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub created_at, pub updated_at, pub updated_id: Option<String>, pub archived_at }
+pub struct AgentProfile { pub profile_id, pub owner: Option<String>, pub name, pub harness, pub model, pub effort, pub skills, pub prompt, pub color, pub runtime_mode, pub created_at, pub updated_at, pub updated_id: Option<String>, pub archived_at, pub merged_into: Option<String> }
+impl AgentProfile { pub fn same_definition(&self, other: &AgentProfile) -> bool; }   // harness, model, effort, skills (as a set), prompt, mode; not colour
 pub struct Device { pub pubkey: String, pub owner: Option<String>, pub label: String, pub route: Option<PairingRoute>, pub linked_at: i64, pub revoked_at: Option<i64> }
 // Agent gains: profile_id: String, owner: Option<String>, device: Option<String> (None = this machine).
 // NewAgent gains: profile_id: Option<String> (None = a new profile from its fields), device: Option<String>.
@@ -282,6 +284,9 @@ impl Store {
     pub fn principal(&self, key: &str) -> Result<String, Error>;      // the owner `key` speaks for now
     pub fn profile(&self, id: &str) -> Result<Option<AgentProfile>, Error>; pub fn profile_by_name(&self, name: &str) -> Result<Option<AgentProfile>, Error>;
     pub fn profiles(&self) -> Result<Vec<AgentProfile>, Error>; pub fn unsigned_profiles(&self, owner: &str) -> Result<Vec<AgentProfile>, Error>;
+    pub fn name_clashes(&self, owner: &str) -> Result<Vec<Vec<AgentProfile>>, Error>;   // names 2+ live profiles of `owner` share; each oldest first
+    pub fn merge_profile(&self, from: &str, into: &str, owner: &str) -> Result<(), Error>;   // archive `from`, set merged_into, move its instances; unsigned
+    pub fn rename_profile(&self, profile_id: &str, name: &str) -> Result<(), Error>;   // Conflict when the owner has a live profile of that name
     pub fn list_instances(&self) -> Result<Vec<Agent>, Error>; pub fn profile_instances(&self, profile_id: &str) -> Result<Vec<Agent>, Error>;
     pub fn agent_on_device(&self, name: &str, device: &str) -> Result<Option<Agent>, Error>;
     pub fn unannounced_instances(&self) -> Result<Vec<(String, String, Vec<String>)>, Error>;   // (instance, profile_id, auth tag)
@@ -290,7 +295,11 @@ impl Store {
 // list_agents: one row per profile (this machine's instance first). agent_by_name: this machine's
 // instance, else the most recently seen. Profile setters edit the instance's profile and leave it unsigned.
 // insert_agent: Conflict when a live profile of the same owner has the name, or when it would join
-// a profile whose owner its attester doesn't speak for.
+// a profile whose owner its attester doesn't speak for. Owners compare as principals.
+// profile_by_name: Conflict when two live profiles of one owner share the name (two linked homes).
+// A kind-122 merge needs its target to be another profile of the same owner that doesn't lead back;
+// a target not received yet waits, as other records do. An announcement under a merged profile lands
+// on the one that survives.
 // inbox / unread_count: messages to any live key that resolves to the same owner.
 ```
 

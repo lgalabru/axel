@@ -2179,6 +2179,7 @@ mod tests {
             color: None,
             runtime_mode: axel_store::RuntimeMode::Autopilot,
             archived: false,
+            merged_into: None,
         };
         let env = EnvelopeBuilder::new(axel_store::kind::AGENT_PROFILE, serde_json::to_string(&profile).unwrap()).sign(profile_owner).unwrap();
         // A stranger's profile is refused by the store; a test of the job check

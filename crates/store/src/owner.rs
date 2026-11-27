@@ -51,7 +51,16 @@ pub struct ProfileWire {
     pub runtime_mode: RuntimeMode,
     #[serde(default)]
     pub archived: bool,
+    /// The profile this one merged into: its instances become that one's.
+    /// Left out when absent, so records that never merged keep their id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<String>,
 }
+
+/// The longest chain of merges followed (a merged into b, b into c, ...).
+/// A merge never targets a profile already merged into it, so chains are
+/// acyclic; owners merge a handful of profiles, ever.
+pub const MERGE_CHAIN_MAX: usize = 8;
 
 impl ProfileWire {
     /// The wire form of a stored profile, for its owner to sign.
@@ -68,6 +77,7 @@ impl ProfileWire {
             color: profile.color,
             runtime_mode: profile.runtime_mode,
             archived: profile.archived_at.is_some(),
+            merged_into: profile.merged_into.clone(),
         }
     }
 }
@@ -371,23 +381,101 @@ fn profile_authority(conn: &Connection, env: &Envelope, wire: &ProfileWire) -> R
     let stored: Option<Option<String>> = conn
         .query_row("SELECT owner FROM agent_profiles WHERE profile_id = ?1", [&wire.profile_id], |r| r.get(0))
         .optional()?;
-    Ok(match stored {
+    let ownership = match stored {
         None => None,
         Some(None) => Some(format!("profile {} has no known owner, so no one can claim it", wire.profile_id)),
         Some(Some(stored)) if principals.resolve(&stored, env.created_at) == owner => None,
         Some(Some(stored)) => Some(format!("profile {} belongs to {stored}", wire.profile_id)),
-    })
+    };
+    if ownership.is_some() {
+        return Ok(ownership);
+    }
+    match &wire.merged_into {
+        None => Ok(None),
+        Some(target) => merge_authority(conn, &principals, owner, &wire.profile_id, target, env.created_at),
+    }
 }
 
+/// Why `profile_id` may not merge into `target`: the target must be another
+/// profile of the same owner, and must not lead back to `profile_id`.
+fn merge_authority(
+    conn: &Connection,
+    principals: &Principals,
+    owner: &str,
+    profile_id: &str,
+    target: &str,
+    at: u64,
+) -> Result<Option<String>, Error> {
+    if target == profile_id {
+        return Ok(Some(format!("profile {profile_id} can't merge into itself")));
+    }
+    let target_owner: Option<Option<String>> = conn
+        .query_row("SELECT owner FROM agent_profiles WHERE profile_id = ?1", [target], |r| r.get(0))
+        .optional()?;
+    let Some(target_owner) = target_owner else {
+        return Ok(Some(format!("profile {target} not received yet")));
+    };
+    if !target_owner.is_some_and(|o| principals.resolve(&o, at) == owner) {
+        return Ok(Some(format!("profile {target} belongs to another owner")));
+    }
+    let mut next = Some(target.to_string());
+    for _ in 0..MERGE_CHAIN_MAX {
+        let Some(id) = next else { return Ok(None) };
+        if id == profile_id {
+            return Ok(Some(format!("profile {target} is merged into {profile_id}: the merge would loop")));
+        }
+        next = merged_into(conn, &id)?;
+    }
+    Ok(Some(format!("profile {target} is at the end of more than {MERGE_CHAIN_MAX} merges")))
+}
+
+/// The profile `profile_id` was merged into, if any.
+fn merged_into(conn: &Connection, profile_id: &str) -> Result<Option<String>, Error> {
+    Ok(conn
+        .query_row("SELECT merged_into FROM agent_profiles WHERE profile_id = ?1", [profile_id], |r| r.get(0))
+        .optional()?
+        .flatten())
+}
+
+/// The profile instances of `profile_id` belong to: itself, or the end of
+/// the merges it went through.
+pub(crate) fn surviving_profile(conn: &Connection, profile_id: &str) -> Result<String, Error> {
+    let mut current = profile_id.to_string();
+    for _ in 0..MERGE_CHAIN_MAX {
+        match merged_into(conn, &current)? {
+            Some(next) => current = next,
+            None => return Ok(current),
+        }
+    }
+    // Merge authority refuses longer chains; one here came from elsewhere.
+    Err(Error::Corrupt(format!("profile {profile_id} is at the end of more than {MERGE_CHAIN_MAX} merges")))
+}
+
+/// Move what belongs to `from` over to `into`, which it merged into: every
+/// instance, and this machine's own ones are announced again, under `into`.
+pub(crate) fn move_instances(conn: &Connection, from: &str, into: &str) -> Result<(), Error> {
+    assert_ne!(from, into, "a profile never merges into itself");
+    conn.execute(
+        "UPDATE agents SET profile_id = ?2, announced_id = CASE WHEN device IS NULL THEN NULL ELSE announced_id END
+         WHERE profile_id = ?1",
+        params![from, into],
+    )?;
+    Ok(())
+}
+
+/// Store `wire` as the profile.  A merge also moves the instances over; a
+/// record that later stops holding (a revoked device's) restores the
+/// profile but leaves the instances where the merge put them, under a live
+/// profile of the same owner.
 fn write_profile(conn: &Connection, wire: &ProfileWire, at: i64, event_id: &str) -> Result<(), Error> {
     conn.execute(
         "INSERT INTO agent_profiles (profile_id, owner, name, harness, model, effort, skills_json, prompt, color, runtime_mode,
-                                     created_at, updated_at, updated_id, archived_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13)
+                                     created_at, updated_at, updated_id, archived_at, merged_into)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12, ?13, ?14)
          ON CONFLICT(profile_id) DO UPDATE SET owner = excluded.owner, name = excluded.name, harness = excluded.harness,
              model = excluded.model, effort = excluded.effort, skills_json = excluded.skills_json, prompt = excluded.prompt,
              color = excluded.color, runtime_mode = excluded.runtime_mode, updated_at = excluded.updated_at,
-             updated_id = excluded.updated_id, archived_at = excluded.archived_at",
+             updated_id = excluded.updated_id, archived_at = excluded.archived_at, merged_into = excluded.merged_into",
         params![
             wire.profile_id,
             wire.owner,
@@ -402,8 +490,12 @@ fn write_profile(conn: &Connection, wire: &ProfileWire, at: i64, event_id: &str)
             at,
             event_id,
             wire.archived.then_some(at),
+            wire.merged_into,
         ],
     )?;
+    if let Some(into) = &wire.merged_into {
+        move_instances(conn, &wire.profile_id, into)?;
+    }
     Ok(())
 }
 
@@ -469,6 +561,9 @@ fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String
     if let Some(reason) = announce_authority(conn, env, &wire)? {
         return Ok(Err(reason));
     }
+    // An announcement made before its profile merged (or carried late by a
+    // third device) lands on the profile it merged into.
+    let profile_id = surviving_profile(conn, &wire.profile_id)?;
     // An instance this machine runs is never re-homed by someone's
     // announcement; this machine's own announcement marks it announced.
     conn.execute(
@@ -482,7 +577,7 @@ fn apply_announce(conn: &Connection, env: &Envelope) -> Result<Result<(), String
              WHERE agents.device IS NOT NULL",
         params![
             wire.instance,
-            wire.profile_id,
+            profile_id,
             env.from,
             serde_json::to_string(&wire.auth)?,
             crate::sql_integer(env.created_at, "envelope created_at")?

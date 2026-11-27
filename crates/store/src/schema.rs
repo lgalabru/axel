@@ -611,6 +611,13 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX team_members_profile ON team_members(profile_id);
     "#,
+    // v16: a profile merged into another (RFD 0004 phase 7, two homes that
+    // each had a `reviewer`).  Projected from the kind-122 field of the same
+    // name; a merged profile is archived and its instances belong to
+    // `merged_into`.  NULL everywhere before: nothing was merged.
+    r#"
+    ALTER TABLE agent_profiles ADD COLUMN merged_into TEXT;
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.

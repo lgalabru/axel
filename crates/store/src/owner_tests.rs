@@ -43,6 +43,7 @@ fn profile_wire(id: &str, owner: &Keypair, name: &str, model: &str) -> ProfileWi
         color: None,
         runtime_mode: RuntimeMode::Autopilot,
         archived: false,
+        merged_into: None,
     }
 }
 
@@ -568,4 +569,139 @@ fn a_batch_past_the_limit_is_refused_before_anything_is_stored() {
     let too_many = vec![note.clone(); crate::log::APPEND_ALL_ENVELOPES_MAX + 1];
     assert!(matches!(s.append_all(&too_many, |_| Ok(true)), Err(Error::Invalid(_))));
     assert!(s.get_event(&note.id).unwrap().is_none());
+}
+
+/// Two homes linked, each with a `reviewer` (#40, RFD 0004 phase 7): this
+/// machine's, and linux's, whose profile its own key owns.  Returns the
+/// owner, linux, this machine's instance and linux's instance.
+fn two_reviewers(s: &Store) -> (Keypair, Keypair, Agent, Keypair) {
+    let (owner, linux, mine, theirs) = (Keypair::generate(), Keypair::generate(), Keypair::generate(), Keypair::generate());
+    let here = s
+        .insert_agent(&NewAgent {
+            pubkey: pk(&mine),
+            name: "reviewer".into(),
+            auth_tag: Some(attest(&owner, &mine.public(), "").unwrap().to_tag()),
+            ..Default::default()
+        })
+        .unwrap();
+    s.append(&device_record(&owner, DeviceOp::Link, &linux, "linux", T0)).unwrap();
+    s.append(&profile_record(&linux, &profile_wire("p-linux", &linux, "reviewer", "m"), T0 + 1)).unwrap();
+    s.append(&announce(&linux, &theirs, "p-linux", T0 + 2)).unwrap();
+    (owner, linux, here, theirs)
+}
+
+#[test]
+fn two_homes_reviewers_clash_until_one_merges_into_the_other() {
+    let s = store();
+    let (owner, _linux, here, theirs) = two_reviewers(&s);
+    let me = pk(&owner);
+    let clashes = s.name_clashes(&me).unwrap();
+    assert_eq!(clashes.len(), 1);
+    assert_eq!(clashes[0].len(), 2);
+    assert!(matches!(s.profile_by_name("reviewer"), Err(Error::Conflict(_))), "no silent pick between the two");
+    assert!(s.name_clashes(&pk(&Keypair::generate())).unwrap().is_empty(), "another owner has no clash");
+
+    s.merge_profile("p-linux", &here.profile_id, &me).unwrap();
+    let merged = s.profile("p-linux").unwrap().unwrap();
+    assert_eq!(merged.merged_into.as_deref(), Some(here.profile_id.as_str()));
+    assert!(merged.archived_at.is_some() && merged.updated_id.is_none(), "archived, and unsigned until published");
+    let instances = s.profile_instances(&here.profile_id).unwrap();
+    assert_eq!(instances.len(), 2, "linux's instance is now one of ours: {instances:?}");
+    assert!(instances.iter().any(|a| a.pubkey == pk(&theirs)));
+    assert!(s.name_clashes(&me).unwrap().is_empty());
+    assert_eq!(s.profile_by_name("reviewer").unwrap().unwrap().profile_id, here.profile_id);
+
+    // It signs like any edit, and a rebuild keeps it.
+    let wire = ProfileWire::of(&merged, &me);
+    assert_eq!(wire.merged_into.as_deref(), Some(here.profile_id.as_str()));
+    s.post(&profile_record(&owner, &wire, u64::try_from(merged.updated_at).unwrap())).unwrap();
+    s.rebuild_projections().unwrap();
+    assert_eq!(s.agent_by_pubkey(&pk(&theirs)).unwrap().unwrap().profile_id, here.profile_id);
+}
+
+#[test]
+fn a_merge_signed_elsewhere_moves_this_machines_instance_and_reannounces_it() {
+    let s = store();
+    let (owner, linux, here, _theirs) = two_reviewers(&s);
+    // This machine made its reviewer just now: what follows is signed after.
+    let at = u64::try_from(now()).unwrap();
+    s.post(&profile_record(&owner, &ProfileWire::of(&s.profile(&here.profile_id).unwrap().unwrap(), &pk(&owner)), at + 3)).unwrap();
+    let mine = s.unannounced_instances().unwrap();
+    assert_eq!(mine.len(), 1);
+    let (instance, profile_id, auth) = mine[0].clone();
+    let hello = EnvelopeBuilder::new(kind::AGENT_ANNOUNCE, serde_json::to_string(&AnnounceWire { instance, profile_id, auth }).unwrap())
+        .created_at(at + 4)
+        .sign(&owner)
+        .unwrap();
+    s.post(&hello).unwrap();
+    assert!(s.unannounced_instances().unwrap().is_empty());
+
+    // Linux merged ours into its own.
+    let mut wire = profile_wire(&here.profile_id, &owner, "reviewer", "m");
+    wire.archived = true;
+    wire.merged_into = Some("p-linux".into());
+    s.post(&profile_record(&linux, &wire, at + 10)).unwrap();
+    assert_eq!(s.agent_by_pubkey(&here.pubkey).unwrap().unwrap().profile_id, "p-linux");
+    let again = s.unannounced_instances().unwrap();
+    assert_eq!(again.len(), 1, "this machine announces its instance again, under the profile it moved to");
+    assert_eq!(again[0].1, "p-linux");
+}
+
+#[test]
+fn an_announcement_made_before_a_merge_lands_on_the_profile_merged_into() {
+    let s = store();
+    let (owner, linux, here, _theirs) = two_reviewers(&s);
+    s.merge_profile("p-linux", &here.profile_id, &pk(&owner)).unwrap();
+    // A second linux instance, announced before the merge, arrives late.
+    let late = Keypair::generate();
+    s.append(&announce(&linux, &late, "p-linux", T0 + 3)).unwrap();
+    assert_eq!(s.agent_by_pubkey(&pk(&late)).unwrap().unwrap().profile_id, here.profile_id);
+}
+
+#[test]
+fn merges_that_cross_owners_or_loop_are_refused_and_a_target_can_arrive_late() {
+    let s = store();
+    let (owner, linux, here, _theirs) = two_reviewers(&s);
+    let stranger = Keypair::generate();
+    s.append(&profile_record(&stranger, &profile_wire("p-stranger", &stranger, "reviewer", "m"), T0 + 3)).unwrap();
+    let merge = |id: &str, owner_key: &Keypair, into: &str, at: u64| {
+        let mut wire = profile_wire(id, owner_key, "reviewer", "m");
+        wire.archived = true;
+        wire.merged_into = Some(into.into());
+        profile_record(owner_key, &wire, at)
+    };
+    assert!(matches!(s.post(&merge("p-linux", &linux, "p-stranger", T0 + 5)), Err(Error::Unauthorized(_))), "into another owner's");
+    assert!(matches!(s.post(&merge("p-linux", &linux, "p-linux", T0 + 5)), Err(Error::Unauthorized(_))), "into itself");
+    assert!(matches!(s.merge_profile("p-linux", "p-stranger", &pk(&owner)), Err(Error::Invalid(_))));
+
+    s.post(&merge("p-linux", &linux, &here.profile_id, T0 + 6)).unwrap();
+    assert!(matches!(s.post(&merge(&here.profile_id, &owner, "p-linux", T0 + 7)), Err(Error::Unauthorized(_))), "a loop");
+
+    // A merge into a profile not received yet waits for it.
+    let early = merge("p-later", &owner, "p-latest", T0 + 9);
+    s.append(&profile_record(&owner, &profile_wire("p-later", &owner, "scout", "m"), T0 + 8)).unwrap();
+    assert!(s.append(&early).unwrap().rejected_reason.is_some());
+    s.append(&profile_record(&owner, &profile_wire("p-latest", &owner, "scout2", "m"), T0 + 8)).unwrap();
+    assert!(is_projected(&s, &early), "revived once its target arrived");
+}
+
+#[test]
+fn a_linked_homes_profile_names_are_the_owners_names() {
+    let s = store();
+    let (owner, linux, here, _theirs) = two_reviewers(&s);
+    s.merge_profile("p-linux", &here.profile_id, &pk(&owner)).unwrap();
+    let key = Keypair::generate();
+    let agent = |name: &str| NewAgent {
+        pubkey: pk(&key),
+        name: name.into(),
+        auth_tag: Some(attest(&owner, &key.public(), "").unwrap().to_tag()),
+        ..Default::default()
+    };
+    // linux's other profile carries linux's key as owner, which speaks for ours.
+    s.post(&profile_record(&linux, &profile_wire("p-scout", &linux, "scout", "m"), T0 + 3)).unwrap();
+    assert!(matches!(s.insert_agent(&agent("scout")), Err(Error::Conflict(_))), "linux's scout is the owner's");
+    assert!(matches!(s.rename_profile(&here.profile_id, "scout"), Err(Error::Conflict(_))));
+    s.rename_profile("p-scout", "linux-scout").unwrap();
+    assert_eq!(s.profile("p-scout").unwrap().unwrap().updated_id, None, "unsigned until published");
+    assert!(s.insert_agent(&agent("scout")).is_ok());
 }
