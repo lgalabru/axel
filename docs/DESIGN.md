@@ -232,6 +232,24 @@ the thread on `127.0.0.1` from that process and runs `Ladybird
 pane. Ladybird draws the page as Kitty graphics, and `R` comes from the pane's
 pixels per cell.
 
+Ladybird runs on a pty of the pane process's own (`web/terminal.rs`), one row
+taller than the pane. Terminal mode keeps its last row for a status line (the
+page's address and port, its keys) with no option to hide it. Here that row is
+the extra one, and what Ladybird writes to it is dropped, so the page fills the
+pane. Ctrl-L, which opens its address prompt there, is dropped too. The same
+layer follows the pane's size. A terminal whose size has no pixels is asked with
+`CSI 14 t`. When the cells change enough to change `R`, as when a phone shows the
+pane, Ladybird is started again at the new ratio, on a fresh pty. When the pane
+hangs up, Ladybird's process group is ended: it ignores SIGTERM in terminal mode,
+so it gets SIGKILL after 1.5 s.
+
+Ladybird's frames are opaque RGB, so the page can't be transparent. It takes the
+terminal's colours instead (`axel_tui::theme::terminal_colors`, asked before
+Ladybird starts). The background is the terminal's, the text its foreground, and
+every surface a step between the two (`web/theme.rs`). They are appended to
+`/app.css` as a `:root` rule, since the page's CSP allows no inline style. The
+conversation uses the pane's full width.
+
 The pages draw `axel_tui::load_thread_data` and `load_usage_data`, and send
 through `axel_tui::thread::dispatch`, as the terminal view does. A secret
 cookie, a `Host` check and same-origin JSON writes keep other pages out.

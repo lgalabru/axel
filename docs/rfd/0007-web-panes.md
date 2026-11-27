@@ -182,3 +182,17 @@ conversation items; the view shows the newest 500.
 - 2026-11-26: Ladybird, like Chrome, applied the activity pane's `.agent` rule
   to a turn of the conversation whose class was also `agent`. The activity
   pane's rules are now under `#activity`.
+- 2026-11-27: On a phone the text was minuscule, and the owner asked to lose the
+  status line and to match the pane's background. Captured from a pty:
+  - The status line is `CSI <last row>;1H CSI 2K`, the text, then `CSI 0m`. It is
+    redrawn on every load. Frames start with `CSI 1;1H` and an APC. A pty one row
+    taller lets us drop that row and nothing else.
+  - With no pixels in its terminal size, Ladybird asks `CSI 14 t`. Unanswered, it
+    draws an 800×600 frame at ratio 1, which is the minuscule text. We now ask
+    first, and start Ladybird again when the ratio changes. We haven't yet seen
+    what Rex on a phone reports.
+  - Frames are `f=24`, RGB without alpha: a transparent page is impossible.
+  - Terminal mode ignores SIGTERM. The pty's master must be close-on-exec, or
+    Ladybird holds its own terminal open and outlives the pane.
+  - The page's CSP (`style-src 'self'`) refuses an inline `style` attribute.
+    Ladybird logs the refusal in `/tmp/ladybird-terminal-PID.log`.
