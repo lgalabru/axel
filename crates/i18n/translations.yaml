@@ -1345,6 +1345,16 @@
   zh-Hans: "{target} 是 {there}，本机是 {here}：这个可执行文件无法在那里运行，安装 axel {version} 也失败了（{why}）。请在那里安装 axel（curl -fsSL {url} | sh），然后重新运行。"
 "copied your skills ({path})":
   zh-Hans: "已复制你的技能（{path}）"
+"making a temporary directory":
+  zh-Hans: "正在创建临时目录"
+"skipping {path}: {error}":
+  zh-Hans: "跳过 {path}：{error}"
+"{path} is more than {max} directories deep":
+  zh-Hans: "{path} 的目录层级超过 {max} 层"
+"skipping {path}: it links back to a directory that holds it":
+  zh-Hans: "跳过 {path}：它链接回包含它的目录"
+"more than {files} files or {mib} MiB to copy (at {path})":
+  zh-Hans: "要复制的内容超过 {files} 个文件或 {mib} MiB（在 {path}）"
 "unexpected reply to hello":
   zh-Hans: "hello 收到了意外的回复"
 "{label}: host key {key} ({remote})":

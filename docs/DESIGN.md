@@ -375,7 +375,9 @@ this binary. On another platform, Linux from a Mac say, it keeps an `axel` of ou
 already there, or else runs the release installer (`https://axel.md/install`) for our
 version. When there is no such release, as for a source build, an `axel` already there is
 used with a warning that the versions differ; with none, `host add` stops and says how to
-install one. Claude Code must be logged in once on the host, from a pane of its own
+install one. It also copies the global skills (`~/.config/axel/skills`) to the same path
+there. Symlinks are followed, so skills linked in from a home repo arrive as files; a
+link to nothing, or back up to a directory holding it, is skipped with a warning. Claude Code must be logged in once on the host, from a pane of its own
 Rex (`rex -S mini run -- claude`): the keychain isn't reachable from SSH.
 
 **Asking.** `@atlas@mini …` in the composer, `axel send`, or the MCP `send` tool

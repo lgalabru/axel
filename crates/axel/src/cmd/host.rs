@@ -722,15 +722,86 @@ fn rex_host_label(label: &str) -> Option<String> {
 }
 
 /// Copy `dir` to the same path under the host's home.
+///
+/// Symlinks are followed: skills linked in from a home repo arrive as the
+/// files they point at, not as links to paths that exist only here.  We
+/// follow them ourselves rather than with `tar -h`, because GNU and BSD tar
+/// treat a link to nothing differently; here it is skipped with a warning.
 fn copy_dir(target: &str, dir: &Path) -> Result<()> {
     let home = dirs::home_dir().context(t!("no home directory"))?;
     let rel = dir.strip_prefix(&home).with_context(|| t!("{path} is outside your home", path = dir.display()))?;
-    let tar = Command::new("tar").arg("-C").arg(dir).args(["-cf", "-", "."]).output()?;
+    let staging = tempfile::tempdir().context(t!("making a temporary directory"))?;
+    let mut copied = CopyTotals::default();
+    let mut ancestors = vec![std::fs::canonicalize(dir).with_context(|| dir.display().to_string())?];
+    stage_dir(dir, staging.path(), &mut ancestors, &mut copied)?;
+    let tar = Command::new("tar").arg("-C").arg(staging.path()).args(["-cf", "-", "."]).output()?;
     if !tar.status.success() {
         bail!("tar {}: {}", dir.display(), String::from_utf8_lossy(&tar.stderr));
     }
     let rel = shell_quote(&rel.to_string_lossy());
     ssh(target, &format!("mkdir -p {rel} && tar -C {rel} -xf -"), &tar.stdout)?;
+    Ok(())
+}
+
+/// The deepest directory [`stage_dir`] descends to.  Skills nest two or
+/// three levels.  Symlink loops are caught before this, by their target.
+const COPY_DEPTH_MAX: usize = 16;
+/// The most files one copy carries.  A skills directory holds tens.
+const COPY_FILES_MAX: u64 = 10_000;
+/// The most bytes one copy carries.  Skills are text; this is far past any
+/// real set, and well under what one SSH round trip should move.
+const COPY_BYTES_MAX: u64 = 64 * 1024 * 1024;
+
+/// What [`stage_dir`] has copied so far, checked against the limits.
+#[derive(Debug, Default)]
+struct CopyTotals {
+    files: u64,
+    bytes: u64,
+}
+
+/// Copy `from`'s contents into `to` (an existing directory), following
+/// symlinks.  `ancestors` holds the resolved paths of `from` and the
+/// directories above it.  A link to nothing, or back up to one of those (a
+/// loop), is skipped with a warning; we check rather than wait for the OS's
+/// own limit, which differs between macOS and Linux.  Anything but files
+/// and directories (sockets, fifos) is skipped: skills never hold them.
+fn stage_dir(from: &Path, to: &Path, ancestors: &mut Vec<PathBuf>, copied: &mut CopyTotals) -> Result<()> {
+    assert!(!ancestors.is_empty(), "the resolved `from` is the last ancestor");
+    if ancestors.len() > COPY_DEPTH_MAX {
+        bail!("{}", t!("{path} is more than {max} directories deep", path = from.display(), max = COPY_DEPTH_MAX));
+    }
+    debug_assert!(to.is_dir(), "the destination exists before it is filled");
+    for entry in std::fs::read_dir(from).with_context(|| from.display().to_string())? {
+        let path = entry?.path();
+        let name = path.file_name().expect("a directory entry has a name");
+        let metadata = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{}", t!("skipping {path}: {error}", path = path.display(), error = e));
+                continue;
+            }
+        };
+        let dest = to.join(name);
+        if metadata.is_dir() {
+            let resolved = std::fs::canonicalize(&path).with_context(|| path.display().to_string())?;
+            if ancestors.contains(&resolved) {
+                eprintln!("{}", t!("skipping {path}: it links back to a directory that holds it", path = path.display()));
+                continue;
+            }
+            std::fs::create_dir(&dest)?;
+            ancestors.push(resolved);
+            let staged = stage_dir(&path, &dest, ancestors, copied);
+            ancestors.pop();
+            staged?;
+        } else if metadata.is_file() {
+            copied.files = copied.files.saturating_add(1);
+            copied.bytes = copied.bytes.saturating_add(metadata.len());
+            if copied.files > COPY_FILES_MAX || copied.bytes > COPY_BYTES_MAX {
+                bail!("{}", t!("more than {files} files or {mib} MiB to copy (at {path})", path = from.display(), files = COPY_FILES_MAX, mib = COPY_BYTES_MAX / (1024 * 1024)));
+            }
+            std::fs::copy(&path, &dest).with_context(|| path.display().to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -1900,6 +1971,72 @@ pub fn snapshot_commit(dir: &Path, message: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skills_linked_in_from_a_home_repo_copy_as_their_files() {
+        let root = tempfile::tempdir().unwrap();
+        let home_repo = root.path().join("home-repo").join("review");
+        std::fs::create_dir_all(&home_repo).unwrap();
+        std::fs::write(home_repo.join("SKILL.md"), "review rules").unwrap();
+        let skills = root.path().join("skills");
+        std::fs::create_dir_all(skills.join("local")).unwrap();
+        std::fs::write(skills.join("local").join("SKILL.md"), "local rules").unwrap();
+        std::os::unix::fs::symlink(&home_repo, skills.join("review")).unwrap();
+        std::os::unix::fs::symlink(home_repo.join("SKILL.md"), skills.join("one-file.md")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("nowhere"), skills.join("dangling")).unwrap();
+
+        let staged = tempfile::tempdir().unwrap();
+        let mut copied = CopyTotals::default();
+        stage(&skills, staged.path(), &mut copied).unwrap();
+
+        let review = staged.path().join("review");
+        assert!(std::fs::symlink_metadata(&review).unwrap().is_dir(), "a linked skill is a real directory");
+        assert_eq!(std::fs::read_to_string(review.join("SKILL.md")).unwrap(), "review rules");
+        assert!(std::fs::symlink_metadata(staged.path().join("one-file.md")).unwrap().is_file());
+        assert_eq!(std::fs::read_to_string(staged.path().join("local").join("SKILL.md")).unwrap(), "local rules");
+        assert!(std::fs::symlink_metadata(staged.path().join("dangling")).is_err(), "a link to nothing is skipped");
+        assert_eq!(copied.files, 3);
+    }
+
+    /// Stage `dir` the way [`copy_dir`] does.
+    fn stage(dir: &Path, staged: &Path, copied: &mut CopyTotals) -> Result<()> {
+        stage_dir(dir, staged, &mut vec![std::fs::canonicalize(dir).unwrap()], copied)
+    }
+
+    #[test]
+    fn a_symlink_loop_in_the_skills_is_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let skills = root.path().join("skills");
+        std::fs::create_dir_all(skills.join("review")).unwrap();
+        std::fs::write(skills.join("review").join("SKILL.md"), "rules").unwrap();
+        std::os::unix::fs::symlink(&skills, skills.join("review").join("up")).unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let mut copied = CopyTotals::default();
+        stage(&skills, staged.path(), &mut copied).unwrap();
+        assert!(staged.path().join("review").join("SKILL.md").is_file());
+        assert!(std::fs::symlink_metadata(staged.path().join("review").join("up")).is_err(), "the loop is not followed");
+        assert_eq!(copied.files, 1);
+    }
+
+    #[test]
+    fn skills_nested_past_the_depth_limit_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let deep = (0..=COPY_DEPTH_MAX).fold(root.path().to_path_buf(), |p, i| p.join(format!("d{i}")));
+        std::fs::create_dir_all(&deep).unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let error = stage(root.path(), staged.path(), &mut CopyTotals::default()).unwrap_err();
+        assert!(format!("{error:#}").contains("directories deep"), "{error:#}");
+    }
+
+    #[test]
+    fn skills_past_the_file_limit_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("SKILL.md"), "x").unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let mut copied = CopyTotals { files: COPY_FILES_MAX, bytes: 0 };
+        let error = stage(root.path(), staged.path(), &mut copied).unwrap_err();
+        assert!(format!("{error:#}").contains("to copy"), "{error:#}");
+    }
 
     fn repo() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
