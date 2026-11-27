@@ -102,7 +102,7 @@ h1 { margin: 0; font-size: 13px; font-weight: 600; flex: 1; min-width: 0; white-
 .live { display: flex; gap: 6px; }
 
 .timeline { flex: 1; overflow-y: auto; padding: 18px 24px 32px; }
-.column { max-width: 780px; margin: 0 auto; }
+.column { width: 100%; }
 .empty { color: var(--dim); text-align: center; padding-top: 22vh; }
 .empty .title { color: var(--text); font-size: 15px; font-weight: 600; margin-bottom: 6px; }
 .skipped { color: var(--faint); text-align: center; font-size: 12px; margin-bottom: 16px; }
