@@ -4,7 +4,7 @@
 //! walks the steps; what each action does, and the question asked before
 //! it, stay in `manage.rs` and `axel_tui::manage`.
 
-use axel_tui::manage::{Action, ManageData, ManageView, Outcome};
+use axel_tui::manage::{ManageData, ManageView, Outcome};
 use serde_json::{Value, json};
 
 /// The pane's data and menu, for the page.
@@ -13,7 +13,7 @@ pub fn controls(data: &ManageData) -> Value {
     let actions: Vec<Value> = view
         .actions()
         .into_iter()
-        .map(|a| json!({ "action": action_name(a), "key": a.key().to_string(), "label": a.label(), "about": view.describe(a), "danger": a.is_destructive() }))
+        .map(|a| json!({ "action": a.as_str(), "key": a.key().to_string(), "label": a.label(), "about": view.describe(a), "danger": a.is_destructive() }))
         .collect();
     let agent_actions: serde_json::Map<String, Value> = data
         .agents
@@ -27,14 +27,14 @@ pub fn controls(data: &ManageData) -> Value {
         "view": "controls",
         "id": data.thread_id,
         "title": data.title,
-        "state": data.state,
+        "state": data.state.as_str(),
         "age": data.age,
         "projects": data.projects,
         "sessions": data.sessions.iter().map(|s| json!({
             "agent": s.agent,
             "color": s.color.map(|c| c.as_str()),
             "runs": s.runs,
-            "state": s.state,
+            "state": s.state.as_str(),
             "live": s.live,
             "host": s.host,
             "turns": s.turns,
@@ -56,20 +56,6 @@ pub fn controls(data: &ManageData) -> Value {
         "actions": actions,
         "agent_actions": agent_actions,
     })
-}
-
-fn action_name(a: Action) -> &'static str {
-    match a {
-        Action::Reset => "reset",
-        Action::Move => "move",
-        Action::Settle => "settle",
-        Action::Reopen => "reopen",
-        Action::Archive => "archive",
-        Action::Stop => "stop",
-        Action::StopAgent => "agents",
-        Action::Rename => "rename",
-        Action::HardReset => "hard_reset",
-    }
 }
 
 /// An outcome as the page sends it back: `{"op": "reset", "agent": "atlas"}`.
@@ -122,7 +108,7 @@ mod tests {
         ManageData {
             thread_id: "T1".into(),
             title: "Ship it".into(),
-            state: "open".into(),
+            state: axel_store::ThreadState::Open,
             agents: vec!["atlas".into()],
             hosts: vec!["mini".into()],
             ..ManageData::default()

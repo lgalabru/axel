@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use axel_i18n::t;
-use axel_store::{SessionFilter, SessionState, StatusState, ThreadState};
+use axel_store::{SessionFilter, SessionState, StatusState};
 use axel_tui::ThreadOp;
-use axel_tui::manage::{ManageData, Outcome, SessionRow, run_manage};
+use axel_tui::manage::{ManageData, Outcome, SessionRow, SessionStatus, run_manage};
 
 use super::Ctx;
 
@@ -241,7 +241,7 @@ pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<Stri
             agent: name,
             color: agent.and_then(|a| a.color),
             runs,
-            state: session_state_label(s, statuses.get(&s.id)).into(),
+            state: session_status(s, statuses.get(&s.id)),
             live,
             host,
             turns: count(mine.len()),
@@ -260,7 +260,7 @@ pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<Stri
     Ok(ManageData {
         thread_id: thread_id.to_string(),
         title: t.title.clone(),
-        state: thread_state_label(t.state).into(),
+        state: t.state,
         age: axel_tui::manage::duration_label(now - t.created_at),
         projects: summary.projects.iter().map(|p| p.path_hint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.path_hint.display().to_string())).collect(),
         sessions: rows,
@@ -292,36 +292,27 @@ fn add_to_spark(store: &axel_store::Store, session_id: &str, now: i64, spark: &m
     Ok(())
 }
 
-/// What a session is doing, in the pane's words.
-fn session_state_label(s: &axel_store::Session, status: Option<&axel_store::Status>) -> &'static str {
+/// What a session is doing, as the pane shows it.
+fn session_status(s: &axel_store::Session, status: Option<&axel_store::Status>) -> SessionStatus {
     if s.ended_at.is_some() {
-        return "ended";
+        return SessionStatus::Ended;
     }
     if s.state == SessionState::Paused {
-        return "paused";
+        return SessionStatus::Paused;
     }
     match status {
         Some(st) => match st.state {
-            StatusState::Working => "working",
-            StatusState::Blocked => "blocked",
-            StatusState::Done => "done",
-            StatusState::Error => "error",
-            StatusState::Idle => "idle",
+            StatusState::Working => SessionStatus::Working,
+            StatusState::Blocked => SessionStatus::Blocked,
+            StatusState::Done => SessionStatus::Done,
+            StatusState::Error => SessionStatus::Error,
+            StatusState::Idle => SessionStatus::Idle,
         },
         None => match s.state {
-            SessionState::Running => "working",
-            SessionState::Blocked => "blocked",
-            _ => "idle",
+            SessionState::Running => SessionStatus::Working,
+            SessionState::Blocked => SessionStatus::Blocked,
+            SessionState::Starting | SessionState::Idle | SessionState::Paused | SessionState::Ended => SessionStatus::Idle,
         },
-    }
-}
-
-fn thread_state_label(state: ThreadState) -> &'static str {
-    match state {
-        ThreadState::Open => "open",
-        ThreadState::Done => "done",
-        ThreadState::Archived => "archived",
-        ThreadState::Deleted => "deleted",
     }
 }
 

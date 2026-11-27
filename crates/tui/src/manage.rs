@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axel_i18n::t;
-use axel_store::AgentColor;
+use axel_store::{AgentColor, ThreadState};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,12 +23,11 @@ use crate::util::{ellipsize, format_tokens, pad_end, pad_start, text_width};
 const POLL: Duration = Duration::from_millis(60);
 
 /// Everything the pane shows, loaded by the caller.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ManageData {
     pub thread_id: String,
     pub title: String,
-    /// `open`, `done` or `archived`.
-    pub state: String,
+    pub state: ThreadState,
     /// `2d`, `41m`: since the thread was created.
     pub age: String,
     /// Project names, or none for a scratch thread.
@@ -51,14 +50,64 @@ pub struct ManageData {
     pub note: Option<String>,
 }
 
+impl Default for ManageData {
+    /// An open thread with nothing on it yet.
+    fn default() -> ManageData {
+        ManageData {
+            thread_id: String::new(),
+            title: String::new(),
+            state: ThreadState::Open,
+            age: String::new(),
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            spark: Vec::new(),
+            tokens: 0,
+            cost_usd: 0.0,
+            turns: 0,
+            tool_calls: 0,
+            files_changed: 0,
+            agents: Vec::new(),
+            hosts: Vec::new(),
+            note: None,
+        }
+    }
+}
+
+/// What a session is doing, as the pane shows it: its own state, refined
+/// by its last status report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionStatus {
+    Working,
+    #[default]
+    Idle,
+    Blocked,
+    Done,
+    Error,
+    Paused,
+    Ended,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatus::Working => "working",
+            SessionStatus::Idle => "idle",
+            SessionStatus::Blocked => "blocked",
+            SessionStatus::Done => "done",
+            SessionStatus::Error => "error",
+            SessionStatus::Paused => "paused",
+            SessionStatus::Ended => "ended",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionRow {
     pub agent: String,
     pub color: Option<AgentColor>,
     /// `claude/opus`.
     pub runs: String,
-    /// `working`, `idle`, `blocked`, `ended`…
-    pub state: String,
+    pub state: SessionStatus,
     pub live: bool,
     /// Where it runs when not here.
     pub host: Option<String>,
@@ -99,6 +148,21 @@ impl Action {
             Action::StopAgent => 't',
             Action::Rename => 'n',
             Action::HardReset => 'h',
+        }
+    }
+
+    /// The action's name where it leaves the program (the web page).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Action::Reset => "reset",
+            Action::Move => "move",
+            Action::Settle => "settle",
+            Action::Reopen => "reopen",
+            Action::Archive => "archive",
+            Action::Stop => "stop",
+            Action::StopAgent => "agents",
+            Action::Rename => "rename",
+            Action::HardReset => "hard_reset",
         }
     }
 
@@ -179,8 +243,8 @@ impl ManageView {
                 out.push(Action::Move);
             }
         }
-        out.push(if self.data.state == "done" { Action::Reopen } else { Action::Settle });
-        if self.data.state != "archived" {
+        out.push(if self.data.state == ThreadState::Done { Action::Reopen } else { Action::Settle });
+        if self.data.state != ThreadState::Archived {
             out.push(Action::Archive);
         }
         if !self.data.agents.is_empty() { out.push(Action::StopAgent); }
@@ -216,8 +280,8 @@ impl ManageView {
         let mut actions = Vec::new();
         let live: Vec<_> = self.data.sessions.iter().filter(|s| s.agent == agent && s.live).collect();
         let name = || agent.to_string();
-        if live.iter().any(|s| s.state != "paused") { actions.push((t!("Pause"), 'p', Outcome::PauseAgent { agent: name() })); }
-        if live.iter().any(|s| s.state == "paused") { actions.push((t!("Resume"), 'r', Outcome::ResumeAgent { agent: name() })); }
+        if live.iter().any(|s| s.state != SessionStatus::Paused) { actions.push((t!("Pause"), 'p', Outcome::PauseAgent { agent: name() })); }
+        if live.iter().any(|s| s.state == SessionStatus::Paused) { actions.push((t!("Resume"), 'r', Outcome::ResumeAgent { agent: name() })); }
         if !live.is_empty() { actions.push((t!("Kill"), 'x', Outcome::StopAgent { agent: name() })); }
         actions.push((t!("Remove from thread"), 'd', Outcome::RemoveAgent { agent: name() }));
         actions
@@ -428,7 +492,7 @@ impl Rows<'_, '_> {
 /// The title left, state · age · sessions right; the projects under it.
 fn render_title(rows: &mut Rows, d: &ManageData, width: usize) {
     let sessions = if d.sessions.len() == 1 { t!("1 session").to_string() } else { t!("{n} sessions", n = d.sessions.len()) };
-    let right = format!("{} · {} · {sessions}", d.state, d.age);
+    let right = format!("{} · {} · {sessions}", d.state.as_str(), d.age);
     let title_width = width.saturating_sub(text_width(&right) + 2);
     rows.push(Line::from(vec![
         Span::styled(pad_end(&ellipsize(&d.title, title_width), title_width), theme::accent_bold()),
@@ -482,8 +546,8 @@ impl SessionColumn {
         match self {
             Self::State => {
                 let st = match (&s.host, s.live) {
-                    (Some(h), true) => format!("{}@{h}", s.state),
-                    _ => s.state.clone(),
+                    (Some(h), true) => format!("{}@{h}", s.state.as_str()),
+                    _ => s.state.as_str().to_string(),
                 };
                 (st, if s.live { theme::accent() } else { theme::dim() })
             }
@@ -666,12 +730,12 @@ mod tests {
         ManageData {
             thread_id: "T1".into(),
             title: "Ship it".into(),
-            state: "open".into(),
+            state: ThreadState::Open,
             age: "2d".into(),
             projects: vec!["axel".into()],
             sessions: vec![
-                SessionRow { agent: "opus".into(), runs: "claude/opus".into(), state: "idle".into(), live: true, turns: 12, tool_calls: 140, tokens: 34_300_000, cost_usd: 57.86, context: Some((62, 100)), duration_secs: 5 * 3600 + 12 * 60, ..Default::default() },
-                SessionRow { agent: "fable".into(), runs: "claude/fable".into(), state: "ended".into(), live: false, turns: 4, tool_calls: 37, tokens: 3_100_000, cost_usd: 4.2, duration_secs: 41 * 60, ..Default::default() },
+                SessionRow { agent: "opus".into(), runs: "claude/opus".into(), state: SessionStatus::Idle, live: true, turns: 12, tool_calls: 140, tokens: 34_300_000, cost_usd: 57.86, context: Some((62, 100)), duration_secs: 5 * 3600 + 12 * 60, ..Default::default() },
+                SessionRow { agent: "fable".into(), runs: "claude/fable".into(), state: SessionStatus::Ended, live: false, turns: 4, tool_calls: 37, tokens: 3_100_000, cost_usd: 4.2, duration_secs: 41 * 60, ..Default::default() },
             ],
             spark: vec![0; 60],
             tokens: 37_400_000,
@@ -690,7 +754,7 @@ mod tests {
         let v = ManageView::new(data());
         assert_eq!(v.actions(), vec![Action::Reset, Action::Move, Action::Settle, Action::Archive, Action::StopAgent, Action::Stop, Action::Rename, Action::HardReset]);
         let mut done = data();
-        done.state = "done".into();
+        done.state = ThreadState::Done;
         done.hosts.clear();
         done.sessions.iter_mut().for_each(|s| s.live = false);
         assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::StopAgent, Action::Rename, Action::HardReset], "no hosts: no move; nothing live: no stop");
@@ -705,7 +769,7 @@ mod tests {
         assert_eq!(v.step, Step::AgentActions { agent: "opus".into(), idx: 0 });
         v.handle_key(key(KeyCode::Char('p')));
         assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::PauseAgent { agent: "opus".into() }));
-        v.data.sessions[0].state = "paused".into();
+        v.data.sessions[0].state = SessionStatus::Paused;
         let actions = v.agent_actions("opus");
         assert_eq!(actions.iter().map(|a| a.0).collect::<Vec<_>>(), vec!["Resume", "Kill", "Remove from thread"]);
         v.step = Step::AgentActions { agent: "opus".into(), idx: 0 };
