@@ -196,3 +196,16 @@ conversation items; the view shows the newest 500.
     Ladybird holds its own terminal open and outlives the pane.
   - The page's CSP (`style-src 'self'`) refuses an inline `style` attribute.
     Ladybird logs the refusal in `/tmp/ladybird-terminal-PID.log`.
+- 2026-11-27: The owner found the text still small, scrolling very slow, and the
+  activity pane wordy, and asked for the terminal view's look.
+  - Scrolling: idle, the conversation sent 180 full frames in 3 s, from its
+    spinner and pulsing dots, each 2040×1700 RGB (10 MB). 20 wheel events made
+    908 frames and hadn't settled after 20 s. With no animation and a still
+    working mark, an idle pane sends no frames, and 20 wheel events make 29
+    frames, settled in 0.74 s. A spinner ticking 4 times a second alone cost 4
+    full frames a second.
+  - Font: Rex's terminal font is Ghostty's built-in JetBrains Mono, and Rex's
+    preferences don't override it. It isn't installed as a system font, so the
+    page bundles JetBrains Mono 2.304 from JetBrains' release.
+  - Colours: the terminal view draws agents in palette colours (yellow is
+    palette 3) and dim text in palette 8, so the page takes the whole palette.

@@ -243,12 +243,32 @@ pane, Ladybird is started again at the new ratio, on a fresh pty. When the pane
 hangs up, Ladybird's process group is ended: it ignores SIGTERM in terminal mode,
 so it gets SIGKILL after 1.5 s.
 
-Ladybird's frames are opaque RGB, so the page can't be transparent. It takes the
-terminal's colours instead (`axel_tui::theme::terminal_colors`, asked before
-Ladybird starts). The background is the terminal's, the text its foreground, and
-every surface a step between the two (`web/theme.rs`). They are appended to
-`/app.css` as a `:root` rule, since the page's CSP allows no inline style. The
-conversation uses the pane's full width.
+Ladybird's frames are opaque RGB, so the page can't be transparent. It is drawn
+the way the terminal view is drawn instead, in the terminal's own terms. Before
+Ladybird starts, the pane asks its terminal, in one round trip, for its text and
+background colours (OSC 10, 11), its 16-colour palette (OSC 4) and, when needed,
+its pixel size. `CSI c` goes last as the end marker. The page takes them as CSS
+properties (`web/theme.rs`): `--bg`, `--text`, `--p0` to `--p15`, `--dim` from
+palette 8, and surfaces as steps between background and text. The text is
+JetBrains Mono, Rex's default terminal font, which the binary carries
+(`/fonts/*.woff2`, OFL) since Ladybird can't reach the copy built into Ghostty.
+It is sized so a character is one terminal cell wide. The properties are
+appended to `/app.css` as a `:root` rule, since the page's CSP allows no inline
+style, and replaced when Ladybird restarts at another scale.
+
+The pages follow the terminal view:
+- **Conversation.** Each agent's turn has a bold name badge in its palette
+  colour, with rounded corners and an arrow, and the time on the right. Your
+  messages are `> ` lines. A run of tool calls is one dim `↗` line that opens on
+  a click. The conversation uses the pane's full width.
+- **Activity.** One line per agent: its context as ten dots, its tokens and
+  cost, and its last hour as a dot matrix. Plan limits are dot meters.
+
+Nothing on the page animates. Ladybird sends the whole pane again for any
+change, as a frame of several megabytes. A CSS animation kept the conversation
+at 60 frames a second while idle, and scrolling waited behind it. A working
+agent's mark is still, and an update replaces only the timeline entries that
+changed.
 
 The pages draw `axel_tui::load_thread_data` and `load_usage_data`, and send
 through `axel_tui::thread::dispatch`, as the terminal view does. A secret
