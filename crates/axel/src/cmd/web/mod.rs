@@ -28,10 +28,10 @@ use anyhow::{Context, Result, bail};
 use axel_i18n::t;
 use axel_tui::manage::Outcome;
 use axel_tui::{SendCommand, SendReply};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Ctx;
+use super::display::{Display, Pane};
 use server::Action;
 
 /// Where Ladybird is looked for, after `$AXEL_LADYBIRD`: on PATH (Linux
@@ -63,109 +63,6 @@ const FALLBACK_WINDOW_SECS: u64 = 3;
 /// limit of the server, which also holds the JSON around it.
 const MESSAGE_BYTES_MAX: usize = server::BODY_BYTES_MAX;
 
-/// How a thread's panes are drawn.  Web panes are experimental, so they
-/// are off until the owner turns them on, and then used only where Ladybird
-/// is installed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PaneChoice {
-    /// Terminal text: the default.
-    #[default]
-    Terminal,
-    /// A web page wherever Ladybird is installed; terminal text elsewhere.
-    Web,
-}
-
-impl PaneChoice {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PaneChoice::Terminal => "terminal",
-            PaneChoice::Web => "web",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<PaneChoice> {
-        [PaneChoice::Terminal, PaneChoice::Web].into_iter().find(|c| c.as_str() == text.trim())
-    }
-}
-
-/// A saved choice this build doesn't know (a newer build's) reads as the
-/// default rather than making the whole settings file unreadable.
-impl<'de> Deserialize<'de> for PaneChoice {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<PaneChoice, D::Error> {
-        Ok(PaneChoice::parse(&String::deserialize(d)?).unwrap_or_default())
-    }
-}
-
-/// `$AXEL_HOME/settings.json`: what the owner chose here, local to this
-/// machine.  Unknown fields from a newer build are kept.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct Settings {
-    #[serde(default)]
-    panes: PaneChoice,
-    #[serde(flatten)]
-    rest: serde_json::Map<String, Value>,
-}
-
-fn settings_path() -> PathBuf {
-    crate::paths::home().join("settings.json")
-}
-
-fn load_settings() -> Settings {
-    // A missing or unreadable file is the defaults: setting a choice writes it.
-    std::fs::read_to_string(settings_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
-}
-
-/// The pane choice in force: `$AXEL_PANES` when set, else the saved one.
-pub fn pane_choice() -> PaneChoice {
-    std::env::var("AXEL_PANES").ok().and_then(|v| PaneChoice::parse(&v)).unwrap_or_else(|| load_settings().panes)
-}
-
-/// Whether a thread view opens as a web pane: the owner turned web panes
-/// on, and Ladybird is here to draw them.
-pub fn web_panes() -> bool {
-    pane_choice() == PaneChoice::Web && ladybird().is_some()
-}
-
-/// Which of a thread view's three panes a web pane is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WebView {
-    /// The conversation.
-    Messages,
-    /// Where you write to the thread's agents.
-    Composer,
-    /// Who is working, what they did, and what it cost.
-    Activity,
-    /// The thread controls (Ctrl+D): its numbers, and what to do to it.
-    Controls,
-}
-
-impl WebView {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WebView::Messages => "messages",
-            WebView::Composer => "composer",
-            WebView::Activity => "activity",
-            WebView::Controls => "controls",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<WebView> {
-        [WebView::Messages, WebView::Composer, WebView::Activity, WebView::Controls].into_iter().find(|v| v.as_str() == text.trim())
-    }
-}
-
-/// The `--view` argument, refused when it names no pane.
-pub fn parse_view(text: &str) -> Result<WebView> {
-    WebView::parse(text).with_context(|| t!("a view is messages, composer, activity or controls"))
-}
-
-/// What a thread's pane runs when it is a web pane.
-pub fn pane_command(thread_id: &str, view: WebView) -> Vec<String> {
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    vec![exe, "web".into(), "pane".into(), thread_id.to_string(), "--view".into(), view.as_str().into()]
-}
-
 /// Device pixels per CSS pixel for a pane of `size`: a Retina display, or a
 /// phone, draws more pixels per cell, so without this the page is drawn
 /// small.  `$AXEL_WEB_SCALE` overrides it.
@@ -195,10 +92,6 @@ mod tests {
         assert_eq!(ratio_for_cell_height(26.0), 1.5, "a 1.5x display");
         assert_eq!(ratio_for_cell_height(3.0), DEVICE_PIXEL_RATIO_MIN, "a terminal reporting nonsense");
         assert_eq!(ratio_for_cell_height(400.0), DEVICE_PIXEL_RATIO_MAX);
-        for view in [WebView::Messages, WebView::Composer, WebView::Activity] {
-            assert_eq!(WebView::parse(view.as_str()), Some(view));
-        }
-        assert_eq!(WebView::parse("sideways"), None);
     }
 }
 
@@ -207,32 +100,9 @@ mod tests {
 const DEVICE_PIXEL_RATIO_MIN: f64 = 1.0;
 const DEVICE_PIXEL_RATIO_MAX: f64 = 3.0;
 
-/// `axel panes [CHOICE]`: show or set how thread views are drawn.
-pub fn panes(choice: Option<&str>) -> Result<()> {
-    let Some(choice) = choice else {
-        let current = pane_choice();
-        let browser = ladybird().map_or_else(|| t!("not installed").to_string(), |p| p.display().to_string());
-        println!("{}", t!("panes: {choice} (Ladybird: {browser})", choice = current.as_str(), browser = browser));
-        return Ok(());
-    };
-    let choice = PaneChoice::parse(choice).with_context(|| t!("panes are web or terminal"))?;
-    let mut settings = load_settings();
-    settings.panes = choice;
-    let path = settings_path();
-    std::fs::create_dir_all(path.parent().context("settings live in a directory")?)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().context("settings live in a directory")?)?;
-    serde_json::to_writer_pretty(tmp.as_file_mut(), &settings)?;
-    tmp.persist(&path)?;
-    println!("{}", t!("thread views open as {choice} panes from now on", choice = choice.as_str()));
-    if choice == PaneChoice::Web && ladybird().is_none() {
-        println!("{}", t!("Ladybird isn't installed, so they stay terminal panes until it is: ladybird.org"));
-    }
-    Ok(())
-}
-
-/// `axel web pane THREAD --view VIEW`: this pane shows one of the thread
-/// view's three panes as a web page.
-pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
+/// `axel web pane THREAD --view PANE`: this pane shows one of the thread's
+/// panes as a web page, or its terminal pane where Ladybird can't draw.
+pub fn pane(thread_id: &str, view: Pane) -> Result<()> {
     let backend = ThreadBackend::open(thread_id, view)?;
     let Some(browser) = ladybird() else {
         return fall_back(thread_id, view, t!("Ladybird isn't installed"));
@@ -241,7 +111,7 @@ pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
     super::resume::come_back_as(&["web", "pane", thread_id, "--view", view.as_str()], std::env::current_dir().ok().as_deref());
     // The composer closes the whole thread view, as the terminal one does.
     // Every view ends its Ladybird when the pane goes.
-    let undock = (view == WebView::Composer).then(Undock::find).flatten();
+    let undock = (view == Pane::Composer).then(Undock::find).flatten();
     let on_close = undock.clone();
     super::ui::on_hangup(move || {
         terminal::end_running();
@@ -304,19 +174,14 @@ impl Undock {
 }
 
 /// This pane's terminal counterpart instead, saying why.
-fn fall_back(thread_id: &str, view: WebView, why: &str) -> Result<()> {
+fn fall_back(thread_id: &str, view: Pane, why: &str) -> Result<()> {
     eprintln!("axel: {}", t!("{why}; showing it as terminal text", why = why));
-    match view {
-        WebView::Messages => super::ui::run_stream(thread_id),
-        WebView::Composer => super::ui::run_compose(thread_id),
-        WebView::Activity => super::ui::run_inline(Some(crate::cli::ScreenArg::Usage), Some(thread_id.to_string())),
-        WebView::Controls => super::manage::run(thread_id),
-    }
+    Display::Terminal.panes().run(thread_id, view)
 }
 
 /// `axel web serve THREAD --view VIEW`: the pane's server alone, with its address on
 /// stdout, until interrupted.  For a desktop browser, and for tests.
-pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
+pub fn serve(thread_id: &str, view: Pane) -> Result<()> {
     let backend = ThreadBackend::open(thread_id, view)?;
     let running = server::start(Arc::new(backend), view, "")?;
     println!("{}", running.url()?);
@@ -331,7 +196,7 @@ pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
 /// The thread a pane shows, and what the page may do to it.
 struct ThreadBackend {
     thread_id: String,
-    view: WebView,
+    view: Pane,
     owner_pk: String,
     /// For loading, which polls.  Actions open a context of their own on
     /// the connection's thread (a `Ctx` holds Rex's runner, which stays on
@@ -340,7 +205,7 @@ struct ThreadBackend {
 }
 
 impl ThreadBackend {
-    fn open(thread_id: &str, view: WebView) -> Result<ThreadBackend> {
+    fn open(thread_id: &str, view: Pane) -> Result<ThreadBackend> {
         let ctx = Ctx::open()?;
         let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
         let owner_pk = ctx.owner()?.public().to_base58();
@@ -416,7 +281,7 @@ fn reply_json(reply: SendReply) -> Result<Value> {
 impl server::Backend for ThreadBackend {
     fn load(&self) -> Result<Value> {
         let store = self.reader.lock().map_err(|_| anyhow::anyhow!("the reader was poisoned"))?;
-        if self.view == WebView::Controls {
+        if self.view == Pane::Controls {
             return Ok(controls::controls(&super::manage::load(&store, &self.thread_id, None)?));
         }
         let data = axel_tui::load_thread_data(&store, &self.owner_pk, &self.thread_id)?;

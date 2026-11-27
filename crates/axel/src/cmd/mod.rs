@@ -4,6 +4,7 @@ mod agent;
 mod claude_profile;
 mod convert;
 mod diff;
+pub(crate) mod display;
 mod effort;
 mod gc;
 mod doctor;
@@ -133,10 +134,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             crate::cli::HostCommand::Rm { label } => host::remove(&label),
             crate::cli::HostCommand::Rpc => host::rpc_serve(),
         },
-        Some(Command::Panes { choice }) => web::panes(choice.as_deref()),
+        Some(Command::Panes { choice }) => display::panes_cmd(choice),
         Some(Command::Web { command }) => match command {
-            crate::cli::WebCommand::Pane { thread, view } => web::pane(&thread, web::parse_view(&view)?),
-            crate::cli::WebCommand::Serve { thread, view } => web::serve(&thread, web::parse_view(&view)?),
+            crate::cli::WebCommand::Pane { thread, view } => web::pane(&thread, view),
+            crate::cli::WebCommand::Serve { thread, view } => web::serve(&thread, view),
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
     }

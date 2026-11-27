@@ -137,7 +137,7 @@ fn stylesheet(theme: &str) -> String {
 /// Bind a free port on `127.0.0.1` and serve `backend` from background threads.
 /// `theme` is CSS custom properties (`theme::css`), set on the page's root
 /// after its own: in the stylesheet, as the page's CSP allows no inline style.
-pub fn start(backend: Arc<dyn Backend>, view: super::WebView, theme: &str) -> Result<Running> {
+pub fn start(backend: Arc<dyn Backend>, view: super::Pane, theme: &str) -> Result<Running> {
     let listener = TcpListener::bind("127.0.0.1:0").context("listening on 127.0.0.1")?;
     let port = listener.local_addr()?.port();
     assert!(port > 0, "the OS gave a real port");
@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn an_addresss_token_earns_the_cookie_once_and_nothing_works_without_it() {
         let backend = fake();
-        let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
+        let server = start(backend.clone(), super::super::Pane::Conversation, "").unwrap();
         let port = server.port;
         let url = server.url().unwrap();
         let token = url.rsplit("?k=").next().unwrap().to_string();
@@ -516,17 +516,17 @@ mod tests {
 
     #[test]
     fn the_stylesheet_ends_with_the_panes_colours() {
-        let server = start(fake(), super::super::WebView::Messages, "--bg:#fafaf0;").unwrap();
+        let server = start(fake(), super::super::Pane::Conversation, "--bg:#fafaf0;").unwrap();
         let (status, css) = get(server.port, "/app.css", Some(&cookie_of(&server)));
         assert_eq!(status, 200);
         assert!(css.trim_end().ends_with(":root { --bg:#fafaf0; }"), "the theme comes after the page's own palette");
-        let plain = start(fake(), super::super::WebView::Messages, "").unwrap();
+        let plain = start(fake(), super::super::Pane::Conversation, "").unwrap();
         assert!(!get(plain.port, "/app.css", Some(&cookie_of(&plain))).1.contains(":root { --bg:#fafaf0"));
     }
 
     #[test]
     fn the_theme_follows_a_restart_and_the_fonts_are_served() {
-        let server = start(fake(), super::super::WebView::Messages, "").unwrap();
+        let server = start(fake(), super::super::Pane::Conversation, "").unwrap();
         server.set_theme("--font-size:21.00px;");
         let secret = cookie_of(&server);
         let (_, css) = get(server.port, "/app.css", Some(&secret));
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn a_page_on_another_host_or_origin_is_refused() {
-        let server = start(fake(), super::super::WebView::Messages, "").unwrap();
+        let server = start(fake(), super::super::Pane::Conversation, "").unwrap();
         let (port, secret) = (server.port, cookie_of(&server));
         // DNS rebinding: our port, someone else's name.
         let (status, _) = send(port, &format!("GET /api/thread HTTP/1.1\r\nHost: evil.example:{port}\r\nCookie: {COOKIE}={secret}\r\n\r\n"));
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn actions_reach_the_backend_and_its_errors_reach_the_page() {
         let backend = fake();
-        let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
+        let server = start(backend.clone(), super::super::Pane::Conversation, "").unwrap();
         let (port, secret) = (server.port, cookie_of(&server));
         let origin = format!("Origin: http://127.0.0.1:{port}\r\n");
         let (status, _) = post(port, "/api/send", &secret, &origin, r#"{"text":"hi","steer":false}"#);
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn a_request_past_the_limits_is_refused() {
-        let server = start(fake(), super::super::WebView::Messages, "").unwrap();
+        let server = start(fake(), super::super::Pane::Conversation, "").unwrap();
         let (port, secret) = (server.port, cookie_of(&server));
         let big = format!(
             "POST /api/send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn the_event_stream_wakes_when_the_thread_changes() {
         let backend = fake();
-        let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
+        let server = start(backend.clone(), super::super::Pane::Conversation, "").unwrap();
         let (port, secret) = (server.port, cookie_of(&server));
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\n\r\n").as_bytes()).unwrap();
