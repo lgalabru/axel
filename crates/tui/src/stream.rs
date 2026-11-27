@@ -25,6 +25,12 @@ use crate::view::thread_view::row_lines;
 
 const TICK: Duration = Duration::from_millis(250);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// In place of `> ` on the message waiting for its reply.
+const SENDING: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A message older than this, still without a reply, is printed as it is:
+/// whatever was to answer it isn't coming, and the highlight would only hold
+/// the tail.
+const AWAITING_MAX_MS: i64 = 10 * 60 * 1000;
 
 /// What the read-only stream passes on: typing for its composer, or one of
 /// the composer's pane shortcuts, so they work with the message pane focused.
@@ -122,18 +128,18 @@ fn print_tick(out: &mut impl Write, s: &mut Stream, width: &mut WidthWatch, view
     let tail_overflows = !s.tail_fits(h);
     let print = match width.on_tick(w) {
         Width::Same if tail_overflows => {
-            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view)))?;
+            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view, usize::from(w))))?;
             s.forget();
             true
         }
         Width::Wait => false,
         Width::First => {
             // The pane starts with the login banner (`Last login: …`): clear it.
-            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view)))?;
+            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view, usize::from(w))))?;
             true
         }
         Width::Reprint => {
-            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view)))?;
+            write!(out, "\x1b[H\x1b[2J\x1b[3J{}\r\n", to_ansi(&header_line(view, usize::from(w))))?;
             s.forget();
             true
         }
@@ -478,6 +484,39 @@ impl Stream {
         lines
     }
 
+    /// The message waiting for its reply: a braille spinner in place of its
+    /// `> `, and its text in the accent colour (no background).
+    fn awaiting_ansi(&self, v: &ThreadView, row: &Row, width: usize) -> Vec<String> {
+        let frame = SENDING[self.tick % SENDING.len()];
+        let accent = theme::accent();
+        let mut lines = render_row(v, row, width);
+        let mut first = true;
+        for line in &mut lines {
+            // The blank rows around your messages (the margin column only) stay plain.
+            if line.spans.iter().all(|span| span.content.trim().is_empty()) {
+                continue;
+            }
+            // Span 0 is the margin column the stream adds; the rest is the message.
+            for (n, span) in line.spans.iter_mut().enumerate().skip(1) {
+                if first && n == 1 && span.content == crate::view::thread_view::YOU_MARK {
+                    span.content = format!("{frame} ").into();
+                    span.style = accent.add_modifier(ratatui::style::Modifier::BOLD);
+                    continue;
+                }
+                // The time at the right keeps its own dim colour.
+                if span.style.fg != Some(theme::DIM) {
+                    span.style = span.style.fg(theme::ACCENT);
+                }
+            }
+            first = false;
+        }
+        let mut out: Vec<String> = lines.iter().map(to_ansi).collect();
+        if let Row::Prose(i) = row {
+            link_chips(&mut out, &v.data.items[*i], width);
+        }
+        out
+    }
+
     /// The bytes to write this tick: erase the old tail, print newly finished
     /// rows, draw the new tail.  Empty when nothing changed.
     fn frame(&mut self, v: &ThreadView, width: usize, height: usize) -> String {
@@ -486,6 +525,7 @@ impl Stream {
         let rows = v.rows();
         let items = &v.data.items;
         let working = v.is_working();
+        let awaiting = awaiting_reply(&rows, items, chrono::Utc::now().timestamp_millis());
         let mut commit: Vec<String> = Vec::new();
         let mut live_rows: Vec<&Row> = Vec::new();
         let mut blocked = false;
@@ -495,7 +535,8 @@ impl Stream {
                 continue;
             }
             // Commit in order: once one row is still moving, the rest wait.
-            if !blocked && is_settled(row, items, i + 1 == rows.len(), working) {
+            // The message waiting for its reply stays live, highlighted.
+            if !blocked && awaiting != Some(i) && is_settled(row, items, i + 1 == rows.len(), working) {
                 commit.extend(self.row_ansi(v, row, width));
                 self.committed.insert(key);
             } else {
@@ -503,8 +544,17 @@ impl Stream {
                 live_rows.push(row);
             }
         }
-        let mut live: Vec<String> = live_rows.iter().flat_map(|r| self.row_ansi(v, r, width)).collect();
-        if working {
+        let awaiting_row = awaiting.map(|i| &rows[i]);
+        let mut live: Vec<String> = Vec::new();
+        for r in &live_rows {
+            if awaiting_row.is_some_and(|a| std::ptr::eq(a, *r)) {
+                live.extend(self.awaiting_ansi(v, r, width));
+            } else {
+                live.extend(self.row_ansi(v, r, width));
+            }
+        }
+        // The highlighted message says it's waiting: no second spinner under it.
+        if working && awaiting.is_none() {
             let who = v.data.agents.iter().find(|a| a.2 == crate::model::StatusState::Working).map(|a| a.0.clone()).unwrap_or_else(|| t!("agent").into());
             let frame = SPINNER[self.tick % SPINNER.len()];
             live.push(to_ansi(&Line::from(vec![
@@ -607,6 +657,24 @@ fn is_settled(row: &Row, items: &[ThreadItem], last: bool, working: bool) -> boo
     }
 }
 
+/// The row of the owner's last message while nothing has come back after it
+/// (no text, thought, tool call, error or turn end), sent within
+/// [`AWAITING_MAX_MS`] of `now_ms`.
+fn awaiting_reply(rows: &[Row], items: &[ThreadItem], now_ms: i64) -> Option<usize> {
+    use crate::model::ItemKind as K;
+    let mine = |it: &ThreadItem| it.kind == K::UserMessage && it.agent.is_none() && it.author.is_none() && it.relay_to.is_none();
+    let i = items.iter().rposition(mine)?;
+    let it = &items[i];
+    if it.status != Some(ItemStatus::Completed) || now_ms.saturating_sub(it.at_ms) > AWAITING_MAX_MS {
+        return None;
+    }
+    let answered = items[i + 1..].iter().any(|later| matches!(later.kind, K::AssistantMessage | K::Thought | K::ToolCall | K::Error | K::TurnEnd));
+    if answered {
+        return None;
+    }
+    rows.iter().position(|r| matches!(r, Row::Prose(p) if *p == i))
+}
+
 /// The thread has moved on past item `i`, so the stream prints it as it
 /// stands, whatever its status still says.  Its own agent went on: a later
 /// turn, its turn's end, text or a thought after it, or, for a tool call,
@@ -659,14 +727,48 @@ fn render_row(v: &ThreadView, row: &Row, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn header_line(v: &ThreadView) -> Line<'static> {
-    let mut spans = vec![Span::styled(v.data.title.clone(), theme::accent_bold())];
+/// What the thread is, then who is on it, on one row of a pane `width`
+/// wide.  The title when it says something the messages don't; when it is
+/// only the start of the first message (a new thread's), the projects stand
+/// in for it.  The left part gives up room first, so the agents stay in sight.
+fn header_line(v: &ThreadView, width: usize) -> Line<'static> {
+    let mut agents: Vec<Span<'static>> = Vec::new();
     for (name, color, _) in &v.data.agents {
-        spans.push(Span::styled("  ·  ", theme::dim()));
-        spans.push(Span::styled(name.clone(), Style::default().fg(theme::agent_color(*color)).bold()));
+        agents.push(Span::styled("  ·  ", theme::dim()));
+        agents.push(Span::styled(name.clone(), Style::default().fg(theme::agent_color(*color)).bold()));
     }
+    let lead: Span<'static> = if title_repeats_first_message(&v.data) {
+        Span::styled(v.data.projects.join(", "), theme::bold())
+    } else {
+        Span::styled(v.data.title.clone(), theme::accent_bold())
+    };
+    if lead.content.is_empty() {
+        // A scratch thread named by its first message: the agents alone.
+        if let Some(first) = agents.first_mut() {
+            *first = Span::raw("");
+        }
+        return Line::from(agents);
+    }
+    let agents_width: usize = agents.iter().map(Span::width).sum();
+    // One column spare: a row that fills the pane exactly may wrap.
+    let room = width.saturating_sub(agents_width + 1).max(HEADER_TITLE_COLS_MIN);
+    let mut spans = vec![Span::styled(crate::util::ellipsize(&lead.content, room), lead.style)];
+    spans.extend(agents);
     Line::from(spans)
 }
+
+/// Whether the thread's title is just its first message's first line (as a
+/// new thread is named), which the pane shows right under the header anyway.
+fn title_repeats_first_message(d: &crate::model::ThreadData) -> bool {
+    use crate::model::ItemKind as K;
+    let first = d.items.iter().find(|it| it.kind == K::UserMessage && it.agent.is_none() && it.author.is_none());
+    let Some(ItemBody::Text(text)) = first.map(|it| &it.body) else { return false };
+    let first_line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    d.title == crate::util::title_line(text) || d.title == first_line
+}
+
+/// The fewest columns the header's title keeps, however many agents there are.
+const HEADER_TITLE_COLS_MIN: usize = 12;
 
 /// A styled line as ANSI text (SGR per span, reset at the end).
 pub fn to_ansi(line: &Line) -> String {
@@ -875,6 +977,38 @@ mod tests {
     }
 
     #[test]
+    fn the_header_is_one_row_and_keeps_the_agents_in_sight() {
+        let mut d = fixtures::data();
+        d.title = "can you help me refine https://github.com/solana-foundation/pay-web-ui/pull/49, using our design skill stageshow. i want to polish the 2 first section of the website (big swith super polished, and the storyscroll). make it great, beautiful, slick.".into();
+        let v = ThreadView::new("T1", d);
+        for width in [40usize, 80, 140] {
+            let line = to_ansi(&header_line(&v, width));
+            assert_eq!(screen_rows(&line, width), 1, "one row at {width}: {}", plain(&line));
+            assert!(plain(&line).ends_with("Atlas") && plain(&line).contains('…'), "{}", plain(&line));
+        }
+    }
+
+    #[test]
+    fn a_title_that_only_repeats_the_first_message_gives_way_to_the_projects() {
+        let mut d = fixtures::data();
+        let mut first = fixtures::item("u0", ItemKind::UserMessage, ItemBody::Text("can you help me refine https://github.com/o/pay-web-ui/pull/49, using our design skill stageshow and more words".into()), 1);
+        first.agent = None;
+        d.items.insert(0, first);
+        d.title = crate::util::title_line("can you help me refine https://github.com/o/pay-web-ui/pull/49, using our design skill stageshow and more words");
+        let v = ThreadView::new("T1", d.clone());
+        assert_eq!(plain(&to_ansi(&header_line(&v, 80))), "axel  ·  Atlas", "the project, not the message again");
+        // Renamed: the title says something of its own, so it shows.
+        d.title = "Polish the landing page".into();
+        let v = ThreadView::new("T1", d.clone());
+        assert_eq!(plain(&to_ansi(&header_line(&v, 80))), "Polish the landing page  ·  Atlas");
+        // A scratch thread named by its message: the agents alone.
+        d.title = crate::util::title_line("can you help me refine https://github.com/o/pay-web-ui/pull/49, using our design skill stageshow and more words");
+        d.projects.clear();
+        let v = ThreadView::new("T1", d);
+        assert_eq!(plain(&to_ansi(&header_line(&v, 80))), "Atlas");
+    }
+
+    #[test]
     fn ansi_styles_spans() {
         let l = Line::from(vec![Span::raw("a "), Span::styled("b", Style::default().fg(Color::Indexed(179)).bold())]);
         assert_eq!(to_ansi(&l), "a \x1b[1;38;5;179mb\x1b[0m");
@@ -931,6 +1065,34 @@ mod tests {
         let f4 = plain(&s.frame(&v, 80, 3));
         assert_eq!(s.live_lines, 1);
         assert!(f4.contains("Atlas is working…"), "{f4}");
+    }
+
+    #[test]
+    fn the_message_waiting_for_its_reply_is_highlighted_until_the_agent_answers() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut d = fixtures::data();
+        d.items[7].status = Some(ItemStatus::Allowed);
+        d.agents[0].2 = crate::model::StatusState::Working;
+        let mut sent = fixtures::item("u2", ItemKind::UserMessage, ItemBody::Text("ship it".into()), now);
+        sent.agent = None;
+        d.items.push(sent);
+        let mut v = ThreadView::new("T1", d.clone());
+        let mut s = Stream::default();
+        let raw = s.frame(&v, 80, 40);
+        let waiting = raw.lines().find(|l| plain(l).contains("ship it")).unwrap();
+        assert!(waiting.contains("38;2;255;117;101") && !waiting.contains("48;2;"), "the text in the accent colour, no background: {waiting:?}");
+        assert!(SENDING.iter().any(|f| plain(&raw).contains(&format!("{f} ship it"))), "a braille spinner for its `> `: {}", plain(&raw));
+        assert!(!plain(&raw).contains("Atlas is working…"), "one spinner, on the message");
+        // The spinner moves.
+        s.tick += 1;
+        assert_ne!(s.frame(&v, 80, 40), "");
+        // The agent answers: the message prints plain, once, with its `> `.
+        d.items.push(fixtures::item("a3", ItemKind::AssistantMessage, ItemBody::Text("On it.".into()), now + 1));
+        v.set_data(d);
+        let after = s.frame(&v, 80, 40);
+        assert!(plain(&after).contains("> ship it") && plain(&after).contains("On it."), "{}", plain(&after));
+        let message_line = after.lines().find(|l| plain(l).contains("ship it")).unwrap();
+        assert!(!message_line.contains("38;2;255;117;101m ship it") && !message_line.contains("38;2;255;117;101mship it"), "back to the normal colours once answered: {message_line:?}");
     }
 
     #[test]

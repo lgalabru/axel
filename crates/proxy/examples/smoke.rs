@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
         agent_pubkey: "smoke".into(),
         anthropic_upstream: std::env::var("AXEL_SMOKE_ANTHROPIC_UPSTREAM").ok(),
         openai_upstream,
+        throttle: None,
     };
     let proxy = Proxy::start(config, Arc::new(Print)).await?;
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&urls_path)?;

@@ -62,6 +62,12 @@ The body is what you'd tell a new colleague before they touch the repo. The fron
 lists the skills the project needs. Commit both with `AXEL.lock`, so every machine and
 every harness reads the same context. See [The AXEL.md file](/docs/axel-md).
 
+## Short on time or network
+
+On a train or at an airport, `axel expedite "…"` beats opening a thread: a fresh context
+means small requests (a long thread can send ~750 KB with every call), one agent means
+one upload at a time, and there's no window to set up. `axel expedite -c "…"` follows up.
+
 ## Steer without stopping
 
 Mid-turn, **Enter** drops your message into the agent's turn; it reads it at its next step

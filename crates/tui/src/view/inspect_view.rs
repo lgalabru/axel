@@ -520,6 +520,10 @@ fn inference_rows(ins: &Inspector, r: &ModelRequest, width: usize) -> Vec<Line<'
     if let Some(stop) = &r.stop_reason {
         status.extend([sep(), Span::raw(stop.clone())]);
     }
+    // Slowed on purpose (`AXEL_THROTTLE`): its timings are the throttle's.
+    if r.throttled {
+        status.extend([sep(), Span::styled(t!("network throttled"), theme::accent())]);
+    }
     let mut rows: Vec<(&'static str, Vec<Span<'static>>)> = vec![
         (t!("model"), [badge(r, None), vec![Span::styled(format!(" {}", r.provider.as_str()), theme::dim())]].concat()),
         (t!("endpoint"), vec![Span::raw(r.endpoint.clone()), sep(), Span::styled(if r.streamed { t!("streamed") } else { t!("not streamed") }, theme::dim())]),
@@ -568,6 +572,9 @@ fn inference_compact(ins: &Inspector, r: &ModelRequest, width: usize) -> Vec<Lin
     first.extend([Span::raw(" "), Span::styled(r.endpoint.clone(), theme::dim()), sep(), status_dot(r.outcome), Span::raw(format!(" {}", outcome_text(r.outcome)))]);
     if let Some(code) = r.http_status {
         first.push(Span::styled(format!(" {code}"), theme::dim()));
+    }
+    if r.throttled {
+        first.extend([sep(), Span::styled(t!("network throttled"), theme::accent())]);
     }
     first.extend([sep(), latency(ins, r, 0)]);
     if let Some(ms) = r.first_byte_ms {

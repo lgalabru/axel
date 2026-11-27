@@ -74,9 +74,27 @@ fn resolve_session(ctx: &Ctx, id: &str) -> Result<String> {
     }
 }
 
-/// Socket path for a session (local).
+/// Longest socket path a bind takes: `sun_path` is 104 bytes on macOS (108
+/// on Linux), the last one its terminating NUL.
+const SOCKET_PATH_BYTES_MAX: usize = 103;
+
+/// Socket path for a session (local): under the Axel home, or, when that is
+/// too deep for a socket (a long `AXEL_HOME`), in a directory of this user's
+/// under /tmp, which the host makes private before binding.
 pub fn socket_path(session_id: &str) -> PathBuf {
-    paths::home().join("run").join(format!("{session_id}.sock"))
+    socket_path_in(&paths::home(), session_id)
+}
+
+fn socket_path_in(home: &std::path::Path, session_id: &str) -> PathBuf {
+    let preferred = home.join("run").join(format!("{session_id}.sock"));
+    if preferred.as_os_str().len() <= SOCKET_PATH_BYTES_MAX {
+        return preferred;
+    }
+    // SAFETY: getuid has no failure mode.
+    let uid = unsafe { libc::getuid() };
+    let short = PathBuf::from(format!("/tmp/axel-{uid}")).join(format!("{session_id}.sock"));
+    debug_assert!(short.as_os_str().len() <= SOCKET_PATH_BYTES_MAX, "session ids are short");
+    short
 }
 
 pub fn log_path(session_id: &str) -> PathBuf {
@@ -142,7 +160,28 @@ fn session_meta(agent: &axel_store::Agent, cwd: &Path) -> Option<serde_json::Map
     meta.as_object().cloned()
 }
 
+/// A host that can't start (its adapter, its socket) ends its session with
+/// the reason, rather than leave it `starting` for whoever waits on it.
 fn host(session_id: &str) -> Result<()> {
+    let hosted = run_session_host(session_id);
+    if let Err(e) = &hosted
+        && let Ok(ctx) = Ctx::open()
+        && let Ok(owner) = ctx.owner()
+        && let Ok(Some(session)) = ctx.store.get_session(session_id)
+        && session.ended_at.is_none()
+    {
+        let reason = crate::cmd::text::fit(&format!("host failed: {e:#}"), HOST_FAILURE_REASON_COLUMNS);
+        if let Err(end) = ctx.store.end_session(&owner, session_id, Some(&reason)) {
+            eprintln!("axel: {}", t!("could not end the session: {error}", error = end));
+        }
+    }
+    hosted
+}
+
+/// Widest the end reason of a host that failed is kept (the full error is in its log).
+const HOST_FAILURE_REASON_COLUMNS: usize = 300;
+
+fn run_session_host(session_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
     let session = ctx.store.get_session(session_id)?.with_context(|| t!("no session {id}", id = session_id))?;
     if session.runtime != SessionRuntime::Managed {
@@ -159,22 +198,33 @@ fn host(session_id: &str) -> Result<()> {
         .map(|v| v.lines().filter(|l| !l.trim().is_empty()).map(PathBuf::from).collect())
         .unwrap_or_default();
     let disallowed: Vec<String> = Vec::new();
+    // Read, then dropped before `harness_env` copies `AXEL_*` into the
+    // harness: a session the agent summons gets no timeout it didn't ask for.
+    let idle_exit_after = idle_exit_after()?;
+    // SAFETY: single-threaded here, before any runtime starts.
+    unsafe { std::env::remove_var(IDLE_EXIT_ENV) };
 
     if let Some(profile) = ClaudeProfile::load(&agent.pubkey)? {
         profile.configure_host()?;
     }
+    // A bad network to replay (`AXEL_THROTTLE`), checked before anything
+    // starts: a malformed profile refuses the session rather than run it
+    // unthrottled.
+    let throttle = super::inspector::throttle_from_env()?;
     let mut env = harness_env(&thread.id, &session.id, &agent);
     // After harness_env, which edits our environment while single-threaded:
     // the proxy's runtime starts threads.
     let inspected = super::inspector::Session { session_id: &session.id, thread_id: &thread.id, agent_pubkey: &agent.pubkey, harness: &agent.harness };
     // Off unless the owner asked for it on this thread (`axel inspect on`, or
-    // AXEL_INSPECT=1 for one session); an unreadable switch is off.
+    // AXEL_INSPECT=1 for one session) or throttled it; an unreadable switch is off.
     let switched_on = ctx.store.thread_inspected(&thread.id).unwrap_or(false);
-    let inspection = super::inspector::start(&inspected, super::inspector::wanted(switched_on), &mut env);
-    let (on_turn, notices) = match &inspection {
-        super::inspector::Inspection::On(inspector) => (Some(inspector.turn_hook()), Vec::new()),
-        super::inspector::Inspection::Failed { notice } => (None, vec![notice.clone()]),
-        super::inspector::Inspection::Off => (None, Vec::new()),
+    let inspection = super::inspector::start(&inspected, super::inspector::wanted(switched_on), throttle.as_ref().map(|t| t.throttle), &mut env);
+    let (on_turn, notices) = match (&inspection, &throttle) {
+        (super::inspector::Inspection::On(inspector), Some(throttle)) => (Some(inspector.turn_hook()), vec![throttle.notice()]),
+        (super::inspector::Inspection::On(inspector), None) => (Some(inspector.turn_hook()), Vec::new()),
+        (super::inspector::Inspection::Failed { notice }, _) => (None, vec![notice.clone()]),
+        (super::inspector::Inspection::Off, Some(_)) => (None, vec![t!("the network is not throttled: only Claude and Codex sessions run through the proxy").to_string()]),
+        (super::inspector::Inspection::Off, None) => (None, Vec::new()),
     };
 
     let meta = session_meta(&agent, &cwd);
@@ -207,6 +257,7 @@ fn host(session_id: &str) -> Result<()> {
         // The inspector proxy stamps each model request with its turn.
         on_turn,
         notices,
+        idle_exit_after,
     };
     std::fs::create_dir_all(cfg.socket_path.parent().expect("socket_path joins onto the run directory"))?;
     std::fs::create_dir_all(cfg.log_path.parent().expect("log_path joins onto the logs directory"))?;
@@ -219,6 +270,28 @@ fn host(session_id: &str) -> Result<()> {
         inspector.stop();
     }
     hosted
+}
+
+/// The session's idle timeout, in whole seconds: once idle this long, its
+/// host ends it (`axel expedite` keeps sessions warm with it).
+pub const IDLE_EXIT_ENV: &str = "AXEL_IDLE_EXIT_SECS";
+
+/// [`IDLE_EXIT_ENV`], when set: at most a day; anything else is refused, so a
+/// typo never leaves a session running for good.
+fn idle_exit_after() -> Result<Option<std::time::Duration>> {
+    let Ok(text) = std::env::var(IDLE_EXIT_ENV) else { return Ok(None) };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let Ok(secs) = text.parse::<u64>() else {
+        bail!("{}", t!("{name} must be a number of seconds, not {value}", name = IDLE_EXIT_ENV, value = format!("{text:?}")));
+    };
+    let after = std::time::Duration::from_secs(secs);
+    if after > axel_acp::IDLE_EXIT_AFTER_MAX {
+        bail!("{}", t!("{name} is at most {max} seconds (a day), not {value}", name = IDLE_EXIT_ENV, max = axel_acp::IDLE_EXIT_AFTER_MAX.as_secs(), value = secs));
+    }
+    Ok(Some(after))
 }
 
 /// The environment the adapter and harness run with: credentials, PATH and
@@ -265,6 +338,15 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+
+    #[test]
+    fn a_socket_too_deep_for_bind_moves_to_a_short_private_place() {
+        let id = "01M7T9G0RSN163VFVKKM3QSXS7";
+        let shallow = socket_path_in(std::path::Path::new("/Users/me/.axel"), id);
+        assert_eq!(shallow, std::path::Path::new("/Users/me/.axel/run").join(format!("{id}.sock")));
+        let deep = socket_path_in(std::path::Path::new("/var/folders/c3/sqn96gsn7fv20gfgnr2lty540000gn/T/axel-bench-hfb4u63u"), id);
+        assert!(deep.to_string_lossy().starts_with("/tmp/axel-") && deep.as_os_str().len() <= SOCKET_PATH_BYTES_MAX, "{}", deep.display());
+    }
 
     /// `bin/claude` in a fresh directory, linked to `target` (created empty).
     fn linked(target: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {

@@ -480,6 +480,12 @@ const MIGRATIONS: &[&str] = &[
         since_ms   INTEGER NOT NULL
     );
     "#,
+    // v12: whether the proxy throttled a request on purpose (`AXEL_THROTTLE`,
+    // a testing aid), so slow or lost requests read as what they were.
+    // The column is added by `post_migrate`.
+    r#"
+    -- model_requests.throttled: see post_migrate.
+    "#,
 ];
 
 /// The SQL of migration `version` (1-based), for tests that stage a database by hand.
@@ -520,6 +526,7 @@ fn post_migrate(tx: &Connection, version: i64) -> Result<(), Error> {
         6 => replay_threads_holding(tx, crate::kind::USAGE),
         8 => add_column_if_missing(tx, "turns", "changes_json", "TEXT"),
         10 => add_column_if_missing(tx, "agents", "effort", "TEXT"),
+        12 => add_column_if_missing(tx, "model_requests", "throttled", "INTEGER NOT NULL DEFAULT 0"),
         _ => Ok(()),
     }
 }

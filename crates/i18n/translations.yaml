@@ -1890,3 +1890,73 @@
   zh-Hans: "记录这个话题：现在重启 {agents}，让它也被记录？它的对话会在你的下一条消息时继续（n：仅新会话）"
 "stop recording: restart {agents} now so it stops too? Its conversation continues on your next message (n: only new sessions)":
   zh-Hans: "停止记录：现在重启 {agents}，让它也停止记录？它的对话会在你的下一条消息时继续（n：仅新会话）"
+"· {n} updates of the loaded conversation's history skipped":
+  zh-Hans: "· 已跳过所载入对话历史中的 {n} 条更新"
+"cancelling… (Ctrl+C again to leave it running)":
+  zh-Hans: "正在取消…（再按 Ctrl+C 让它继续运行并退出）"
+"could not cancel: {error}":
+  zh-Hans: "无法取消：{error}"
+"could not stop the session: {error}":
+  zh-Hans: "无法停止会话：{error}"
+"no agents yet: create one with `axel agent new <name> claude`":
+  zh-Hans: "还没有智能体：用 `axel agent new <name> claude` 创建一个"
+"no terminal to answer from: answer it in Axel (axel thread open)":
+  zh-Hans: "没有可作答的终端：请在 Axel 中回答（axel thread open）"
+"nothing to continue yet: run `axel expedite \"…\"` first":
+  zh-Hans: "还没有可继续的内容：请先运行 `axel expedite \"…\"`"
+"number:":
+  zh-Hans: "编号："
+"numbers, comma-separated:":
+  zh-Hans: "编号，用逗号分隔："
+"pick 1 to {n}":
+  zh-Hans: "请选择 1 到 {n}"
+"the last expedite thread is gone; start a new one":
+  zh-Hans: "上一个 expedite 话题已不存在；请新开一个"
+"the session didn't start; its log is in ~/.axel/logs/{session}.host.log":
+  zh-Hans: "会话没有启动；日志在 ~/.axel/logs/{session}.host.log"
+"what should the agent do? `axel expedite \"fix the failing test\"`":
+  zh-Hans: "要让智能体做什么？`axel expedite \"修复失败的测试\"`"
+"which agent? Pass --agent <name>":
+  zh-Hans: "哪个智能体？请传入 --agent <name>"
+"{glyph} {took} · {tokens} tokens · ~${cost} · more: axel expedite -c \"…\" · all of it: axel thread open {thread}":
+  zh-Hans: "{glyph} {took} · {tokens} token · ~${cost} · 继续：axel expedite -c \"…\" · 查看全部：axel thread open {thread}"
+"idle for {seconds}s: ending the session":
+  zh-Hans: "已空闲 {seconds} 秒：结束会话"
+"{name} must be a number of seconds, not {value}":
+  zh-Hans: "{name} 必须是秒数，而不是 {value}"
+"{name} is at most {max} seconds (a day), not {value}":
+  zh-Hans: "{name} 最多为 {max} 秒（一天），而不是 {value}"
+"could not take the prompt back from the busy session: {error}":
+  zh-Hans: "无法从忙碌的会话中收回提示：{error}"
+"the session took the prompt but never recorded it; its log is in ~/.axel/logs/{session}.host.log":
+  zh-Hans: "会话接收了提示，却没有记录下来；日志在 ~/.axel/logs/{session}.host.log"
+"session {session} holds more items than expedite reads":
+  zh-Hans: "会话 {session} 的条目超出了 expedite 能读取的数量"
+"a spare needs a --keep above 0: it waits for the next prompt":
+  zh-Hans: "备用会话需要大于 0 的 --keep：它要等待下一个提示"
+"✓ a spare {agent} is already ready here":
+  zh-Hans: "✓ 这里已有一个备用的 {agent} 准备就绪"
+"expedite: a spare, waiting for its prompt":
+  zh-Hans: "expedite：备用会话，等待提示"
+"✓ a spare {agent} is ready ({took}) · kept warm for {keep} · the next axel expedite \"…\" here takes it":
+  zh-Hans: "✓ 备用的 {agent} 已就绪（{took}）· 保持预热 {keep} · 在这里运行的下一个 axel expedite \"…\" 会使用它"
+"{value} is not a duration: try 0, 90s, 10m or 1h":
+  zh-Hans: "{value} 不是时长：试试 0、90s、10m 或 1h"
+"a session is kept warm for a day at most, not {value}":
+  zh-Hans: "会话最多保持预热一天，而不是 {value}"
+"writing {path}":
+  zh-Hans: "正在写入 {path}"
+"{glyph} {took} · {tokens} tokens · ~${cost} · kept warm for {keep} · more: axel expedite -c \"…\" · all of it: axel thread open {thread}":
+  zh-Hans: "{glyph} {took} · {tokens} token · ~${cost} · 保持预热 {keep} · 继续：axel expedite -c \"…\" · 查看全部：axel thread open {thread}"
+"network throttled: {name} ({profile})":
+  zh-Hans: "网络已限速：{name}（{profile}）"
+"AXEL_THROTTLE is not a network profile":
+  zh-Hans: "AXEL_THROTTLE 不是有效的网络配置"
+"the network is not throttled: only Claude and Codex sessions run through the proxy":
+  zh-Hans: "网络未限速：只有 Claude 和 Codex 会话经过代理"
+"network throttled":
+  zh-Hans: "网络已限速"
+"the session ended before it answered: {reason}":
+  zh-Hans: "会话在回答之前就结束了：{reason}"
+"could not end the session: {error}":
+  zh-Hans: "无法结束会话：{error}"
