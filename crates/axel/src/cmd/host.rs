@@ -43,8 +43,9 @@ pub const DELEGATION_SECS: u64 = 7 * 24 * 3600;
 /// Batch size for event and item transfers.
 const BATCH: usize = 500;
 /// `PATH` on the host: non-interactive SSH sessions get only the system dirs.
-const REMOTE_PATH: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const REMOTE_PATH: &str = "/opt/homebrew/bin:/opt/homebrew/sbin:$HOME/.local/bin:$HOME/.local/share/mise/shims:$HOME/.asdf/shims:$HOME/.volta/bin:$HOME/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 /// The Rex CLI inside the Rex app bundle, when `rex` isn't on `PATH`.
+#[cfg(target_os = "macos")]
 const REX_IN_APP: &str = "Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS/rex";
 /// The Rex session remote jobs run in, on the host.
 const REX_SESSION: &str = "axel";
@@ -538,6 +539,7 @@ pub struct Reached {
     /// The machine as a host row would hold it, with the key it said it has.
     pub host: Environment,
     remote_label: String,
+    remote_platform: String,
     missing: Vec<String>,
 }
 
@@ -547,7 +549,7 @@ pub struct Reached {
 /// putting it on a machine we haven't verified yet gives nothing away.
 pub fn reach(label: &str, ssh_target: Option<&str>) -> Result<Reached> {
     let target = ssh_target.unwrap_or(label);
-    place_binary(target)?;
+    let remote_platform = place_binary(target)?;
     let mut host = Environment {
         id: String::new(),
         label: label.into(),
@@ -563,7 +565,7 @@ pub fn reach(label: &str, ssh_target: Option<&str>) -> Result<Reached> {
     assert!(!host_pubkey.is_empty(), "a host always says its key");
     host.id = environment_id;
     host.host_pubkey = Some(host_pubkey);
-    Ok(Reached { host, remote_label, missing })
+    Ok(Reached { host, remote_label, remote_platform, missing })
 }
 
 /// Give a reached machine what it needs to run our agents (our skills, and
@@ -581,7 +583,7 @@ pub fn adopt(ctx: &Ctx, reached: &Reached, install: bool) -> Result<()> {
     }
     let mut missing = reached.missing.clone();
     if !missing.is_empty() && install {
-        install_deps(target, &missing)?;
+        install_deps(target, &reached.remote_platform, &missing)?;
         if let Response::Hello { missing: m, .. } = call(host, &Request::Hello)? {
             missing = m;
         }
@@ -606,15 +608,17 @@ const INSTALLER_URL: &str = "https://axel.md/install";
 
 /// Make `~/.local/bin/axel` on `target` an axel that can answer us: this
 /// very binary on a machine of the same platform, else a release build.
-fn place_binary(target: &str) -> Result<()> {
+/// Returns the remote `uname -sm` output.
+fn place_binary(target: &str) -> Result<String> {
     let here = String::from_utf8(Command::new("uname").arg("-sm").output()?.stdout)?.trim().to_string();
     let there = String::from_utf8(ssh(target, "uname -sm", b"")?)?.trim().to_string();
     println!("{}", t!("{target}: {there}, reachable", target = target, there = there));
     if here == there {
-        copy_binary(target)
+        copy_binary(target)?;
     } else {
-        place_release(target, &here, &there)
+        place_release(target, &here, &there)?;
     }
+    Ok(there)
 }
 
 /// Copy this binary to `~/.local/bin/axel` on `target`.
@@ -668,15 +672,26 @@ fn place_release(target: &str, here: &str, there: &str) -> Result<()> {
     }
 }
 
+/// Check that `version` is a 3-component release version (`MAJOR.MINOR.PATCH`)
+/// safe to pass to the remote installer.  Pre-release, source-build, and
+/// malformed versions return an error so [`place_release`] falls back to an
+/// existing binary instead of panicking.
+fn validate_release_version(version: &str) -> Result<()> {
+    let mut parts = version.split('.');
+    let is_digits = |seg: Option<&str>| seg.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    let valid = is_digits(parts.next()) && is_digits(parts.next()) && is_digits(parts.next()) && parts.next().is_none();
+    if !valid {
+        bail!("{}", t!("not a release version: {version}", version = version));
+    }
+    Ok(())
+}
+
 /// Run the release installer on `target` for `version`.  The script is
 /// fetched whole before `sh` runs it, so a failed download fails here with
 /// curl's error instead of piping nothing into `sh`, which exits 0.  The
 /// caller still asks the installed binary its version afterwards.
 fn install_release(target: &str, version: &str) -> Result<()> {
-    assert!(
-        !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.'),
-        "a crate version is digits and dots: {version}"
-    );
+    validate_release_version(version)?;
     println!("{}", t!("{target}: installing the axel {version} release", target = target, version = version));
     ssh(
         target,
@@ -697,18 +712,39 @@ fn remote_version(target: &str) -> Result<Option<String>> {
     Ok(version.filter(|v| !v.is_empty()).map(String::from))
 }
 
-fn install_deps(target: &str, missing: &[String]) -> Result<()> {
-    let mut steps: Vec<&str> = Vec::new();
+/// Commands to run on `target` to install `missing` tools.  Only macOS has a
+/// predictable package manager (`brew`); other platforms bail with a hint
+/// naming the host, platform, and missing tools.
+fn install_plan(target: &str, remote_platform: &str, missing: &[String]) -> Result<Vec<&'static str>> {
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !remote_platform.starts_with("Darwin") {
+        bail!(
+            "{}",
+            t!(
+                "{target} ({platform}) is missing {missing}: install them with your system package manager or version manager, then rerun",
+                target = target,
+                platform = remote_platform,
+                missing = missing.join(", ")
+            )
+        );
+    }
+    if missing.iter().any(|m| m == "git") {
+        bail!("{}", t!("git is missing on {target}: install the Xcode command line tools there (xcode-select --install)", target = target));
+    }
+    let mut steps: Vec<&'static str> = Vec::new();
     if missing.iter().any(|m| m == "node") {
         steps.push("brew install node");
     }
     if missing.iter().any(|m| m == "claude") {
         steps.push("npm install -g @anthropic-ai/claude-code");
     }
-    if missing.iter().any(|m| m == "git") {
-        bail!("{}", t!("git is missing on {target}: install the Xcode command line tools there (xcode-select --install)", target = target));
-    }
-    for step in steps {
+    Ok(steps)
+}
+
+fn install_deps(target: &str, remote_platform: &str, missing: &[String]) -> Result<()> {
+    for step in install_plan(target, remote_platform, missing)? {
         println!("{target}: {step}");
         ssh(target, &format!("env PATH=\"{REMOTE_PATH}\" {step}"), b"")?;
     }
@@ -740,13 +776,24 @@ fn copy_dir(target: &str, dir: &Path) -> Result<()> {
     let mut copied = CopyTotals::default();
     let mut ancestors = vec![std::fs::canonicalize(dir).with_context(|| dir.display().to_string())?];
     stage_dir(dir, staging.path(), &mut ancestors, &mut copied)?;
-    let tar = Command::new("tar").arg("-C").arg(staging.path()).args(["-cf", "-", "."]).output()?;
+    let archive = tar_dir(staging.path()).with_context(|| format!("tar {}", dir.display()))?;
+    let rel = shell_quote(&rel.to_string_lossy());
+    ssh(target, &format!("mkdir -p {rel} && tar -C {rel} -xf -"), &archive)?;
+    Ok(())
+}
+
+/// Archive `dir`'s contents as a tar stream, suppressing macOS AppleDouble
+/// (`._*`) and extended-attribute headers so Linux `tar` unpacks it cleanly.
+fn tar_dir(dir: &Path) -> Result<Vec<u8>> {
+    let mut cmd = Command::new("tar");
+    cmd.env("COPYFILE_DISABLE", "1");
+    #[cfg(target_os = "macos")]
+    cmd.arg("--no-xattrs");
+    let tar = cmd.arg("-C").arg(dir).args(["-cf", "-", "."]).output()?;
     if !tar.status.success() {
         bail!("tar {}: {}", dir.display(), String::from_utf8_lossy(&tar.stderr));
     }
-    let rel = shell_quote(&rel.to_string_lossy());
-    ssh(target, &format!("mkdir -p {rel} && tar -C {rel} -xf -"), &tar.stdout)?;
-    Ok(())
+    Ok(tar.stdout)
 }
 
 /// The deepest directory [`stage_dir`] descends to.  Skills nest two or
@@ -1901,7 +1948,14 @@ fn job_work_dir(job: &Job) -> Result<PathBuf> {
 
 /// The host's Rex CLI, if Rex is installed.
 fn rex_cli() -> Option<PathBuf> {
-    launch::which("rex").or_else(|| dirs::home_dir().map(|h| h.join(REX_IN_APP)).filter(|p| p.exists()))
+    #[cfg(target_os = "macos")]
+    {
+        launch::which("rex").or_else(|| dirs::home_dir().map(|h| h.join(REX_IN_APP)).filter(|p| p.exists()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        launch::which("rex")
+    }
 }
 
 /// Run the session host in a new window of the `axel` Rex session, so it
@@ -2334,5 +2388,106 @@ mod tests {
         assert!(matches!(r, Request::PullItems { cursor: 7 }));
         assert!(repo_dir("../x").is_err() && repo_dir("a/b").is_err() && repo_dir("github.com__a__b").is_ok());
         assert_eq!(shell_quote("ControlPath=/a b/%C"), "'ControlPath=/a b/%C'");
+    }
+
+    #[test]
+    fn remote_path_places_version_manager_shims_and_linux_toolchains_before_system_dirs() {
+        let entries: Vec<&str> = REMOTE_PATH.split(':').collect();
+        let expected_order = [
+            "$HOME/.local/bin",
+            "$HOME/.local/share/mise/shims",
+            "$HOME/.asdf/shims",
+            "$HOME/.volta/bin",
+            "$HOME/.cargo/bin",
+            "/home/linuxbrew/.linuxbrew/bin",
+            "/home/linuxbrew/.linuxbrew/sbin",
+            "/usr/local/bin",
+            "/usr/bin",
+        ];
+        let positions: Vec<usize> = expected_order
+            .iter()
+            .map(|dir| entries.iter().position(|e| e == dir).unwrap_or_else(|| panic!("REMOTE_PATH missing {dir}: {REMOTE_PATH}")))
+            .collect();
+        for pair in positions.windows(2) {
+            assert!(pair[0] < pair[1], "REMOTE_PATH out of order: {REMOTE_PATH}");
+        }
+    }
+
+    #[test]
+    fn tar_dir_omits_appledouble_and_xattr_headers() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("SKILL.md");
+        std::fs::write(&file, "rules").unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            let status = Command::new("xattr").args(["-w", "com.example.axel_test", "1"]).arg(&file).status().unwrap();
+            assert!(status.success(), "setting an xattr on the temp file");
+        }
+
+        let archive = tar_dir(root.path()).unwrap();
+        let mut child = Command::new("tar").args(["-tf", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(&archive).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "tar -tf -: {}", String::from_utf8_lossy(&out.stderr));
+        let members: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect();
+        assert!(members.iter().any(|m| m.ends_with("SKILL.md")), "missing SKILL.md in {members:?}");
+        assert!(
+            members.iter().all(|m| !m.starts_with("._") && !m.contains("/._")),
+            "unexpected AppleDouble member in {members:?}"
+        );
+        assert!(
+            !archive.windows(b"LIBARCHIVE.xattr".len()).any(|w| w == b"LIBARCHIVE.xattr"),
+            "archive carried macOS LIBARCHIVE.xattr header"
+        );
+    }
+
+    #[test]
+    fn install_plan_uses_homebrew_on_darwin_and_package_manager_hint_on_linux() {
+        let missing = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            install_plan("mini", "Darwin arm64", &missing(&["node", "claude"])).unwrap(),
+            vec!["brew install node", "npm install -g @anthropic-ai/claude-code"]
+        );
+        let darwin_git = install_plan("mini", "Darwin arm64", &missing(&["git"])).unwrap_err();
+        assert!(format!("{darwin_git:#}").contains("xcode-select --install"), "{darwin_git:#}");
+
+        assert_eq!(install_plan("linux-box", "Linux x86_64", &missing(&[])).unwrap(), Vec::<&str>::new());
+
+        let linux_git = install_plan("linux-box", "Linux x86_64", &missing(&["git"])).unwrap_err();
+        let linux_git_msg = format!("{linux_git:#}");
+        assert!(linux_git_msg.contains("linux-box"), "{linux_git_msg}");
+        assert!(linux_git_msg.contains("Linux x86_64"), "{linux_git_msg}");
+        assert!(linux_git_msg.contains("git"), "{linux_git_msg}");
+        assert!(!linux_git_msg.contains("xcode-select"), "{linux_git_msg}");
+
+        let linux_tools = install_plan("linux-box", "Linux aarch64", &missing(&["node", "claude"])).unwrap_err();
+        let linux_tools_msg = format!("{linux_tools:#}");
+        assert!(linux_tools_msg.contains("linux-box"), "{linux_tools_msg}");
+        assert!(linux_tools_msg.contains("Linux aarch64"), "{linux_tools_msg}");
+        assert!(linux_tools_msg.contains("node, claude"), "{linux_tools_msg}");
+        assert!(!linux_tools_msg.contains("brew"), "{linux_tools_msg}");
+    }
+
+    #[test]
+    fn validate_release_version_accepts_only_three_part_release_versions() {
+        for valid in ["0.3.168", "1.0.0"] {
+            assert!(validate_release_version(valid).is_ok(), "expected valid: {valid:?}");
+        }
+        for invalid in [
+            "",
+            ".",
+            ".1",
+            "1.",
+            "1..2",
+            "42",
+            "0.3",
+            "1.2.3.4",
+            "0.3.168-rc.1",
+            "0.3.168+local.abc",
+            "0.3.1; id",
+        ] {
+            assert!(validate_release_version(invalid).is_err(), "expected error: {invalid:?}");
+        }
     }
 }

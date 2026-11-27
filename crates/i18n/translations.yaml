@@ -1333,6 +1333,8 @@
   zh-Hans: "{target} 上已有 axel {version}"
 "{target}: installing the axel {version} release":
   zh-Hans: "{target}：正在安装 axel {version} 发布版"
+"not a release version: {version}":
+  zh-Hans: "不是发布版本号：{version}"
 "installed the axel {version} release in ~/.local/bin":
   zh-Hans: "已将 axel {version} 发布版安装到 ~/.local/bin"
 "the installer put another version there":
@@ -1367,6 +1369,8 @@
   zh-Hans: "{target} 上缺少：{missing}。请加上 --install 重新运行，或自行安装。"
 "git is missing on {target}: install the Xcode command line tools there (xcode-select --install)":
   zh-Hans: "{target} 上没有 git：请在那里安装 Xcode 命令行工具（xcode-select --install）"
+"{target} ({platform}) is missing {missing}: install them with your system package manager or version manager, then rerun":
+  zh-Hans: "{target}（{platform}）缺少 {missing}：请使用系统包管理器或版本管理器安装后重新运行"
 "{path} is outside your home":
   zh-Hans: "{path} 不在你的主目录下"
 "no hosts; add one with `axel host add LABEL`":
