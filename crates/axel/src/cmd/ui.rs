@@ -574,8 +574,7 @@ impl PaneKind {
     }
 }
 
-/// Rows a web composer pane starts with: its field, its controls, and
-/// Ladybird's status line.
+/// Rows a web composer pane starts with: its field and its controls.
 const WEB_COMPOSER_ROWS: u16 = 12;
 
 struct ThreadPaneCommands {
@@ -707,11 +706,10 @@ pub(super) fn dock_thread(ctx: &Ctx, rex: &axel_rex::Rex, thread_id: &str) -> Re
 /// panes open here.  Docking closes Axel's floating panes, this one included.
 pub(super) fn relaunch_thread_panes(ctx: &Ctx, thread_id: &str) -> Result<bool> {
     let out = std::process::Command::new("ps").args(["-eo", "pid,command"]).output().context(t!("listing processes"))?;
-    let needle = format!("axel thread compose {thread_id}");
     let mut composers: Vec<i32> = Vec::new();
     let mut origin: Option<String> = None;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if !line.contains(&needle) {
+        if !is_composer_of(line, thread_id) {
             continue;
         }
         // Rex starts each pane through a login wrapper whose command line
@@ -746,6 +744,14 @@ pub(super) fn relaunch_thread_panes(ctx: &Ctx, thread_id: &str) -> Result<bool> 
     std::thread::sleep(std::time::Duration::from_millis(300));
     dock_thread(ctx, rex, thread_id)?;
     Ok(true)
+}
+
+/// Whether a `ps` line is a composer of `thread_id`: the terminal one
+/// (`axel thread compose`) or the web one (`axel web pane … --view composer`).
+fn is_composer_of(line: &str, thread_id: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    words.windows(3).any(|w| w == ["thread", "compose", thread_id])
+        || (words.windows(3).any(|w| w == ["web", "pane", thread_id]) && words.windows(2).any(|w| w == ["--view", "composer"]))
 }
 
 /// The pane `axel` was typed in, when the thread can take its place: in the
@@ -1697,6 +1703,17 @@ fn label_block_with_thread(ctx: &Ctx, rex: &axel_rex::Rex, block: &str, thread_i
 mod dock_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_thread_view_is_relaunched_whether_its_composer_is_text_or_web() {
+        let t = "abc123";
+        assert!(is_composer_of("4242 /Users/me/.local/bin/axel thread compose abc123", t));
+        assert!(is_composer_of("4243 /Users/me/.local/bin/axel web pane abc123 --view composer", t));
+        assert!(!is_composer_of("4244 /Users/me/.local/bin/axel web pane abc123 --view messages", t), "only the composer undocks the view");
+        assert!(!is_composer_of("4245 /Users/me/.local/bin/axel web pane abc1234 --view composer", t), "another thread");
+        assert!(!is_composer_of("4246 /Users/me/.local/bin/axel thread compose other", t));
+        assert!(!is_composer_of("4247 /Users/me/.local/bin/axel thread compose abc1234", t), "a longer id isn't this one");
+    }
 
     /// A window: the user's shell on the left, a docked thread on the right.
     fn view() -> serde_json::Value {
