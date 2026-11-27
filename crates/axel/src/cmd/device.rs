@@ -12,7 +12,8 @@ use axel_i18n::t;
 use axel_identity::{PublicKey, attest, code_matches, confirm_code};
 use axel_inbox::EnvelopeBuilder;
 use axel_store::{
-    Agent, AnnounceWire, DeviceOp, DeviceRecord, Environment, NewAgent, PairingRoute, ProfileWire, kind,
+    Agent, AgentProfile, AnnounceWire, DeviceOp, DeviceRecord, Environment, NewAgent, PairingRoute, ProfileWire, TeamEdit,
+    TeamMember, kind,
 };
 
 use super::Ctx;
@@ -49,7 +50,12 @@ pub fn link(label: &str, ssh_target: Option<&str>, route: PairingRoute, code: Op
         t!("{label} is linked ({route}): its key {key} now speaks for you. Synced {pushed} out, {pulled} in.",
             label = label, route = route, key = device_key, pushed = report.pushed, pulled = report.pulled)
     );
-    Ok(())
+    // A home that had agents of its own may share names with ours (#40).
+    let me = ctx.store.principal(&owner.public().to_base58())?;
+    if !merge_identical(&ctx, &me, None)?.is_empty() {
+        super::host::sync_host(&ctx, &host, false)?;
+    }
+    print_clashes(&ctx, &me, None)
 }
 
 /// Check that the route to `device` proves it is the machine we meant.
@@ -129,6 +135,149 @@ pub fn revoke(label: &str) -> Result<()> {
     }
     println!("{}", t!("{label} is revoked: nothing it signs from now on speaks for you", label = label));
     Ok(())
+}
+
+/// `axel device merge [NAME] [--keep PROFILE | --rename PROFILE NEW_NAME]`.
+pub fn merge(name: Option<&str>, keep: Option<&str>, rename: Option<&[String]>) -> Result<()> {
+    let ctx = Ctx::open()?;
+    let me = ctx.store.principal(&ctx.owner()?.public().to_base58())?;
+    match (name, keep, rename) {
+        (Some(name), Some(keep), _) => {
+            let clash = clash_named(&ctx, &me, name)?;
+            let kept = pick(&clash, keep)?;
+            for other in clash.iter().filter(|p| p.profile_id != kept.profile_id) {
+                merge_into(&ctx, &me, other, kept)?;
+            }
+        }
+        (Some(name), None, Some([profile, new_name])) => {
+            let clash = clash_named(&ctx, &me, name)?;
+            let renamed = pick(&clash, profile)?;
+            let new_name = super::agent::valid_name(new_name)?;
+            ctx.store.rename_profile(&renamed.profile_id, new_name)?;
+            println!("{}", t!("{id} is now {name}", id = renamed.profile_id, name = new_name));
+        }
+        (only, None, None) => {
+            merge_identical(&ctx, &me, only)?;
+        }
+        _ => unreachable!("clap requires NAME with --keep or --rename, and --rename takes two values"),
+    }
+    spread(&ctx)?;
+    if ctx.store.name_clashes(&me)?.is_empty() {
+        println!("{}", t!("no two agents of yours share a name"));
+        return Ok(());
+    }
+    print_clashes(&ctx, &me, name)
+}
+
+/// Merge every agent profile that shares its name (`only` that name, when
+/// given) and its definition (harness, model, prompt...) with an older one
+/// of ours into the oldest.  Every device picks the same one, so two
+/// merging at once agree.
+fn merge_identical(ctx: &Ctx, me: &str, only: Option<&str>) -> Result<Vec<String>> {
+    let only = only.map(|n| n.trim().trim_start_matches('@'));
+    let mut merged = Vec::new();
+    for clash in ctx.store.name_clashes(me)? {
+        if only.is_some_and(|n| n != clash[0].name) {
+            continue;
+        }
+        let (oldest, rest) = clash.split_first().expect("a clash has two or more profiles");
+        for other in rest.iter().filter(|p| p.same_definition(oldest)) {
+            merge_into(ctx, me, other, oldest)?;
+            merged.push(other.profile_id.clone());
+        }
+    }
+    Ok(merged)
+}
+
+/// Merge `from` into `into`: its instances and its team seats go to `into`.
+fn merge_into(ctx: &Ctx, me: &str, from: &AgentProfile, into: &AgentProfile) -> Result<()> {
+    assert_eq!(from.name, into.name, "only profiles that share a name merge");
+    let teams = ctx.store.teams_of_profile(&from.profile_id)?;
+    ctx.store.merge_profile(&from.profile_id, &into.profile_id, me)?;
+    for team in teams {
+        let role = team.members.iter().find(|m| m.profile_id == from.profile_id).map(|m| m.role.clone()).unwrap_or_default();
+        let has_into = team.members.iter().any(|m| m.profile_id == into.profile_id);
+        let edit = TeamEdit {
+            add: if has_into { Vec::new() } else { vec![TeamMember { profile_id: into.profile_id.clone(), role }] },
+            remove: vec![from.profile_id.clone()],
+            lead: (team.lead.as_deref() == Some(from.profile_id.as_str())).then(|| into.profile_id.clone()),
+            skills: None,
+            reach: None,
+        };
+        let edited = ctx.store.edit_team(&team.team_id, &edit)?;
+        super::team::publish(ctx, &edited)?;
+    }
+    println!("{}", t!("merged {from} into {into} ({name}): one agent now", from = from.profile_id, into = into.profile_id, name = into.name));
+    Ok(())
+}
+
+/// The profiles of ours named `name`, two or more of them.
+fn clash_named(ctx: &Ctx, me: &str, name: &str) -> Result<Vec<AgentProfile>> {
+    let name = name.trim().trim_start_matches('@');
+    ctx.store
+        .name_clashes(me)?
+        .into_iter()
+        .find(|clash| clash[0].name == name)
+        .with_context(|| t!("only one agent of yours is named {name}: nothing to settle", name = name))
+}
+
+/// The profile in `clash` whose id is or starts with `id`.
+fn pick<'a>(clash: &'a [AgentProfile], id: &str) -> Result<&'a AgentProfile> {
+    let id = id.trim();
+    let mut found = clash.iter().filter(|p| !id.is_empty() && p.profile_id.starts_with(id));
+    match (found.next(), found.next()) {
+        (Some(profile), None) => Ok(profile),
+        (Some(_), Some(_)) => bail!("{}", t!("{id} starts more than one of these profile ids; give more of it", id = id)),
+        (None, _) => bail!("{}", t!("no agent named {name} has profile id {id}", name = clash[0].name, id = id)),
+    }
+}
+
+/// Sign what changed and send it to every linked device now, as `revoke`
+/// does; a device we can't reach gets it on its next sync.
+fn spread(ctx: &Ctx) -> Result<()> {
+    publish(ctx)?;
+    for host in ctx.store.hosts()? {
+        if is_linked(ctx, &host)?
+            && let Err(e) = super::host::sync_host(ctx, &host, false)
+        {
+            eprintln!("{}", t!("{host}: {error}", host = host.label, error = format!("{e:#}")));
+        }
+    }
+    Ok(())
+}
+
+/// The names still shared (just `name`, when given), each with its
+/// profiles and the two ways to settle it.
+fn print_clashes(ctx: &Ctx, me: &str, name: Option<&str>) -> Result<()> {
+    for clash in ctx.store.name_clashes(me)? {
+        let shared = &clash[0].name;
+        if name.is_some_and(|n| n.trim().trim_start_matches('@') != shared) {
+            continue;
+        }
+        println!("{}", t!("{n} agents of yours are named {name}:", n = clash.len(), name = shared));
+        for profile in &clash {
+            let runs = match &profile.model {
+                Some(model) => format!("{}/{model}", profile.harness.as_str()),
+                None => profile.harness.as_str().to_string(),
+            };
+            println!("  {:<30} {:<24} {}", profile.profile_id, runs, instance_places(ctx, &profile.profile_id)?.join(", "));
+        }
+        println!("{}", t!("  keep one:   axel device merge {name} --keep PROFILE", name = shared));
+        println!("{}", t!("  or rename:  axel device merge {name} --rename PROFILE NEW_NAME", name = shared));
+    }
+    Ok(())
+}
+
+/// Where a profile's instances run, for people.
+fn instance_places(ctx: &Ctx, profile_id: &str) -> Result<Vec<String>> {
+    let mut places = Vec::new();
+    for instance in ctx.store.profile_instances(profile_id)? {
+        places.push(match &instance.device {
+            None => t!("this machine").to_string(),
+            Some(device) => ctx.store.device(device)?.map_or_else(|| device.clone(), |d| d.label),
+        });
+    }
+    Ok(places)
 }
 
 /// Whether `host` is a live device of the owner this machine speaks for.

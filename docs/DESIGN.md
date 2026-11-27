@@ -482,6 +482,16 @@ claim another machine. From then on:
   machine for the first time gets that machine's own instance: a new key, attested by
   the machine, announced with kind 121. `@name` resolves to this machine's instance,
   else the one on a known host, which runs it there.
+- **Two homes, one name.** Linking a home that had agents of its own can leave two live
+  profiles of one owner with one name (#40: a `reviewer` on each). Name lookups refuse
+  to pick between them. `device link` merges the ones with the same definition
+  (`AgentProfile::same_definition`: harness, model, effort, skills, prompt and mode,
+  not colour) into the oldest, so every device picks the same survivor. The rest wait
+  for `axel device merge NAME --keep PROFILE` or `--rename PROFILE NEW_NAME`, and
+  `axel device merge` alone merges the identical ones again and lists what is left. A
+  merge is a kind-122 record of the merged profile, archived, with `merged_into`.
+  Every device moves that profile's instances to the survivor, and each announces its
+  own moved instances again. Team seats move with them.
 - **Jobs on a linked device** carry `instance: true` and no delegation: the device runs
   its own instance of the profile, signing as itself. Hosts of other owners still get a
   job key and a delegation (*Remote hosts*).

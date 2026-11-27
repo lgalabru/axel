@@ -277,6 +277,92 @@ fn a_host_of_another_owner_and_we_keep_our_agents_apart() {
     assert_eq!(here.principal(&me).unwrap(), me, "and its claim on our key went nowhere");
 }
 
+/// Give a machine an agent of its own, attested by `owner`, with this
+/// harness and model: two homes set up apart, as in #40.
+fn agent_of(store: &Store, keystore: &Keystore, owner: &Keypair, name: &str, model: &str) -> axel_store::Agent {
+    let key = Keypair::generate();
+    keystore.put_agent(&key).unwrap();
+    store
+        .insert_agent(&NewAgent {
+            pubkey: key.public().to_base58(),
+            name: name.into(),
+            model: Some(model.into()),
+            auth_tag: Some(attest(owner, &key.public(), "").unwrap().to_tag()),
+            ..Default::default()
+        })
+        .unwrap()
+}
+
+/// Two homes that each have a `reviewer` (the same on both) and a
+/// `coordinator` (another model on each), linked (#44 review).
+#[test]
+fn linking_two_homes_merges_identical_agents_and_leaves_the_rest_to_the_owner() {
+    let w = World::new();
+    w.ok_here(&["device", "ls"]);
+    let (here, here_keys, owner) = (w.store_here(), Keystore::open_at(w.home().join(".axel").join("secrets.json"), false).unwrap(), w.key_here());
+    let reviewer_here = agent_of(&here, &here_keys, &owner, "reviewer", "opus");
+    let coordinator_here = agent_of(&here, &here_keys, &owner, "coordinator", "opus");
+    w.ok_here(&["team", "new", "crew", "--member", "coordinator", "--member", "reviewer"]);
+    let linux_keys = w.keystore_there("linux");
+    let linux = linux_keys.owner().unwrap();
+    let there = w.store_there("linux");
+    let reviewer_there = agent_of(&there, &linux_keys, &linux, "reviewer", "opus");
+    let coordinator_there = agent_of(&there, &linux_keys, &linux, "coordinator", "sonnet");
+
+    let linked = w.ok_here(&["device", "link", "linux"]);
+    assert!(linked.contains("merged") && linked.contains("(reviewer): one agent now"), "{linked}");
+    assert!(linked.contains("2 agents of yours are named coordinator"), "{linked}");
+    assert!(linked.contains(&coordinator_here.profile_id) && linked.contains(&coordinator_there.profile_id), "{linked}");
+
+    // One reviewer, with an instance on each machine, here and there.
+    let kept = here.profile_by_name("reviewer").unwrap().expect("one reviewer");
+    let instances: Vec<String> = here.profile_instances(&kept.profile_id).unwrap().into_iter().map(|a| a.pubkey).collect();
+    assert!(instances.contains(&reviewer_here.pubkey) && instances.contains(&reviewer_there.pubkey), "{instances:?}");
+    w.ok_here(&["sync", "linux"]);
+    let there = w.store_there("linux");
+    assert_eq!(there.profile_by_name("reviewer").unwrap().unwrap().profile_id, kept.profile_id, "linux agrees");
+    assert_eq!(there.profile_instances(&kept.profile_id).unwrap().len(), 2);
+
+    // The coordinators differ: no silent pick until the owner settles it.
+    let refused = w.here(&["team", "new", "leads", "--member", "coordinator"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("axel device merge coordinator"), "{}", String::from_utf8_lossy(&refused.stderr));
+    let shown = w.ok_here(&["agent", "show", "coordinator"]);
+    assert!(shown.contains("also named coordinator"), "{shown}");
+
+    // Keep linux's: ours merges into it, and takes its team seat along.
+    let prefix = &coordinator_there.profile_id[..coordinator_there.profile_id.len() - 4];
+    let settled = w.ok_here(&["device", "merge", "coordinator", "--keep", prefix]);
+    assert!(settled.contains(&format!("merged {} into {}", coordinator_here.profile_id, coordinator_there.profile_id)), "{settled}");
+    assert_eq!(here.profile_by_name("coordinator").unwrap().unwrap().profile_id, coordinator_there.profile_id);
+    assert_eq!(here.agent_by_pubkey(&coordinator_here.pubkey).unwrap().unwrap().profile_id, coordinator_there.profile_id);
+    let crew = here.team_by_name("crew").unwrap().unwrap();
+    let members: Vec<&str> = crew.members.iter().map(|m| m.profile_id.as_str()).collect();
+    assert!(members.contains(&coordinator_there.profile_id.as_str()) && !members.contains(&coordinator_here.profile_id.as_str()), "{members:?}");
+    w.ok_here(&["team", "new", "leads", "--member", "coordinator"]);
+    assert!(w.ok_here(&["device", "merge"]).contains("no two agents of yours share a name"), "nothing left to settle");
+}
+
+#[test]
+fn a_shared_name_can_be_settled_by_renaming_one() {
+    let w = World::new();
+    w.ok_here(&["device", "ls"]);
+    let (here, here_keys, owner) = (w.store_here(), Keystore::open_at(w.home().join(".axel").join("secrets.json"), false).unwrap(), w.key_here());
+    agent_of(&here, &here_keys, &owner, "coordinator", "opus");
+    let linux_keys = w.keystore_there("linux");
+    let linux = linux_keys.owner().unwrap();
+    let theirs = agent_of(&w.store_there("linux"), &linux_keys, &linux, "coordinator", "sonnet");
+    w.ok_here(&["device", "link", "linux"]);
+
+    let wrong = w.here(&["device", "merge", "coordinator", "--rename", "p-nope", "linux-coordinator"]);
+    assert!(!wrong.status.success() && String::from_utf8_lossy(&wrong.stderr).contains("has profile id p-nope"));
+    w.ok_here(&["device", "merge", "coordinator", "--rename", &theirs.profile_id, "linux-coordinator"]);
+    assert_eq!(here.profile(&theirs.profile_id).unwrap().unwrap().name, "linux-coordinator");
+    assert!(here.profile_by_name("coordinator").unwrap().is_some());
+    w.ok_here(&["sync", "linux"]);
+    assert_eq!(w.store_there("linux").profile(&theirs.profile_id).unwrap().unwrap().name, "linux-coordinator", "the rename travels");
+}
+
 /// Make `label` another platform than this machine: its `uname -sm` says so,
 /// so this binary is never copied there.  The name matches no real platform,
 /// so the test means the same on a Mac and on Linux CI.

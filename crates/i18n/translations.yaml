@@ -1718,6 +1718,26 @@
   zh-Hans: "在 {label} 上运行 `axel device code {owner}`，然后用 --code 传入它打印的内容"
 "that isn't a public key":
   zh-Hans: "这不是公钥"
+"another agent of yours is also named {name}: settle it with `axel device merge {name}`":
+  zh-Hans: "你还有另一个智能体也叫 {name}：用 `axel device merge {name}` 来处理"
+"{id} is now {name}":
+  zh-Hans: "{id} 现在叫 {name}"
+"merged {from} into {into} ({name}): one agent now":
+  zh-Hans: "已将 {from} 合并到 {into}（{name}）：现在是同一个智能体"
+"only one agent of yours is named {name}: nothing to settle":
+  zh-Hans: "你只有一个智能体叫 {name}：没有需要处理的"
+"{id} starts more than one of these profile ids; give more of it":
+  zh-Hans: "有多个配置 id 以 {id} 开头；请多给几个字符"
+"no agent named {name} has profile id {id}":
+  zh-Hans: "没有叫 {name} 的智能体的配置 id 是 {id}"
+"no two agents of yours share a name":
+  zh-Hans: "你没有同名的智能体"
+"{n} agents of yours are named {name}:":
+  zh-Hans: "你有 {n} 个智能体都叫 {name}："
+"  keep one:   axel device merge {name} --keep PROFILE":
+  zh-Hans: "  保留一个：axel device merge {name} --keep PROFILE"
+"  or rename:  axel device merge {name} --rename PROFILE NEW_NAME":
+  zh-Hans: "  或改名：  axel device merge {name} --rename PROFILE NEW_NAME"
 "the code doesn't match: {label} may not be the machine you meant. Nothing was linked.":
   zh-Hans: "验证码不匹配：{label} 可能不是你要的那台机器。未关联任何设备。"
 "the host's key isn't a public key":

@@ -33,6 +33,9 @@ instance of a profile on a given machine.
 
 - The #40 name clash is gone. Two owners may each have a `reviewer`. One owner's two
   machines run one `reviewer` as two instances.
+- Linking two homes that each made a `reviewer` leaves one owner with two profiles of
+  one name. Identical ones merge into the oldest on link; the owner settles the others
+  with `axel device merge` (RFD 0004 phase 7). Until then, name lookups refuse to pick.
 - Migration 13 turns each agent into a profile (`p-<pubkey>`) plus its one instance,
   keeping the key and attestation. `agents` is rebuilt to drop `name UNIQUE`.
 - Any machine of an owner can edit a profile. Concurrent edits made apart resolve last

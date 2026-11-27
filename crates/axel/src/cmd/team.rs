@@ -107,7 +107,7 @@ fn list(ctx: &Ctx) -> Result<()> {
 }
 
 /// Sign the team as stored with the owner key and append it, so it syncs.
-fn publish(ctx: &Ctx, team: &Team) -> Result<()> {
+pub(super) fn publish(ctx: &Ctx, team: &Team) -> Result<()> {
     assert!(team.updated_id.is_none(), "only an unsigned edit is published");
     let owner = ctx.owner()?;
     let content = serde_json::to_string(&TeamWire::of(team))?;

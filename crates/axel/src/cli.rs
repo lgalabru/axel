@@ -263,6 +263,19 @@ pub enum DeviceCommand {
     Revoke { label: String },
     /// Print the code to compare when OWNER links this machine.
     Code { owner: String },
+    /// Settle names two linked machines both gave an agent: identical agents
+    /// merge into one; for the others, keep one or rename one.
+    Merge {
+        /// The name to settle; every shared name when omitted.
+        name: Option<String>,
+        /// Keep this agent profile (id or unique prefix) and merge the others
+        /// named NAME into it: their instances become its instances.
+        #[arg(long, value_name = "PROFILE", requires = "name", conflicts_with = "rename")]
+        keep: Option<String>,
+        /// Give this agent profile (id or unique prefix) another name.
+        #[arg(long, num_args = 2, value_names = ["PROFILE", "NEW_NAME"], requires = "name")]
+        rename: Option<Vec<String>>,
+    },
 }
 
 fn parse_route(text: &str) -> Result<axel_store::PairingRoute, String> {

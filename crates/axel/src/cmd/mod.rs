@@ -146,6 +146,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             crate::cli::DeviceCommand::Ls => device::list(),
             crate::cli::DeviceCommand::Revoke { label } => device::revoke(&label),
             crate::cli::DeviceCommand::Code { owner } => device::code(&owner),
+            crate::cli::DeviceCommand::Merge { name, keep, rename } => {
+                device::merge(name.as_deref(), keep.as_deref(), rename.as_deref())
+            }
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
         Some(Command::Schedule { command }) => schedule::run(command),
