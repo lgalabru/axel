@@ -28,9 +28,12 @@ use anyhow::{Context, Result, bail};
 
 /// How often the pane's size is looked at, and how long a read waits.
 const TICK_MS: i32 = 200;
-/// How long the terminal has to answer `CSI 14 t`.  A terminal answers in a
-/// few milliseconds or never.
-const PIXELS_REPLY_MS: u64 = 300;
+/// How long the terminal has to answer what it is asked at the start.  A
+/// terminal answers in a few milliseconds; one that never answers the last
+/// question (`CSI c`, which every terminal answers) costs this much.
+const ANSWERS_MS: u64 = 400;
+/// The most of the terminal's answers read: 19 short replies.
+const ANSWERS_BYTES_MAX: usize = 8 * 1024;
 /// The most one read moves.  A Kitty frame is written in many of these.
 const CHUNK_BYTES: usize = 64 * 1024;
 /// The longest escape sequence the filter holds back.  The status line's
@@ -51,6 +54,19 @@ pub fn end_running() {
     if group > 0 {
         end_group(group);
     }
+}
+
+/// An RGB colour, 8 bits a channel.
+pub type Rgb = (u8, u8, u8);
+
+/// The pane terminal's colours, as far as it answered: its text and
+/// background (OSC 10 and 11) and its 16-colour palette (OSC 4), which the
+/// terminal view draws agents and dim text in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Colors {
+    pub foreground: Option<Rgb>,
+    pub background: Option<Rgb>,
+    pub palette: [Option<Rgb>; 16],
 }
 
 /// The pane's size in cells and device pixels.
@@ -91,23 +107,33 @@ impl PaneSize {
 
 /// Run `browser` with `flags`, `--device-pixel-ratio` from the pane's size
 /// and `url`, until it exits or the pane hangs up.  `ratio_for` turns a
-/// pane size into the ratio to draw at.  Without a terminal there is no
-/// status line to hide or size to follow: Ladybird runs as it is, at the
-/// ratio of a pane of unknown size.
-pub fn run(browser: &Path, flags: &[&str], url: &str, ratio_for: impl Fn(&PaneSize) -> f64) -> Result<ExitStatus> {
+/// pane size into the ratio to draw at.  `on_start` hears the pane, the
+/// ratio and the terminal's colours before each start, so the page can be
+/// fitted to them.  Without a terminal there is no status line to hide or
+/// size to follow: Ladybird runs as it is, at the ratio of a pane of
+/// unknown size.
+pub fn run(
+    browser: &Path,
+    flags: &[&str],
+    url: &str,
+    ratio_for: impl Fn(&PaneSize) -> f64,
+    mut on_start: impl FnMut(&PaneSize, f64, &Colors),
+) -> Result<ExitStatus> {
     let stdin = std::io::stdin().as_raw_fd();
     // SAFETY: isatty only reads the descriptor's type.
     if unsafe { libc::isatty(stdin) } != 1 {
         let unknown = PaneSize { rows: 0, cols: 0, width_px: 0, height_px: 0 };
-        let ratio = ratio_for(&unknown).to_string();
+        let ratio = ratio_for(&unknown);
+        on_start(&unknown, ratio, &Colors::default());
         let mut command = Command::new(browser);
-        command.args(flags).args(["--device-pixel-ratio", &ratio, url]);
+        command.args(flags).args(["--device-pixel-ratio", &ratio.to_string(), url]);
         return command.status().with_context(|| format!("starting {}", browser.display()));
     }
     let _raw = RawMode::enter(stdin).context("putting the pane's terminal in raw mode")?;
     let mut size = pane_size(stdin).context("the pane has no size")?;
-    if size.cell_height_px().is_none() {
-        size = ask_pixels(stdin, size).unwrap_or(size);
+    let (pixels, colors) = ask_terminal(stdin, size.cell_height_px().is_none());
+    if let Some((height_px, width_px)) = pixels {
+        size = PaneSize { width_px, height_px, ..size };
     }
     let hung_up = Arc::new(AtomicBool::new(false));
     let stop_input = Arc::new(AtomicBool::new(false));
@@ -117,6 +143,7 @@ pub fn run(browser: &Path, flags: &[&str], url: &str, ratio_for: impl Fn(&PaneSi
     let mut restarts = 0_u32;
     let status = loop {
         let ratio = ratio_for(&size);
+        on_start(&size, ratio, &colors);
         // A fresh pty each time: the last one may still be the controlling
         // terminal of a helper of the Ladybird before.
         let (master, slave) = open_pty(&size.for_ladybird())?;
@@ -421,30 +448,83 @@ fn set_size(fd: RawFd, size: &libc::winsize) -> Result<()> {
     Ok(())
 }
 
-/// The pane's pixel size from the terminal itself (`CSI 14 t`, answered
-/// `CSI 4 ; height ; width t`), for terminals whose size has no pixels.
-fn ask_pixels(fd: RawFd, size: PaneSize) -> Option<PaneSize> {
+/// Ask the terminal, in one round trip, for its pixel size when `pixels`
+/// (`CSI 14 t`, answered `CSI 4 ; height ; width t`), its text and
+/// background colours, and its 16-colour palette.  `CSI c` goes last:
+/// every terminal answers it, so its answer means the others are in.
+fn ask_terminal(fd: RawFd, pixels: bool) -> (Option<(u16, u16)>, Colors) {
+    let mut question = String::from(if pixels { "\x1b[14t" } else { "" });
+    question.push_str("\x1b]10;?\x1b\\\x1b]11;?\x1b\\");
+    for index in 0..16 {
+        question.push_str(&format!("\x1b]4;{index};?\x1b\\"));
+    }
+    question.push_str("\x1b[c");
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(b"\x1b[14t").ok()?;
-    stdout.flush().ok()?;
+    if stdout.write_all(question.as_bytes()).and_then(|()| stdout.flush()).is_err() {
+        return (None, Colors::default());
+    }
     // SAFETY: as in `forward_input`: stdin stays open, and isn't closed here.
     let mut from = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
-    let deadline = Instant::now() + Duration::from_millis(PIXELS_REPLY_MS);
-    let mut reply = Vec::with_capacity(SEQUENCE_BYTES_MAX);
-    while Instant::now() < deadline && reply.len() < SEQUENCE_BYTES_MAX {
-        if !readable(fd, 50).ok()? {
-            continue;
+    let deadline = Instant::now() + Duration::from_millis(ANSWERS_MS);
+    let mut answers = Vec::with_capacity(ANSWERS_BYTES_MAX);
+    let mut chunk = [0_u8; 1024];
+    while Instant::now() < deadline && answers.len() < ANSWERS_BYTES_MAX && !has_device_attributes(&answers) {
+        match readable(fd, 20) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => break,
         }
-        let mut byte = [0_u8; 1];
-        if from.read(&mut byte).ok()? == 0 {
-            return None;
-        }
-        reply.push(byte[0]);
-        if byte[0] == b't' {
-            return parse_pixels_reply(&reply).map(|(height_px, width_px)| PaneSize { width_px, height_px, ..size });
+        match from.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => answers.extend_from_slice(&chunk[..n]),
         }
     }
-    None
+    (parse_pixels_reply(&answers), parse_colors(&answers))
+}
+
+/// Whether `answers` hold the answer to `CSI c`: `CSI ? … c`.
+fn has_device_attributes(answers: &[u8]) -> bool {
+    answers.windows(3).enumerate().any(|(at, w)| {
+        w == b"\x1b[?" && answers[at + 3..].iter().find(|b| !(b.is_ascii_digit() || **b == b';')) == Some(&b'c')
+    })
+}
+
+/// The colours in `answers`: OSC 10, 11 and 4 replies, ended by BEL or ST.
+fn parse_colors(answers: &[u8]) -> Colors {
+    let mut colors = Colors::default();
+    let text = String::from_utf8_lossy(answers);
+    for reply in text.split("\x1b]").skip(1) {
+        let body = reply.split(['\x07', '\x1b']).next().unwrap_or("");
+        let mut parts = body.split(';');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("10"), Some(spec), None) => colors.foreground = parse_color(spec),
+            (Some("11"), Some(spec), None) => colors.background = parse_color(spec),
+            (Some("4"), Some(index), Some(spec)) => {
+                if let Some(slot) = index.parse::<usize>().ok().and_then(|i| colors.palette.get_mut(i)) {
+                    *slot = parse_color(spec);
+                }
+            }
+            _ => {}
+        }
+    }
+    colors
+}
+
+/// `rgb:R/G/B`, each one to four hex digits, as 8 bits a channel.
+fn parse_color(spec: &str) -> Option<Rgb> {
+    let channels: Vec<u8> = spec
+        .strip_prefix("rgb:")?
+        .split('/')
+        .map(|c| {
+            let max = 16_u32.checked_pow(u32::try_from(c.len()).ok()?)?.checked_sub(1)?;
+            let value = u32::from_str_radix(c, 16).ok()?;
+            (1..=4).contains(&c.len()).then(|| u8::try_from(value * 255 / max).expect("a scaled channel is a byte"))
+        })
+        .collect::<Option<_>>()?;
+    match channels[..] {
+        [r, g, b] => Some((r, g, b)),
+        _ => None,
+    }
 }
 
 /// `(height, width)` from `CSI 4 ; height ; width t`.
@@ -543,6 +623,21 @@ mod tests {
         let resized = pane.with_cells_of(20, 50);
         assert_eq!((resized.width_px, resized.height_px), (800, 680), "a resize keeps the cell size");
         assert_eq!(PaneSize { height_px: 0, ..pane }.cell_height_px(), None);
+    }
+
+    #[test]
+    fn the_terminal_says_its_colours() {
+        let answers = b"\x1b]10;rgb:ecec/ecec/f1f1\x1b\\\x1b]11;rgb:1d/1d/21\x07\x1b]4;3;rgb:e6e6/b4b4/5050\x1b\\\x1b]4;99;rgb:0/0/0\x1b\\\x1b[?62;22c";
+        let colors = parse_colors(answers);
+        assert_eq!(colors.foreground, Some((0xec, 0xec, 0xf1)));
+        assert_eq!(colors.background, Some((0x1d, 0x1d, 0x21)), "two hex digits, ended by BEL");
+        assert_eq!(colors.palette[3], Some((0xe6, 0xb4, 0x50)));
+        assert_eq!(colors.palette.iter().flatten().count(), 1, "an index past 15 is no palette entry");
+        assert!(has_device_attributes(answers));
+        assert!(!has_device_attributes(b"\x1b]11;rgb:0/0/0\x07"));
+        assert_eq!(parse_color("rgb:f/8/0"), Some((255, 136, 0)));
+        assert_eq!(parse_color("rgb:12345/0/0"), None);
+        assert_eq!(parse_color("#ffffff"), None);
     }
 
     #[test]

@@ -243,14 +243,16 @@ pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
             u.run();
         }
     });
-    // Asked before Ladybird owns the terminal: the page paints the pane's
-    // own colours, as its frames can't be transparent.
-    let theme = theme::css(axel_tui::theme::terminal_colors());
-    let running = server::start(Arc::new(backend), view, &theme)?;
+    let running = server::start(Arc::new(backend), view, "")?;
     let started = Instant::now();
     // Terminal mode draws in this pane.  A temporary profile keeps each pane
     // apart from the owner's Ladybird (cookies, history) and from each other.
-    let outcome = terminal::run(&browser, &["--headless=terminal", "--temporary-profile"], &running.url(), device_pixel_ratio);
+    // Before each start the page takes the pane's colours and text size, as
+    // its frames can't be transparent and its text should be the terminal's.
+    let fit = |size: &terminal::PaneSize, ratio: f64, colors: &terminal::Colors| {
+        running.set_theme(&theme::css(colors, theme::font_px(size, ratio)));
+    };
+    let outcome = terminal::run(&browser, &["--headless=terminal", "--temporary-profile"], &running.url(), device_pixel_ratio, fit);
     // Only a Ladybird that gave up at once, before loading the page, means
     // it can't draw here; a pane that went later just went.
     let early = started.elapsed() < Duration::from_secs(FALLBACK_WINDOW_SECS) && running.served() == 0;

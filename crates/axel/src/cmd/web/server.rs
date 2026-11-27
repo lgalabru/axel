@@ -92,6 +92,7 @@ pub struct Running {
     pub port: u16,
     secret: String,
     shared: Arc<Shared>,
+    rendered: Arc<Rendered>,
 }
 
 impl Running {
@@ -103,6 +104,26 @@ impl Running {
     /// Requests served so far.
     pub fn served(&self) -> u64 {
         self.shared.served.load(Ordering::Relaxed)
+    }
+
+    /// Serve the page with `theme` from the next load on (`theme::css`):
+    /// Ladybird reloads it when it starts again at another scale.
+    pub fn set_theme(&self, theme: &str) {
+        let css = stylesheet(theme);
+        // A poisoned lock means a request thread panicked while reading:
+        // the stylesheet itself is whole, so it is replaced all the same.
+        *self.rendered.css.write().unwrap_or_else(std::sync::PoisonError::into_inner) = css;
+    }
+}
+
+/// The page's stylesheet with `theme`'s properties on its root, after its
+/// own: in the stylesheet, as the page's CSP allows no inline style.
+fn stylesheet(theme: &str) -> String {
+    assert!(!theme.contains(['{', '}', '<']), "a theme is CSS properties only");
+    if theme.is_empty() {
+        super::assets::CSS.to_string()
+    } else {
+        format!("{}\n:root {{ {theme} }}\n", super::assets::CSS)
     }
 }
 
@@ -124,14 +145,12 @@ pub fn start(backend: Arc<dyn Backend>, view: super::WebView, theme: &str) -> Re
     });
     let poller = (shared.clone(), backend.clone());
     std::thread::spawn(move || poll(&poller.0, poller.1.as_ref()));
-    assert!(!theme.contains(['{', '}', '<']), "a theme is CSS properties only");
     let page = super::assets::PAGE.replace("{{view}}", view.as_str());
     assert!(page.contains(&format!("data-view=\"{}\"", view.as_str())), "the page names its view");
-    let css = if theme.is_empty() { super::assets::CSS.to_string() } else { format!("{}\n:root {{ {theme} }}\n", super::assets::CSS) };
-    let page = Arc::new(Rendered { page, css });
-    let accept = (shared.clone(), backend, secret.clone());
-    std::thread::spawn(move || serve(listener, port, &accept.0, &accept.1, &accept.2, &page));
-    Ok(Running { port, secret, shared })
+    let rendered = Arc::new(Rendered { page, css: std::sync::RwLock::new(stylesheet(theme)) });
+    let accept = (shared.clone(), backend, secret.clone(), rendered.clone());
+    std::thread::spawn(move || serve(listener, port, &accept.0, &accept.1, &accept.2, &accept.3));
+    Ok(Running { port, secret, shared, rendered })
 }
 
 /// Look at the thread every [`POLL_MS`] and wake the event streams when
@@ -167,7 +186,7 @@ fn poll(shared: &Shared, backend: &dyn Backend) {
 /// The page and its stylesheet, as this pane serves them.
 struct Rendered {
     page: String,
-    css: String,
+    css: std::sync::RwLock<String>,
 }
 
 fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<dyn Backend>, secret: &str, page: &Arc<Rendered>) {
@@ -311,7 +330,14 @@ fn handle(stream: &mut TcpStream, port: u16, shared: &Shared, backend: &dyn Back
 fn route(stream: &mut TcpStream, request: &Request, port: u16, shared: &Shared, backend: &dyn Backend, page: &Rendered) -> std::io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => respond(stream, 200, "text/html; charset=utf-8", page.page.as_bytes()),
-        ("GET", "/app.css") => respond(stream, 200, "text/css; charset=utf-8", page.css.as_bytes()),
+        ("GET", "/app.css") => {
+            let css = page.css.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            respond(stream, 200, "text/css; charset=utf-8", css.as_bytes())
+        }
+        ("GET", path) if path.starts_with("/fonts/") => match super::assets::FONTS.iter().find(|(p, _)| *p == path) {
+            Some((_, bytes)) => respond(stream, 200, "font/woff2", bytes),
+            None => respond(stream, 404, "text/plain", b"no such font"),
+        },
         ("GET", "/app.js") => respond(stream, 200, "text/javascript; charset=utf-8", super::assets::JS.as_bytes()),
         ("GET", "/api/thread") => {
             let json = shared.snapshot.lock().map(|s| s.json.clone()).unwrap_or_default();
@@ -428,8 +454,10 @@ mod tests {
     fn send(port: u16, request: &str) -> (u16, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
-        let mut reply = String::new();
-        stream.read_to_string(&mut reply).unwrap();
+        // A font is no UTF-8: the reply is read as bytes, its text kept.
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        let reply = String::from_utf8_lossy(&bytes).into_owned();
         let status = reply.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         (status, reply)
     }
@@ -473,6 +501,19 @@ mod tests {
         assert!(css.trim_end().ends_with(":root { --bg:#fafaf0; }"), "the theme comes after the page's own palette");
         let plain = start(fake(), super::super::WebView::Messages, "").unwrap();
         assert!(!get(plain.port, "/app.css", Some(&plain.secret)).1.contains(":root { --bg:#fafaf0"));
+    }
+
+    #[test]
+    fn the_theme_follows_a_restart_and_the_fonts_are_served() {
+        let server = start(fake(), super::super::WebView::Messages, "").unwrap();
+        server.set_theme("--font-size:21.00px;");
+        let (_, css) = get(server.port, "/app.css", Some(&server.secret));
+        assert!(css.trim_end().ends_with(":root { --font-size:21.00px; }"), "the next load has the new theme");
+        let (status, font) = get(server.port, "/fonts/JetBrainsMono-Regular.woff2", Some(&server.secret));
+        assert_eq!(status, 200);
+        assert!(font.contains("font/woff2"), "served as a font");
+        assert_eq!(get(server.port, "/fonts/nope.woff2", Some(&server.secret)).0, 404);
+        assert_eq!(get(server.port, "/fonts/JetBrainsMono-Regular.woff2", None).0, 403, "behind the cookie like the rest");
     }
 
     #[test]
