@@ -546,7 +546,7 @@ function renderControls() {
     <div class="ctl-title"><h2>${esc(d.title)}</h2><span class="meta">${meta}</span></div>
     ${sessions ? `<div class="section-label">sessions</div>${sessions}` : '<div class="dim">no sessions yet</div>'}
     <div class="hour c-none"><div class="chart"></div><div class="over">${totals}<span class="grow"></span><span class="dim">last hour</span></div></div>
-    ${stepHtml()}`;
+    ${ctlStepHtml()}`;
   gradients = 0;
   brailleChart(document.querySelector("#controls .hour .chart"), d.spark);
   document.querySelectorAll("#controls .session").forEach((el, i) => {
@@ -574,7 +574,7 @@ function stepRows() {
   }
 }
 
-function stepHtml() {
+function ctlStepHtml() {
   if (ctl.step === "rename") return `<div class="step-title">new title</div><div class="rename"><span class="prompt">&gt;</span><input type="text" value="${esc(ctl.title)}" spellcheck="false"></div>`;
   if (ctl.step === "confirm") {
     return `<div class="step-title">${esc(ctl.question)}</div><div class="confirm-buttons"><button type="button" class="${ctl.danger ? "danger" : "primary"}" data-yes>yes</button><button type="button" class="ghost" data-no>no</button></div>`;

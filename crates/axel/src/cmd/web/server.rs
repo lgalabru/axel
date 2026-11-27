@@ -523,6 +523,21 @@ mod tests {
     }
 
     #[test]
+    fn no_two_things_in_the_page_script_share_a_name() {
+        // A second `function` of a name silently replaces the first: the
+        // controls' `stepHtml` once took the conversation's, and every
+        // update of the conversation threw.
+        let mut seen = std::collections::BTreeSet::new();
+        for line in super::super::assets::JS.lines() {
+            let declared = ["function ", "async function ", "const ", "let "].iter().find_map(|k| line.strip_prefix(k));
+            let Some(rest) = declared else { continue };
+            let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$').collect();
+            assert!(name.is_empty() || seen.insert(name.clone()), "the page script declares {name} twice");
+        }
+        assert!(seen.contains("renderMessages") && seen.contains("renderControls"), "the check reads top-level names");
+    }
+
+    #[test]
     fn nothing_on_the_page_animates() {
         // Ladybird sends the whole pane for any change: an animation keeps it
         // drawing 60 full frames a second, and scrolling lags behind them.
