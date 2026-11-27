@@ -14,6 +14,7 @@ pub mod attach;
 mod compose;
 mod stream;
 mod updates;
+pub use updates::start as start_update_check;
 pub mod dashboard;
 pub mod diff;
 mod glue;
@@ -45,6 +46,18 @@ pub enum PromptSize {
 pub use stream::{RedirectInputFn, StreamInput, run_stream};
 pub use thread::{SendCommand, SendReply};
 pub use util::{relative_time, slugify};
+
+/// Everything the thread view shows, as the terminal view loads it: what a
+/// web pane renders too (`axel web`, RFD 0007), so both views agree.
+pub fn load_thread_data(store: &axel_store::Store, owner_pk: &str, thread_id: &str) -> anyhow::Result<model::ThreadData> {
+    glue::load_thread(store, owner_pk, thread_id, util::now_secs())
+}
+
+/// What the tokens pane shows for one thread: spend per agent, its last
+/// hour minute by minute, context windows and plan limits.
+pub fn load_usage_data(store: &axel_store::Store, thread_id: &str) -> anyhow::Result<model::UsageData> {
+    glue::load_usage(store, util::now_secs(), Some(thread_id))
+}
 
 /// Which screen the UI opens on.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,0 +1,279 @@
+/* Axel's web panes: the conversation, the composer and the activity pane of a
+   thread view, each in its own Rex pane.  They look like the terminal view
+   they stand in for (its font, its size, its palette, its badges and dots),
+   with what a page draws better: line spacing, rounded corners, crisp dots.
+
+   Nothing moves on its own.  Ladybird repaints the whole pane for any
+   change, as a frame of several megabytes, so a CSS animation keeps it
+   drawing all the time and scrolling waits behind it.  Even a ticking
+   spinner does; a working agent's mark is still.
+
+   The pane's server appends a `:root` rule with the terminal's own values
+   (`theme.rs`); these are the defaults without one. */
+@font-face { font-family: "Axel Mono"; src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; }
+@font-face { font-family: "Axel Mono"; src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+@font-face { font-family: "Axel Mono"; src: url("/fonts/JetBrainsMono-Italic.woff2") format("woff2"); font-weight: 400; font-style: italic; }
+
+:root {
+  --bg: #1d1d21;
+  --surface: var(--bg);
+  --raised: var(--bg);
+  --hover: var(--bg);
+  --line: #3a3a42;
+  --line-soft: #2a2a31;
+  --text: #ececf1;
+  --text-2: #c0c0c8;
+  --dim: #7c7c88;
+  --faint: #55555f;
+  --p0: #1d1d21; --p1: #e06c75; --p2: #98c379; --p3: #e5c07b;
+  --p4: #61afef; --p5: #c678dd; --p6: #56b6c2; --p7: #abb2bf;
+  --p8: #7c7c88; --p9: #e88388; --p10: #a8cc8c; --p11: #ebcb8b;
+  --p12: #71bef2; --p13: #d290e4; --p14: #66c2cd; --p15: #ffffff;
+  --accent: #ff7565;
+  --orange: #ff8700;
+  --font-size: 13px;
+  --mono: "JetBrainsMono Nerd Font Mono", "JetBrains Mono", "Axel Mono", "SF Mono", Menlo, monospace;
+  --radius: 6px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; animation: none !important; transition: none !important; }
+html, body { height: 100%; margin: 0; background: var(--bg); }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--font-size)/1.55 var(--mono);
+  overflow: hidden;
+}
+.view { display: none; height: 100%; }
+body[data-view="messages"] #messages,
+body[data-view="composer"] #composer,
+body[data-view="activity"] #activity,
+body[data-view="controls"] #controls { display: flex; flex-direction: column; }
+b, strong { font-weight: 700; }
+.dim { color: var(--dim); }
+
+/* Agent colours, as the terminal view maps them to its palette. */
+.c-purple { --agent: var(--p5); } .c-yellow { --agent: var(--p3); } .c-red { --agent: var(--p1); }
+.c-green { --agent: var(--p2); } .c-blue { --agent: var(--p4); } .c-gray { --agent: var(--p7); }
+.c-orange { --agent: var(--orange); } .c-none { --agent: var(--accent); }
+.fg { color: var(--agent); }
+
+/* The terminal view's name badge: bold, on the agent's colour, ending in an
+   arrow.  Here its corners and the arrow's tip are rounded. */
+.badge {
+  position: relative; display: inline-block; height: 1.6em; line-height: 1.6em;
+  padding: 0 .35em 0 .6em; margin-right: 1em;
+  border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--agent); color: var(--p0); font-weight: 700;
+  z-index: 0;
+}
+.badge::after {
+  content: ""; position: absolute; top: .234em; right: -.566em;
+  width: 1.132em; height: 1.132em; background: var(--agent);
+  transform: rotate(45deg); border-radius: 0 .28em 0 0;
+  z-index: -1;
+}
+
+button {
+  font: 700 1em var(--mono); border: 0; border-radius: var(--radius); cursor: pointer;
+  height: 1.9em; padding: 0 .9em; color: var(--text); background: var(--raised);
+}
+button:hover { background: var(--hover); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--p0); }
+button.ghost { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+
+/* ---------------------------------------------------------------- messages */
+
+.bar {
+  flex: none; display: flex; align-items: center; gap: 1.2em;
+  height: 2.2em; padding: 0 1ch; color: var(--dim);
+}
+h1 { margin: 0; font-size: 1em; font-weight: 700; color: var(--text-2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live { display: flex; gap: 1.5ch; white-space: nowrap; }
+.live .state { color: var(--dim); }
+
+.timeline { flex: 1; overflow-y: auto; padding: .4em 1ch 2.5em; overscroll-behavior: contain; }
+.empty { color: var(--dim); padding: 2em 1ch; }
+.skipped { color: var(--faint); margin-bottom: 1em; }
+
+.msg { margin: 1.1em 0 .2em; }
+.head { display: flex; align-items: center; min-height: 1.6em; }
+.head .time { margin-left: auto; color: var(--dim); padding-left: 2ch; }
+.head .tag { color: var(--accent); margin-left: 1ch; }
+.msg .text { padding-left: 1ch; margin-top: .35em; overflow-wrap: anywhere; }
+.msg.error .text { color: var(--p1); }
+.you { margin: 1.1em 0 .2em; display: flex; gap: 1ch; }
+.you .prompt { color: var(--accent); font-weight: 700; flex: none; padding-left: 1ch; }
+.you .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.you .time { color: var(--dim); padding-left: 2ch; flex: none; }
+
+.text p { margin: 0 0 .7em; }
+.text p:last-child { margin-bottom: 0; }
+.text h3 { font-size: 1em; margin: 1em 0 .4em; }
+.text ul, .text ol { margin: .2em 0 .7em; padding-left: 2.5ch; }
+.text li { margin: .15em 0; }
+.text li::marker { color: var(--dim); }
+.text code { color: var(--p4); }
+.text pre { margin: .7em 0; padding: .7em 1.2ch; background: var(--surface); border-radius: var(--radius); overflow-x: auto; line-height: 1.45; }
+.text pre code { color: var(--text-2); }
+.text a { color: var(--p4); text-decoration: none; }
+.text a:hover { text-decoration: underline; }
+
+/* A run of tool calls, a thought: one dim line, as in the terminal view,
+   that opens on a click. */
+details { margin: .25em 0 0; }
+details summary { cursor: pointer; list-style: none; color: var(--dim); padding-left: 1ch; border-radius: var(--radius); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+details summary::-webkit-details-marker { display: none; }
+details summary:hover { background: var(--surface); }
+details summary .what { color: var(--text-2); }
+details[open] > summary { color: var(--text-2); }
+.steps { margin: .3em 0 .4em 1ch; padding: .3em 0 .3em 1.5ch; border-left: 1px solid var(--line); }
+.step { display: flex; gap: 1ch; color: var(--text-2); }
+.step .mark { flex: none; color: var(--dim); }
+.step .mark.ok { color: var(--p2); } .step .mark.failed { color: var(--p1); } .step .mark.running { color: var(--accent); }
+.step .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.step pre { margin: .2em 0 .4em; max-height: 16em; overflow: auto; color: var(--dim); white-space: pre-wrap; font: inherit; }
+.thought .said { margin: .3em 0 .4em 1ch; padding-left: 1.5ch; border-left: 1px solid var(--line); color: var(--dim); font-style: italic; }
+
+.timeline .ask { margin: .8em 0 .4em 1ch; padding: .6em 1.2ch; border-radius: var(--radius); box-shadow: inset 0 0 0 1px var(--line); background: var(--surface); }
+.timeline .ask .q { margin-bottom: .6em; }
+.timeline .ask .q small { display: block; font-size: 1em; color: var(--p3); }
+.timeline .ask .options { display: flex; flex-wrap: wrap; gap: 1ch; }
+.timeline .ask .options button:first-child { background: var(--p3); color: var(--p0); }
+.timeline .ask.done { color: var(--dim); box-shadow: none; }
+
+.changes { margin: .25em 0 0; padding-left: 1ch; color: var(--dim); }
+.changes .add { color: var(--p2); } .changes .del { color: var(--p1); }
+.timeline .working { margin: 1em 0 0; padding-left: 1ch; color: var(--dim); }
+.timeline .working .spinner { color: var(--accent); }
+
+.jump {
+  position: fixed; right: 2ch; bottom: 1em;
+  background: var(--raised); color: var(--text-2); box-shadow: 0 0 0 1px var(--line);
+}
+
+/* ---------------------------------------------------------------- composer */
+
+/* The terminal composer's two bands: text above, identity and controls below. */
+.composer { padding: .3em .6ch; }
+.field { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: transparent; border: 1px solid var(--line-soft); border-radius: 8px; }
+.composer .line { flex: 1; min-height: 0; display: flex; gap: 1ch; padding: .4em 1ch; }
+.line .prompt { color: var(--accent); font-weight: 700; }
+textarea {
+  flex: 1; resize: none; width: 100%; min-width: 0; min-height: 1.55em;
+  padding: 0; border: 0; outline: none; background: transparent;
+  color: var(--text); font: inherit; line-height: 1.55;
+}
+textarea::placeholder { color: var(--dim); }
+.composer .meta { display: flex; flex: none; align-items: center; gap: .8ch; min-height: 2.2em; padding: .25em 1ch; border-top: 1px solid var(--line); color: var(--dim); white-space: nowrap; border-radius: 0 0 8px 8px; }
+.composer .target { display: inline-flex; gap: 1ch; flex: none; max-width: 24%; min-width: 0; overflow: hidden; }
+.composer .target-name { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.composer .meta button { height: 1.6em; padding: 0 .6ch; border-radius: 5px; }
+.composer .meta .mode { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--accent); padding: 0; background: transparent; font-weight: 700; }
+.composer .mode:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+.composer .status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.composer .status.error { color: var(--p1); }
+.composer .release { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.composer .release code { padding: .15em .6ch; border-radius: 4px; background: var(--p2); color: var(--bg); font: inherit; font-weight: 700; }
+@media (max-width: 850px) { .composer .mode-help { display: none; } }
+@media (max-width: 760px), (max-height: 89px) { .composer .release { display: none; } }
+@media (max-width: 350px) { .composer #send { display: none; } .composer .meta { gap: .5ch; } }
+.suggest {
+  position: absolute; bottom: calc(100% + .4em); left: 1ch; min-width: 24ch; padding: .3em; z-index: 2;
+  border-radius: var(--radius); background: var(--raised); box-shadow: 0 0 0 1px var(--line);
+}
+.suggest div { padding: .1em 1ch; border-radius: 4px; cursor: pointer; }
+.suggest div.on, .suggest div:hover { background: var(--hover); }
+
+.attachments { flex: none; display: flex; flex-wrap: wrap; gap: .5ch; padding: 0 1ch; max-height: 3em; overflow-y: auto; }
+.attachments:empty { display: none; }
+.attachment { display: inline-flex; align-items: center; gap: .5ch; max-width: 30ch; font-size: .85em; }
+.attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment button { height: 1.3em; padding: 0 .4ch; }
+.composer.dragging { outline: 1px dashed var(--accent); outline-offset: -2px; }
+@media (max-height: 139px) { .composer.has-attachments .release { display: none; } }
+
+/* ---------------------------------------------------------------- activity */
+
+/* Identity and metrics stay separate from the last-hour chart. The same
+   strip appears in the dock and the Ctrl+D dashboard. */
+.activity { padding: .15em .6ch; overflow-y: auto; }
+#activity-body { flex: none; }
+.usage-strip {
+  display: grid; grid-template-columns: 5.5em 9em minmax(0, 1fr);
+  align-items: center; gap: .7em; min-width: 0; height: 2.8em;
+  border-bottom: 1px solid var(--line-soft);
+  font: 500 max(9px, .78em)/1.1 "Helvetica Neue", Arial, sans-serif;
+  font-variant-numeric: tabular-nums; text-transform: uppercase;
+}
+.strip-name { color: var(--agent); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip-metrics { text-align: center; white-space: nowrap; min-width: 0; }
+.strip-metrics > div { overflow: hidden; text-overflow: ellipsis; }
+.strip-metrics .ctx { display: flex; align-items: center; justify-content: center; gap: .4em; margin-top: .15em; }
+.strip-metrics .gauge { display: block; width: 3em; height: .8em; }
+.strip-metrics .gauge svg, .strip-chart svg { display: block; width: 100%; height: 100%; }
+.strip-chart { height: 2.5em; min-width: 0; align-self: center; }
+@media (max-width: 230px) { .usage-strip { grid-template-columns: 4.5em 8em minmax(0, 1fr); gap: .4em; } }
+.usage-strip .hot, #activity .plan .hot { color: var(--p3); }
+.usage-strip .full, #activity .plan .full { color: var(--p1); }
+
+/* Context and plan limits: a bar two dots high, its text over it. */
+#activity .bar-row { display: flex; align-items: center; gap: 1ch; color: var(--dim); }
+#activity .bar-row .what { width: 3ch; }
+#activity .bar-row .gauge { position: relative; display: block; flex: 1; height: 1.1em; }
+#activity .bar-row .gauge svg { display: block; width: 100%; height: 100%; }
+#activity .bar-row .pct { width: 4ch; text-align: right; }
+#activity .plan { font-size: .78em; margin-top: .15em; display: flex; flex-wrap: wrap; gap: .15em 1ch; }
+#activity .bar-row { flex: 1 1 9ch; min-width: 0; gap: .4ch; }
+
+svg.braille circle.off { fill: var(--line-soft); }
+svg.braille .lo { stop-color: var(--agent, var(--p4)); stop-opacity: .45; }
+svg.braille .hi { stop-color: var(--agent, var(--p4)); stop-opacity: 1; }
+svg.braille .ok { stop-color: var(--p2); }
+svg.braille .warn { stop-color: var(--p3); }
+svg.braille .bad { stop-color: var(--p1); }
+
+/* ---------------------------------------------------------------- controls */
+
+/* The thread controls (Ctrl+D): the thread's numbers on top, a chart of its
+   last hour with the totals over it, then the menu, as the terminal pane. */
+.ctl { height: 100%; overflow: hidden; }
+.controls-body { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: .5em 1.5ch .3em; }
+.controls-foot { flex: none; padding: .35em 1.5ch .5em; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.controls-foot.note { color: var(--accent); }
+.controls-foot.ask { color: var(--text); }
+.controls-foot.ask.danger { color: var(--p1); }
+.controls-foot kbd { font: inherit; color: var(--text-2); }
+.ctl-title { display: flex; min-width: 0; align-items: baseline; gap: 2ch; margin-bottom: .6em; }
+.ctl-title h2 { margin: 0; font-size: 1em; font-weight: 700; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctl-title .meta { color: var(--dim); white-space: nowrap; }
+.ctl-title .state-open { color: var(--p2); } .ctl-title .state-done { color: var(--dim); } .ctl-title .state-archived { color: var(--faint); }
+.section-label { color: var(--faint); margin: .7em 0 .25em; }
+.session { margin: .2em 0 .5em; }
+.session-detail { font-size: .85em; padding-top: .2em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session.ended { opacity: .55; }
+.hour { position: relative; height: 4.6em; margin: .5em 0 .2em; }
+.hour .chart { position: absolute; top: .9em; left: 0; right: 0; bottom: 0; }
+.hour .chart svg { display: block; width: 100%; height: 100%; }
+.hour .over { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 2ch; white-space: nowrap; color: var(--dim); }
+.hour .over span { text-shadow: none; }
+.hour .over b { color: var(--text); }
+.menu { margin-top: .6em; }
+.menu .row { display: grid; grid-template-columns: 2ch 12ch minmax(0, 1fr); column-gap: 1.5ch; padding: .25em 1ch; border-radius: var(--radius); cursor: pointer; }
+.menu .row .k { color: var(--accent); font-weight: 700; }
+.menu .row .label { font-weight: 700; }
+.menu .row .about { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.menu .row.danger .k, .menu .row.danger .label { color: var(--p1); }
+.menu .row.on { outline: 1px solid var(--line); outline-offset: -1px; }
+.menu .row.on .about { color: var(--text-2); }
+.menu .row:hover { background: var(--surface); }
+.menu .row.on:hover { background: var(--raised); }
+.step-title { color: var(--text-2); margin: .6em 0 .2em; }
+.rename { display: flex; gap: 1ch; align-items: center; margin-top: .6em; padding: .3em 1ch; border-radius: var(--radius); background: var(--surface); }
+.rename .prompt { color: var(--accent); font-weight: 700; }
+.rename input { flex: 1; border: 0; outline: none; background: transparent; color: var(--text); font: inherit; }
+.confirm-buttons { display: flex; gap: 1ch; margin-top: .8em; }
+.confirm-buttons button.danger { background: var(--p1); color: var(--p0); }
+.hour .over .grow { flex: 1; }

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Axel</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-view="{{view}}">
+
+<section id="messages" class="view messages">
+  <header class="bar">
+    <h1 id="title">Loading…</h1>
+    <span id="live" class="live"></span>
+  </header>
+  <main id="timeline" class="timeline" aria-live="polite"></main>
+  <button id="jump" class="jump" hidden>↓ latest</button>
+</section>
+
+<section id="composer" class="view composer">
+  <div class="field">
+    <div id="attachments" class="attachments" aria-label="Attachments"></div>
+    <div id="suggest" class="suggest" hidden></div>
+    <div class="line">
+      <span class="prompt">&gt;</span>
+      <textarea id="input" placeholder="message the thread · @name for someone else" aria-label="Message the thread" spellcheck="false"></textarea>
+    </div>
+    <footer class="composer-footer meta">
+      <span id="target" class="target"></span><span class="meta-separator">·</span>
+      <button type="button" id="mode" class="mode" title="Shift+Tab to cycle modes"></button>
+      <span class="mode-help">(shift+tab to cycle)</span>
+      <span id="status" class="status" role="status"></span>
+      <button type="button" id="stop" class="ghost" hidden>stop</button>
+      <button type="button" id="send" class="ghost" title="Enter to send">send</button>
+      <span id="release" class="release"></span>
+    </footer>
+  </div>
+</section>
+
+<section id="activity" class="view activity">
+  <div id="activity-body"></div>
+</section>
+
+<section id="controls" class="view ctl">
+  <div id="controls-body" class="controls-body"></div>
+  <footer id="controls-foot" class="controls-foot"></footer>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -87,7 +87,8 @@ fn spawn(check: impl Fn() -> Option<String> + Send + 'static) -> Receiver<Option
     rx
 }
 
-pub(super) fn start() -> Receiver<Option<String>> {
+/// Start cached background release checks; never blocks the caller.
+pub fn start() -> Receiver<Option<String>> {
     spawn(|| {
         let path = cache_path()?;
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();

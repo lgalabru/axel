@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use axel_i18n::t;
-use axel_store::{SessionFilter, SessionState, StatusState, ThreadState};
+use axel_store::{SessionFilter, SessionState, StatusState};
 use axel_tui::ThreadOp;
-use axel_tui::manage::{ManageData, Outcome, SessionRow, run_manage};
+use axel_tui::manage::{ManageData, Outcome, SessionRow, SessionStatus, run_manage};
 
 use super::Ctx;
 
@@ -22,7 +22,7 @@ pub fn run(thread: &str) -> Result<()> {
     let t = super::thread::resolve(&ctx, thread)?;
     let mut note: Option<String> = None;
     loop {
-        let data = load(&ctx, &t.id, note.take())?;
+        let data = load(&ctx.store, &t.id, note.take())?;
         let outcome = run_manage(data)?;
         note = Some(match act(&ctx, &t.id, &outcome) {
             Ok(None) => break,
@@ -38,7 +38,7 @@ pub fn run(thread: &str) -> Result<()> {
 }
 
 /// Carry out an outcome; the footer line to show, or `None` to close.
-fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> {
+pub(super) fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> {
     Ok(Some(match outcome {
         Outcome::Close => return Ok(None),
         Outcome::Reset { agent } => return reset(ctx, thread_id, agent),
@@ -200,67 +200,47 @@ pub fn recap(ctx: &Ctx, thread_id: &str) -> Result<String> {
 const SPARK_MINUTES: usize = 60;
 
 /// What the pane shows, from the store.
-fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> {
+pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<String>) -> Result<ManageData> {
     let now = chrono::Utc::now().timestamp();
-    let summary = ctx.store.thread_summary(thread_id)?.context(t!("no such thread"))?;
+    let summary = store.thread_summary(thread_id)?.context(t!("no such thread"))?;
     let t = &summary.thread;
-    let agents: HashMap<String, axel_store::Agent> = ctx.store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
-    let roster = ctx.store.thread_agents(thread_id)?;
-    let statuses: HashMap<String, axel_store::Status> = ctx.store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect();
-    let contexts: HashMap<String, (i64, i64)> = ctx.store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect();
-    let turns = ctx.store.turns(thread_id)?;
-    let mut sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })?;
+    let known = Known::load(store, now)?;
+    let roster = store.thread_agents(thread_id)?;
+    let turns = store.turns(thread_id)?;
+    let mut sessions = store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })?;
     sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
-    let local_env = ctx.store.local_environment()?.id;
     let mut rows = Vec::new();
     let mut agent_names: Vec<String> = Vec::new();
     let (mut tokens, mut cost, mut tool_calls, mut files) = (0i64, 0f64, 0i64, 0i64);
     let mut spark = vec![0i64; SPARK_MINUTES];
     for s in &sessions {
-        let agent = agents.get(&s.agent_pubkey);
-        let name = agent.map(|a| a.name.clone()).unwrap_or_else(|| s.agent_pubkey.chars().take(8).collect());
-        if roster.contains(&s.agent_pubkey) && !agent_names.contains(&name) && !agent.is_some_and(|a| a.archived_at.is_some()) {
-            agent_names.push(name.clone());
+        let agent = known.agents.get(&s.agent_pubkey);
+        let (mut row, files_changed) = session_row(store, &known, &turns, s)?;
+        row.spark = vec![0; SPARK_MINUTES];
+        add_to_spark(store, &s.id, now, &mut row.spark)?;
+        assert_eq!(row.spark.len(), spark.len(), "session and total cover the same hour");
+        for (total, sample) in spark.iter_mut().zip(&row.spark) {
+            *total = total.saturating_add(*sample);
         }
-        let usage = ctx.store.usage(&s.id)?;
-        let (toks, usd) = usage.map(|u| (u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, u.cost_usd_est)).unwrap_or((0, 0.0));
-        let mine: Vec<_> = turns.iter().filter(|x| x.session_id == s.id).collect();
-        let calls: i64 = mine.iter().map(|x| x.summary.tool_calls).sum();
-        files += mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| count(c.files.len())).sum::<i64>();
-        add_to_spark(ctx, &s.id, now, &mut spark)?;
-        let live = s.ended_at.is_none();
-        let host = (s.environment_id != local_env).then(|| ctx.store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
-        let runs = match agent.and_then(|a| a.model.clone()) {
-            Some(m) => format!("{}/{m}", s.harness.as_str()),
-            None => s.harness.as_str().to_string(),
-        };
-        tokens += toks;
-        cost += usd;
-        tool_calls += calls;
-        if roster.contains(&s.agent_pubkey) { rows.push(SessionRow {
-            agent: name,
-            color: agent.and_then(|a| a.color),
-            runs,
-            state: session_state_label(s, statuses.get(&s.id)).into(),
-            live,
-            host,
-            turns: count(mine.len()),
-            tool_calls: calls,
-            tokens: toks,
-            cost_usd: usd,
-            context: contexts.get(&s.id).copied(),
-            duration_secs: s.ended_at.unwrap_or(now) - s.started_at,
-        }); }
+        (tokens, cost, tool_calls, files) = (tokens + row.tokens, cost + row.cost_usd, tool_calls + row.tool_calls, files + files_changed);
+        // Every session counts toward the totals; only the roster's are listed.
+        if roster.contains(&s.agent_pubkey) {
+            if !agent_names.contains(&row.agent) && !agent.is_some_and(|a| a.archived_at.is_some()) {
+                agent_names.push(row.agent.clone());
+            }
+            rows.push(row);
+        }
     }
     for pk in &roster {
-        if let Some(agent) = agents.get(pk)
+        if let Some(agent) = known.agents.get(pk)
             && agent.archived_at.is_none() && !agent_names.contains(&agent.name)
         { agent_names.push(agent.name.clone()); }
     }
+    debug_assert!(rows.len() <= sessions.len());
     Ok(ManageData {
         thread_id: thread_id.to_string(),
         title: t.title.clone(),
-        state: thread_state_label(t.state).into(),
+        state: t.state,
         age: axel_tui::manage::duration_label(now - t.created_at),
         projects: summary.projects.iter().map(|p| p.path_hint.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.path_hint.display().to_string())).collect(),
         sessions: rows,
@@ -271,9 +251,62 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         tool_calls,
         files_changed: files,
         agents: agent_names,
-        hosts: ctx.store.hosts()?.into_iter().map(|h| h.label).collect(),
+        hosts: store.hosts()?.into_iter().map(|h| h.label).collect(),
         note,
     })
+}
+
+/// What every session row looks up, read once for the pane.
+struct Known {
+    agents: HashMap<String, axel_store::Agent>,
+    statuses: HashMap<String, axel_store::Status>,
+    contexts: HashMap<String, (i64, i64)>,
+    local_env: String,
+    now: i64,
+}
+
+impl Known {
+    fn load(store: &axel_store::Store, now: i64) -> Result<Known> {
+        Ok(Known {
+            agents: store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect(),
+            statuses: store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect(),
+            contexts: store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect(),
+            local_env: store.local_environment()?.id,
+            now,
+        })
+    }
+}
+
+/// One session as the pane lists it, and the files its turns changed.
+fn session_row(store: &axel_store::Store, known: &Known, turns: &[axel_store::Turn], s: &axel_store::Session) -> Result<(SessionRow, i64)> {
+    let agent = known.agents.get(&s.agent_pubkey);
+    let name = agent.map(|a| a.name.clone()).unwrap_or_else(|| s.agent_pubkey.chars().take(8).collect());
+    let usage = store.usage(&s.id)?;
+    let (tokens, cost_usd) = usage.map(|u| (u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, u.cost_usd_est)).unwrap_or((0, 0.0));
+    let mine: Vec<_> = turns.iter().filter(|x| x.session_id == s.id).collect();
+    let files = mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| count(c.files.len())).sum::<i64>();
+    let host = (s.environment_id != known.local_env)
+        .then(|| store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
+    let runs = match agent.and_then(|a| a.model.clone()) {
+        Some(m) => format!("{}/{m}", s.harness.as_str()),
+        None => s.harness.as_str().to_string(),
+    };
+    let row = SessionRow {
+        agent: name,
+        color: agent.and_then(|a| a.color),
+        runs,
+        state: session_status(s, known.statuses.get(&s.id)),
+        live: s.ended_at.is_none(),
+        host,
+        turns: count(mine.len()),
+        tool_calls: mine.iter().map(|x| x.summary.tool_calls).sum(),
+        tokens,
+        cost_usd,
+        context: known.contexts.get(&s.id).copied(),
+        duration_secs: s.ended_at.unwrap_or(known.now) - s.started_at,
+        spark: Vec::new(),
+    };
+    Ok((row, files))
 }
 
 /// A count as the pane's integers hold it.
@@ -282,46 +315,37 @@ fn count(n: usize) -> i64 {
 }
 
 /// Add the session's tokens of the last hour to `spark`, a bar a minute.
-fn add_to_spark(ctx: &Ctx, session_id: &str, now: i64, spark: &mut [i64]) -> Result<()> {
+fn add_to_spark(store: &axel_store::Store, session_id: &str, now: i64, spark: &mut [i64]) -> Result<()> {
     assert_eq!(spark.len(), SPARK_MINUTES);
     let since = now - 60 * i64::try_from(SPARK_MINUTES).expect("a small constant");
-    for sample in ctx.store.usage_samples(Some(session_id), since)? {
+    for sample in store.usage_samples(Some(session_id), since)? {
         let minute = usize::try_from((sample.at - since) / 60).unwrap_or(0).min(SPARK_MINUTES - 1);
         spark[minute] = spark[minute].saturating_add(sample.input_tokens.saturating_add(sample.output_tokens));
     }
     Ok(())
 }
 
-/// What a session is doing, in the pane's words.
-fn session_state_label(s: &axel_store::Session, status: Option<&axel_store::Status>) -> &'static str {
+/// What a session is doing, as the pane shows it.
+fn session_status(s: &axel_store::Session, status: Option<&axel_store::Status>) -> SessionStatus {
     if s.ended_at.is_some() {
-        return "ended";
+        return SessionStatus::Ended;
     }
     if s.state == SessionState::Paused {
-        return "paused";
+        return SessionStatus::Paused;
     }
     match status {
         Some(st) => match st.state {
-            StatusState::Working => "working",
-            StatusState::Blocked => "blocked",
-            StatusState::Done => "done",
-            StatusState::Error => "error",
-            StatusState::Idle => "idle",
+            StatusState::Working => SessionStatus::Working,
+            StatusState::Blocked => SessionStatus::Blocked,
+            StatusState::Done => SessionStatus::Done,
+            StatusState::Error => SessionStatus::Error,
+            StatusState::Idle => SessionStatus::Idle,
         },
         None => match s.state {
-            SessionState::Running => "working",
-            SessionState::Blocked => "blocked",
-            _ => "idle",
+            SessionState::Running => SessionStatus::Working,
+            SessionState::Blocked => SessionStatus::Blocked,
+            SessionState::Starting | SessionState::Idle | SessionState::Paused | SessionState::Ended => SessionStatus::Idle,
         },
-    }
-}
-
-fn thread_state_label(state: ThreadState) -> &'static str {
-    match state {
-        ThreadState::Open => "open",
-        ThreadState::Done => "done",
-        ThreadState::Archived => "archived",
-        ThreadState::Deleted => "deleted",
     }
 }
 
@@ -330,6 +354,38 @@ mod tests {
     use super::*;
     use axel_identity::{Keypair, Keystore, attest};
     use axel_store::{Harness, NewAgent, NewSession, RuntimeMode, SessionRuntime, Store};
+
+    #[test]
+    fn session_sparklines_stay_separate_and_sum_to_the_thread_chart() {
+        let store = Store::open_memory().unwrap();
+        let owner = Keypair::generate();
+        let agent = Keypair::generate();
+        store.insert_agent(&NewAgent {
+            pubkey: agent.public().to_base58(), name: "atlas".into(), harness: Harness::Claude,
+            model: None, effort: None, skills: vec![], prompt: None, color: None, runtime_mode: RuntimeMode::default(),
+            auth_tag: Some(attest(&owner, &agent.public(), "").unwrap().to_tag()),
+            profile_id: None, device: None,
+        }).unwrap();
+        let thread = store.create_thread(&owner, "usage", "usage", None).unwrap();
+        let environment = store.local_environment().unwrap();
+        for tokens in [17, 43] {
+            let session = store.start_session(&agent, &NewSession {
+                thread_id: thread.id.clone(), agent_pubkey: agent.public().to_base58(),
+                environment_id: environment.id.clone(), environment_label: environment.label.clone(),
+                project_repo_key: None, harness: Harness::Claude, runtime_mode: RuntimeMode::default(),
+                resumed_from: None, runtime: SessionRuntime::Managed,
+            }).unwrap();
+            store.add_usage(&agent, &session.id, &axel_store::UsageDelta { input_tokens: tokens, ..Default::default() }, None).unwrap();
+        }
+        let data = load(&store, &thread.id, None).unwrap();
+        let mut sums: Vec<i64> = data.sessions.iter().map(|s| {
+            assert_eq!(s.spark.len(), SPARK_MINUTES);
+            s.spark.iter().sum()
+        }).collect();
+        sums.sort();
+        assert_eq!(sums, [17, 43]);
+        assert_eq!(data.spark.iter().sum::<i64>(), 60);
+    }
 
     #[test]
     fn stopping_one_agent_preserves_other_agents_and_other_threads() {
@@ -374,7 +430,7 @@ mod tests {
         assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
         assert_eq!(act(&ctx, &thread.id, &outcome).unwrap(), Some("stopped chosen: 0 sessions".into()));
         act(&ctx, &thread.id, &Outcome::RemoveAgent { agent: "chosen".into() }).unwrap();
-        assert!(!load(&ctx, &thread.id, None).unwrap().agents.contains(&"chosen".into()));
+        assert!(!load(&ctx.store, &thread.id, None).unwrap().agents.contains(&"chosen".into()));
         assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
         assert!(ctx.store.get_session(&a.id).unwrap().is_some());
         assert!(ctx.store.thread_agents(&other.id).unwrap().contains(&chosen.public().to_base58()));

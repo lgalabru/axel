@@ -1845,3 +1845,50 @@
   zh-Hans: "就绪"
 "{name} is ready":
   zh-Hans: "{name} 已就绪"
+
+"already running as session {id}":
+  zh-Hans: "已在会话 {id} 中运行"
+"session {id} has no conversation to continue":
+  zh-Hans: "会话 {id} 没有可继续的对话"
+
+# --- web panes (RFD 0007) ---
+"no agent is on this thread yet: start with @name and what you want done":
+  zh-Hans: "此话题上还没有智能体：以 @名字 开头，写下你要做的事"
+"not installed":
+  zh-Hans: "未安装"
+"nothing to send":
+  zh-Hans: "没有要发送的内容"
+"panes are web or terminal":
+  zh-Hans: "窗格可以是 web 或 terminal"
+"panes: {choice} (Ladybird: {browser})":
+  zh-Hans: "窗格：{choice}（Ladybird：{browser}）"
+"queued: it goes in when the running turn ends":
+  zh-Hans: "已排队：当前轮次结束后发送"
+"sent into the running turn: read at its next step":
+  zh-Hans: "已发送到当前轮次：会在下一步读取"
+"Ladybird couldn't draw here ({status})":
+  zh-Hans: "Ladybird 无法在这里绘制（{status}）"
+"Ladybird isn't installed":
+  zh-Hans: "未安装 Ladybird"
+"Ladybird isn't installed, so they stay terminal panes until it is: ladybird.org":
+  zh-Hans: "未安装 Ladybird，因此在安装前仍为终端窗格：ladybird.org"
+"that message is longer than {max} bytes":
+  zh-Hans: "这条消息超过 {max} 字节"
+"that session is on another thread":
+  zh-Hans: "该会话属于另一个话题"
+"thread views open as {choice} panes from now on":
+  zh-Hans: "从现在起，话题视图以 {choice} 窗格打开"
+"which answer?":
+  zh-Hans: "哪个答案？"
+"which question?":
+  zh-Hans: "哪个问题？"
+"which session?":
+  zh-Hans: "哪个会话？"
+"{why}; showing it as terminal text":
+  zh-Hans: "{why}；以终端文本显示"
+"a view is messages, composer, activity or controls":
+  zh-Hans: "视图可以是 messages、composer、activity 或 controls"
+"the thread controls need Rex":
+  zh-Hans: "话题控制需要 Rex"
+"that isn't something the controls offer":
+  zh-Hans: "控制面板里没有这个操作"

@@ -215,3 +215,91 @@ replacement for rewind). Different question from ours; see
 `adr/0001-turn-checkpoints-not-commit-checkpoints.md` for why we keep turn checkpoints
 and what to borrow (blob hashes, commit→turn links, packing after prune, zombie sweep).
 
+
+## terminal-browser (zenbu-labs, 2026-11-26)
+
+Chromium drawn inside a terminal pane. Read: its README, `cli/src/main.ts`,
+`shared/src/terminal-socket.ts`. Not installed here, not run.
+
+- **What it is.** Electron's offscreen rendering reads Chromium's pixels from
+  the GPU, and only the changed regions go to the terminal as Kitty graphics
+  protocol images. Input comes from the terminal's mouse and key reports; on
+  macOS a background Swift helper adds smooth trackpad scrolling. MIT.
+  Install with `brew install terminal-browser`.
+- **Terminals.** The README lists ghostty, rex, kitty, iTerm2, wezterm, cmux,
+  tmux, vscode, tty7, herdr and supacode as having built-in support. Windows
+  works only under WSL.
+- **CLI.** `terminal-browser open URL` runs in the foreground until the user
+  closes it, then exits with the session's code (0 when closed normally).
+  Other commands and flags:
+  - `--split right|left|up|down` opens it in a new pane;
+  - `--no-merge` keeps it out of a browser already running (also
+    `TERMINAL_BROWSER_NO_MERGE=1`);
+  - `--transparent`, `--allow-clipboard-read`, `--ssh=`;
+  - `ls`, `action` (an agent-browser compatible CLI), `upgrade`.
+- **What it dropped.** App mode, `--no-toolbar` and `--no-frame` were
+  removed: "app mode was removed from terminal-browser". Its bar always shows.
+- **Telemetry.** On by default; `DO_NOT_TRACK=1` or
+  `terminal-browser config set telemetry.usage off` turns it off.
+- **Terminal socket.** A terminal that wants deeper integration sets
+  `TERMINAL_BROWSER_TERMINAL_SOCKET`, a Unix socket with one JSON request per
+  connection. The methods are `hello`, `getCurrentPane`, `split`,
+  `listPanes`, `neighbor`, `sendText`, `pasteKey` and `focusPane`. Rex could
+  serve it; Axel doesn't need to.
+- **Neighbours.** awrit (Chromium, Kitty graphics, the first of these),
+  brow6el (CEF, sixel and Kitty graphics, "POC code quality"), Carbonyl
+  (Chromium drawn as text, works over SSH).
+- **What we take.** A web page as a pane, through `terminal-browser open
+  --no-merge`, with the terminal view as the fallback (RFD 0007).
+- **What we don't.** Its terminal socket, its agent CLI, and any reliance on
+  merging into a shared browser.
+
+## Rex 0.1.0-preview.25 (build 2154, 2026-11-26)
+
+Installed by the app's updater beside the running `preview.22`, and run here
+as a throwaway server (`--state-dir` in `/tmp`, `--config /dev/null`):
+- The API is at revision 24, up from 19. New methods: `client.undo_close`,
+  `session.transfer_window`, and the `com.superlogical.fs` block creator.
+- Terminals gain `program_resume_records`. `OSC7577_TOKEN` is set in each
+  pane, though not with `--restore=false`.
+- Block creators: `terminal`, `tunnel`, `fs`, `onboarding`. No browser or web
+  block. Executable block plugins load from `--block-dir`, but their protocol
+  isn't documented.
+- Program resume needs a trust rule (`rex.set("resume.trust.NAME", { command
+  = {...} })`). Rex ships rules for `claude`, `codex` and `opencode`, and
+  checks that the reporting process is the program the command starts.
+
+## Ladybird (2026.47.7, 2026-11-26)
+
+An independent browser engine (LibWeb, LibJS), BSD-2-Clause, alpha since
+2026-11-23 on macOS and Linux. Read: its news and newsletters, the
+repository's `Cargo.toml` and `Libraries/LibWebView/TerminalWebView.{h,cpp}`.
+Run: the copy in `/Applications`.
+
+- **Rust.** Since February 2026 parts of it are moving to Rust: LibJS first,
+  then style and layout, the HTML parser, Wasm and more. The root
+  `Cargo.toml` lists about 35 workspace crates (`libjs_rust`, `libweb_rust`,
+  `libgfx_rust`, `libipc_rust`…). They are path dependencies of each other
+  and of the C++ build; none is published.
+- **Process model.** A UI process, a WebContent process per page and helpers:
+  RequestServer, ImageDecoder, Compositor, AudioServer, VideoDecoderServer.
+  The macOS app is 217 MB.
+- **Headless modes.** `--headless[=screenshot|layout-tree|text|manual|terminal]`.
+  - `screenshot` takes `--screenshot-path`, `--screenshot-delay`,
+    `--window-width` and `--window-height`.
+  - `terminal` takes over the terminal; its processes log to
+    `/tmp/ladybird-terminal-PID.log`. It draws frames as Kitty graphics
+    (`a=T`, then `a=f` for damaged regions), through temporary files with an
+    inline fallback. It reads SGR-pixel mouse, the Kitty keyboard protocol,
+    focus and bracketed paste, and follows `SIGWINCH`. The last row is its
+    status line.
+- **Embedding.** Only through its own C++ classes (`HeadlessWebView`,
+  `TerminalWebView`), with no stable API. Public pull requests stopped on
+  2026-06-05; only maintainers open them now.
+- **Measured here.** It renders Axel's thread page the same as Chrome,
+  JavaScript, cookies and the event stream included. Terminal mode
+  through `axel web pane` uses about 285 MB in eight processes, idle, and
+  exits with every helper when the pane hangs up.
+- **What we take.** Its terminal mode, run as a program, as the web pane
+  renderer (RFD 0007).
+- **What we don't.** Linking it, its internal crates, and forking it.

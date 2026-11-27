@@ -478,6 +478,18 @@ pub mod osc {   // OSC 7501 program status, rev 0.4
 }
 ```
 
+
+```rust
+// axel_rex::resume: OSC 7577, the Program Resume Protocol (rev 0.5)
+pub const TOKEN_ENV: &str = "OSC7577_TOKEN"; pub const REPORT_BYTES_MAX: usize = 2048; pub const ARGV_ELEMENTS_MAX: usize = 64;
+pub enum Action<'a> { Resume { argv: &'a [String], cwd: Option<&'a Path> }, Clear }
+pub enum Unreportable { NoProgram, RelativeProgram(String), RelativeCwd(String), ControlCharacter, TooManyArguments, TooLong(usize), BadToken }
+pub fn encode(pid: u32, time_secs: u64, action: Action<'_>, token: &str) -> Result<String, Unreportable>;
+pub unsafe fn take_token();               // first thing in main: keep the token, remove it from the environment
+pub fn token() -> Option<String>;
+pub fn report(action: Action<'_>) -> std::io::Result<bool>;   // to /dev/tty; false without a token; an unreportable command sends Clear
+```
+
 ## axel-tui
 
 ```rust
@@ -620,6 +632,32 @@ pub struct Turn { pub id: String, pub thread_id: String, pub session_id: String,
 // Session gains: pub runtime: SessionRuntime, pub socket_path: Option<PathBuf>
 ```
 `axel_inbox::kind::TURN = 40` ("turn"); `is_message(k)` stays `k < 20`.
+
+## Web panes (RFD 0007)
+
+```rust
+// axel-tui
+pub fn load_thread_data(store: &Store, owner_pk: &str, thread_id: &str) -> anyhow::Result<model::ThreadData>;  // what both views draw
+pub fn load_usage_data(store: &Store, thread_id: &str) -> anyhow::Result<model::UsageData>;                     // what the tokens/activity pane draws
+// axel-store
+impl Store { pub fn change_marker(&self) -> Result<(i64, i64), Error>; }   // (last event seq, items revision): moves when a view might change
+// axel-tui manage: ManageData.state: ThreadState; SessionRow.state: SessionStatus { Working, Idle, Blocked, Done, Error, Paused, Ended };
+// SessionRow.spark: Vec<i64>, at most 60 one-minute token buckets, oldest first; web controls sessions[].spark carries the same data.
+// Action::as_str, ManageView::agent_actions, confirm_question(&Outcome) are public for the web controls.
+// axel (bin): `axel web pane|serve THREAD [--view messages|composer|activity|controls]`, `axel panes [terminal|web]` (default terminal; $AXEL_PANES overrides $AXEL_HOME/settings.json);
+// cmd::display: enum Pane { Conversation, Composer, Activity, Controls }, enum Display { Terminal, Web },
+// trait PaneDisplay { fn command(&self, thread, Pane) -> Vec<String>; fn run(&self, thread, Pane) -> Result<()>; fn composer_rows(&self) -> u16 }
+// Ladybird: $AXEL_LADYBIRD, else `ladybird` on PATH, else Ladybird.app in /Applications or ~/Applications; run as `--headless=terminal --temporary-profile --device-pixel-ratio R URL`
+// HTTP on 127.0.0.1: GET /?k=TOKEN (one page load, 30 s) → 303 + cookie axel_web (a second secret); GET / · /app.css · /app.js · /fonts/*.woff2 · /api/thread · /api/events (SSE: `data: VERSION`);
+// Composer JSON includes version: String and update_hint: Option<String>.
+// axel-tui: pub fn start_update_check() -> Receiver<Option<String>>; background cached release checks.
+// POST /api/attach {paths: String} -> {attachments: [{path, name}]} resolves terminal drops;
+// POST /api/attach {name: String, data: String} stores one base64 image, same response.
+// Up to 8 attachments, 10 MiB each; upload body at most 14 MiB. Images: PNG, JPEG, GIF, WebP.
+// POST (JSON, Origin of this server) /api/send {text, steer, attachments?: [String]} · /api/answer {session_id, item_id, option_id} · /api/cancel {session_id}
+//   · /api/cycle_mode {session_id} → {mode}; thread-owned live managed sessions only, same cycle as terminal Shift+Tab
+//   · /api/control {outcome, confirmed} → {confirm} | {note} | {close} · /api/open_controls {} → 200 JSON, or 409 {error}
+```
 
 ## axel-tui additions (thread view)
 

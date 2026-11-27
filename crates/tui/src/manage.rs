@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axel_i18n::t;
-use axel_store::AgentColor;
+use axel_store::{AgentColor, ThreadState};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,12 +23,11 @@ use crate::util::{ellipsize, format_tokens, pad_end, pad_start, text_width};
 const POLL: Duration = Duration::from_millis(60);
 
 /// Everything the pane shows, loaded by the caller.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ManageData {
     pub thread_id: String,
     pub title: String,
-    /// `open`, `done` or `archived`.
-    pub state: String,
+    pub state: ThreadState,
     /// `2d`, `41m`: since the thread was created.
     pub age: String,
     /// Project names, or none for a scratch thread.
@@ -51,14 +50,64 @@ pub struct ManageData {
     pub note: Option<String>,
 }
 
+impl Default for ManageData {
+    /// An open thread with nothing on it yet.
+    fn default() -> ManageData {
+        ManageData {
+            thread_id: String::new(),
+            title: String::new(),
+            state: ThreadState::Open,
+            age: String::new(),
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            spark: Vec::new(),
+            tokens: 0,
+            cost_usd: 0.0,
+            turns: 0,
+            tool_calls: 0,
+            files_changed: 0,
+            agents: Vec::new(),
+            hosts: Vec::new(),
+            note: None,
+        }
+    }
+}
+
+/// What a session is doing, as the pane shows it: its own state, refined
+/// by its last status report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionStatus {
+    Working,
+    #[default]
+    Idle,
+    Blocked,
+    Done,
+    Error,
+    Paused,
+    Ended,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatus::Working => "working",
+            SessionStatus::Idle => "idle",
+            SessionStatus::Blocked => "blocked",
+            SessionStatus::Done => "done",
+            SessionStatus::Error => "error",
+            SessionStatus::Paused => "paused",
+            SessionStatus::Ended => "ended",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionRow {
     pub agent: String,
     pub color: Option<AgentColor>,
     /// `claude/opus`.
     pub runs: String,
-    /// `working`, `idle`, `blocked`, `ended`…
-    pub state: String,
+    pub state: SessionStatus,
     pub live: bool,
     /// Where it runs when not here.
     pub host: Option<String>,
@@ -69,6 +118,8 @@ pub struct SessionRow {
     /// `(used, size)` of its context window, when it reports it.
     pub context: Option<(i64, i64)>,
     pub duration_secs: i64,
+    /// Last hour, oldest first, at most 60 one-minute token buckets.
+    pub spark: Vec<i64>,
 }
 
 /// What a row of the menu does.
@@ -99,6 +150,21 @@ impl Action {
             Action::StopAgent => 't',
             Action::Rename => 'n',
             Action::HardReset => 'h',
+        }
+    }
+
+    /// The action's name where it leaves the program (the web page).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Action::Reset => "reset",
+            Action::Move => "move",
+            Action::Settle => "settle",
+            Action::Reopen => "reopen",
+            Action::Archive => "archive",
+            Action::Stop => "stop",
+            Action::StopAgent => "agents",
+            Action::Rename => "rename",
+            Action::HardReset => "hard_reset",
         }
     }
 
@@ -179,8 +245,8 @@ impl ManageView {
                 out.push(Action::Move);
             }
         }
-        out.push(if self.data.state == "done" { Action::Reopen } else { Action::Settle });
-        if self.data.state != "archived" {
+        out.push(if self.data.state == ThreadState::Done { Action::Reopen } else { Action::Settle });
+        if self.data.state != ThreadState::Archived {
             out.push(Action::Archive);
         }
         if !self.data.agents.is_empty() { out.push(Action::StopAgent); }
@@ -211,12 +277,13 @@ impl ManageView {
         self.data.sessions.iter().filter(|s| s.live).count()
     }
 
-    fn agent_actions(&self, agent: &str) -> Vec<(&'static str, char, Outcome)> {
+    /// What can be done to `agent` on this thread: a label, its key, and the outcome.
+    pub fn agent_actions(&self, agent: &str) -> Vec<(&'static str, char, Outcome)> {
         let mut actions = Vec::new();
         let live: Vec<_> = self.data.sessions.iter().filter(|s| s.agent == agent && s.live).collect();
         let name = || agent.to_string();
-        if live.iter().any(|s| s.state != "paused") { actions.push((t!("Pause"), 'p', Outcome::PauseAgent { agent: name() })); }
-        if live.iter().any(|s| s.state == "paused") { actions.push((t!("Resume"), 'r', Outcome::ResumeAgent { agent: name() })); }
+        if live.iter().any(|s| s.state != SessionStatus::Paused) { actions.push((t!("Pause"), 'p', Outcome::PauseAgent { agent: name() })); }
+        if live.iter().any(|s| s.state == SessionStatus::Paused) { actions.push((t!("Resume"), 'r', Outcome::ResumeAgent { agent: name() })); }
         if !live.is_empty() { actions.push((t!("Kill"), 'x', Outcome::StopAgent { agent: name() })); }
         actions.push((t!("Remove from thread"), 'd', Outcome::RemoveAgent { agent: name() }));
         actions
@@ -427,7 +494,7 @@ impl Rows<'_, '_> {
 /// The title left, state · age · sessions right; the projects under it.
 fn render_title(rows: &mut Rows, d: &ManageData, width: usize) {
     let sessions = if d.sessions.len() == 1 { t!("1 session").to_string() } else { t!("{n} sessions", n = d.sessions.len()) };
-    let right = format!("{} · {} · {sessions}", d.state, d.age);
+    let right = format!("{} · {} · {sessions}", d.state.as_str(), d.age);
     let title_width = width.saturating_sub(text_width(&right) + 2);
     rows.push(Line::from(vec![
         Span::styled(pad_end(&ellipsize(&d.title, title_width), title_width), theme::accent_bold()),
@@ -452,7 +519,7 @@ enum SessionColumn {
 
 impl SessionColumn {
     /// Left to right; each shows only while it still fits.
-    const ALL: [SessionColumn; 7] = [Self::State, Self::Turns, Self::Tools, Self::Tokens, Self::Cost, Self::Context, Self::Age];
+    const ALL: [SessionColumn; 7] = [Self::Tokens, Self::Cost, Self::Context, Self::State, Self::Turns, Self::Tools, Self::Age];
 
     fn label(self) -> &'static str {
         match self {
@@ -481,8 +548,8 @@ impl SessionColumn {
         match self {
             Self::State => {
                 let st = match (&s.host, s.live) {
-                    (Some(h), true) => format!("{}@{h}", s.state),
-                    _ => s.state.clone(),
+                    (Some(h), true) => format!("{}@{h}", s.state.as_str()),
+                    _ => s.state.as_str().to_string(),
                 };
                 (st, if s.live { theme::accent() } else { theme::dim() })
             }
@@ -506,10 +573,14 @@ impl SessionColumn {
 fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
     let name_width = d.sessions.iter().map(|s| text_width(&s.agent)).max().unwrap_or(5).clamp(5, 12);
     let runs_width = d.sessions.iter().map(|s| text_width(&s.runs)).max().unwrap_or(0).min(18);
+    // Six cells keep a chart legible; narrower panes prioritize the figures.
+    const CHART_COLS_MIN: usize = 6;
+    let chart_reserved = if width >= 70 { CHART_COLS_MIN + 1 } else { 0 };
+    let table_width = width.saturating_sub(chart_reserved);
     let mut used = name_width + 1 + runs_width;
     let mut shown: Vec<SessionColumn> = Vec::new();
     for column in SessionColumn::ALL {
-        if used + 1 + column.width_cols() <= width {
+        if used + 1 + column.width_cols() <= table_width {
             shown.push(column);
             used += 1 + column.width_cols();
         }
@@ -519,16 +590,26 @@ fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
         let (label, w) = (column.label(), column.width_cols());
         header.push(Span::styled(format!(" {}", pad_start(label, w)), theme::dim()));
     }
+    let chart_width = width.saturating_sub(used + 1).min(30);
+    let chart_width = if chart_reserved > 0 { chart_width } else { 0 };
+    let peak = d.sessions.iter().map(|s| crate::view::chart::peak(&s.spark, chart_width)).max().unwrap_or(0);
+    if chart_width > 0 {
+        header.push(Span::styled(" 1h", theme::dim()));
+    }
     rows.push(Line::from(header));
     for s in &d.sessions {
         let mut spans = vec![
-            Span::styled(pad_end(&ellipsize(&s.agent, name_width), name_width), Style::default().fg(theme::agent_color(s.color))),
+            Span::styled(pad_end(&ellipsize(&s.agent.to_uppercase(), name_width), name_width), Style::default().fg(theme::agent_color(s.color))),
             Span::styled(format!(" {}", pad_end(&ellipsize(&s.runs, runs_width), runs_width)), theme::dim()),
         ];
         for column in &shown {
             let (text, style) = column.cell(s);
             let w = column.width_cols();
             spans.push(Span::styled(format!(" {}", pad_start(&ellipsize(&text, w), w)), style));
+        }
+        if chart_width > 0 {
+            spans.push(Span::raw(" "));
+            spans.extend(crate::view::chart::activity(&s.spark, chart_width, peak, Style::default().fg(theme::agent_color(s.color))));
         }
         rows.push(Line::from(spans));
     }
@@ -544,7 +625,7 @@ fn render_totals(rows: &mut Rows, d: &ManageData, width: usize) {
         Span::styled(t!("{n} tokens", n = format_tokens(d.tokens)), theme::bold()),
         Span::styled(format!(" ${:.2} · {numbers}{files}  ", d.cost_usd), theme::dim()),
     ];
-    spans.extend(crate::view::chart::braille(&d.spark, spark_width, peak, theme::accent()));
+    spans.extend(crate::view::chart::activity(&d.spark, spark_width, peak, theme::accent()));
     rows.push(Line::from(spans));
 }
 
@@ -613,7 +694,8 @@ fn footer_line(v: &ManageView) -> Line<'static> {
     }
 }
 
-fn confirm_question(o: &Outcome) -> String {
+/// The question asked before `o` is carried out.
+pub fn confirm_question(o: &Outcome) -> String {
     match o {
         Outcome::Reset { agent } => t!("reset: end the thread's sessions and start {agent} fresh with a recap?", agent = agent),
         Outcome::Move { agent, host } => t!("move {agent} to {host}?", agent = agent, host = host),
@@ -664,12 +746,12 @@ mod tests {
         ManageData {
             thread_id: "T1".into(),
             title: "Ship it".into(),
-            state: "open".into(),
+            state: ThreadState::Open,
             age: "2d".into(),
             projects: vec!["axel".into()],
             sessions: vec![
-                SessionRow { agent: "opus".into(), runs: "claude/opus".into(), state: "idle".into(), live: true, turns: 12, tool_calls: 140, tokens: 34_300_000, cost_usd: 57.86, context: Some((62, 100)), duration_secs: 5 * 3600 + 12 * 60, ..Default::default() },
-                SessionRow { agent: "fable".into(), runs: "claude/fable".into(), state: "ended".into(), live: false, turns: 4, tool_calls: 37, tokens: 3_100_000, cost_usd: 4.2, duration_secs: 41 * 60, ..Default::default() },
+                SessionRow { agent: "opus".into(), runs: "claude/opus".into(), state: SessionStatus::Idle, live: true, turns: 12, tool_calls: 140, tokens: 34_300_000, cost_usd: 57.86, context: Some((62, 100)), duration_secs: 5 * 3600 + 12 * 60, ..Default::default() },
+                SessionRow { agent: "fable".into(), runs: "claude/fable".into(), state: SessionStatus::Ended, live: false, turns: 4, tool_calls: 37, tokens: 3_100_000, cost_usd: 4.2, duration_secs: 41 * 60, ..Default::default() },
             ],
             spark: vec![0; 60],
             tokens: 37_400_000,
@@ -688,7 +770,7 @@ mod tests {
         let v = ManageView::new(data());
         assert_eq!(v.actions(), vec![Action::Reset, Action::Move, Action::Settle, Action::Archive, Action::StopAgent, Action::Stop, Action::Rename, Action::HardReset]);
         let mut done = data();
-        done.state = "done".into();
+        done.state = ThreadState::Done;
         done.hosts.clear();
         done.sessions.iter_mut().for_each(|s| s.live = false);
         assert_eq!(ManageView::new(done).actions(), vec![Action::Reset, Action::Reopen, Action::Archive, Action::StopAgent, Action::Rename, Action::HardReset], "no hosts: no move; nothing live: no stop");
@@ -703,7 +785,7 @@ mod tests {
         assert_eq!(v.step, Step::AgentActions { agent: "opus".into(), idx: 0 });
         v.handle_key(key(KeyCode::Char('p')));
         assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Some(Outcome::PauseAgent { agent: "opus".into() }));
-        v.data.sessions[0].state = "paused".into();
+        v.data.sessions[0].state = SessionStatus::Paused;
         let actions = v.agent_actions("opus");
         assert_eq!(actions.iter().map(|a| a.0).collect::<Vec<_>>(), vec!["Resume", "Kill", "Remove from thread"]);
         v.step = Step::AgentActions { agent: "opus".into(), idx: 0 };
@@ -754,7 +836,7 @@ mod tests {
         let text: Vec<String> = (0..17).map(|y| (0..90).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert!(text[0].starts_with("Ship it") && text[0].ends_with("open · 2d · 2 sessions"), "{:?}", text[0]);
         assert!(text[3].contains("state") && text[3].contains("tokens") && text[3].contains("ctx") && text[3].contains("for"), "{:?}", text[3]);
-        assert!(text[4].starts_with("opus") && text[4].contains("claude/opus") && text[4].contains("idle") && text[4].contains("34M") && text[4].contains("62%") && text[4].contains("5h 12m"), "{:?}", text[4]);
+        assert!(text[4].starts_with("OPUS") && text[4].contains("claude/opus") && text[4].contains("idle") && text[4].contains("34M") && text[4].contains("62%") && text[4].contains("5h 12m"), "{:?}", text[4]);
         assert!(text[6].starts_with("37M tokens") && text[6].contains("16 turns") && text[6].contains("9 files changed"), "{:?}", text[6]);
         assert!(text[8].starts_with("› r Reset") && text[9].starts_with("  m Move"), "{:?}", &text[8..10]);
         assert!(text[15].starts_with("  h Hard reset"), "last, apart: {:?}", text[15]);
@@ -765,6 +847,6 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(44, 17)).unwrap();
         term.draw(|f| render(f, &v)).unwrap();
         let row: String = (0..44).map(|x| term.backend().buffer()[(x, 3)].symbol().to_string()).collect();
-        assert!(row.contains("state") && row.contains("turns") && !row.contains("ctx"), "{row:?}");
+        assert!(row.contains("tokens") && row.contains("cost") && row.contains("ctx") && !row.contains("turns"), "{row:?}");
     }
 }

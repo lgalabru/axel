@@ -5,6 +5,7 @@ mod claude_profile;
 mod convert;
 mod device;
 mod diff;
+pub(crate) mod display;
 mod effort;
 mod gc;
 mod doctor;
@@ -17,6 +18,7 @@ mod manage;
 mod policy;
 mod process_control;
 mod reconcile;
+mod resume;
 mod rex_link;
 mod schedule;
 mod session;
@@ -30,6 +32,7 @@ mod thread;
 mod ui;
 mod undo;
 mod usage;
+mod web;
 mod update;
 mod mcp;
 
@@ -149,6 +152,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             crate::cli::DeviceCommand::Merge { name, keep, rename } => {
                 device::merge(name.as_deref(), keep.as_deref(), rename.as_deref())
             }
+        },
+        Some(Command::Panes { choice }) => display::panes_cmd(choice),
+        Some(Command::Web { command }) => match command {
+            crate::cli::WebCommand::Pane { thread, view } => web::pane(&thread, view),
+            crate::cli::WebCommand::Serve { thread, view } => web::serve(&thread, view),
         },
         Some(Command::Sync { host, follow }) => host::sync_cmd(host.as_deref(), follow),
         Some(Command::Schedule { command }) => schedule::run(command),

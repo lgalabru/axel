@@ -272,6 +272,144 @@ $ axel                               # in any Rex terminal
    blocked or unread, otherwise on the launcher. A Rex `init.lua` action
    (`rex do axel`) can bind this to a key.
 
+## Web panes (RFD 0007)
+
+Experimental, and off until `axel panes web` turns it on: a thread view's
+three panes can then be web pages instead of terminal text, wherever Ladybird
+is installed. The layout and Rex labels are the terminal view's: the
+conversation above, the five-row composer below, the activity pane beside it.
+The bottom row splits 73% composer and 27% activity, with at least 24 columns
+for activity and 50 for composing. Narrower windows omit activity. The web
+composer fits once after its terminal has dimensions, including on restore. Each pane
+runs `axel web pane THREAD --view messages|composer|activity`, which serves
+the thread on `127.0.0.1` from that process and runs `Ladybird
+--headless=terminal --temporary-profile --device-pixel-ratio R URL` in the same
+pane. Ladybird draws the page as Kitty graphics, and `R` comes from the pane's
+pixels per cell.
+
+Ladybird runs on a pty of the pane process's own (`web/terminal.rs`), one row
+taller than the pane. Terminal mode keeps its last row for a status line (the
+page's address and port, its keys) with no option to hide it. Here that row is
+the extra one, and what Ladybird writes to it is dropped, so the page fills the
+pane. Ctrl-L, which opens its address prompt there, is dropped too. The same
+layer follows the pane's size. A terminal whose size has no pixels is asked with
+`CSI 14 t`. When the cells change enough to change `R`, as when a phone shows the
+pane, Ladybird is started again at the new ratio, on a fresh pty. When the pane
+hangs up, Ladybird's process group is ended: it ignores SIGTERM in terminal mode,
+so it gets SIGKILL after 1.5 s.
+
+Ladybird's frames are opaque RGB, so the page can't be transparent. It is drawn
+the way the terminal view is drawn instead, in the terminal's own terms. Before
+Ladybird starts, the pane asks its terminal, in one round trip, for its text and
+background colours (OSC 10, 11), its 16-colour palette (OSC 4) and, when needed,
+its pixel size. `CSI c` goes last as the end marker. The page takes them as CSS
+properties (`web/theme.rs`): `--bg`, `--text`, `--p0` to `--p15`, `--dim` from
+palette 8, and surfaces as steps between background and text. The text is
+JetBrains Mono, Rex's default terminal font, which the binary carries
+(`/fonts/*.woff2`, OFL) since Ladybird can't reach the copy built into Ghostty.
+It is sized so a character is one terminal cell wide. The properties are
+appended to `/app.css` as a `:root` rule, since the page's CSP allows no inline
+style, and replaced when Ladybird restarts at another scale. The page and
+composer share that background. Code, questions and controls have no extra
+panel fills. Only agent badges and action buttons carry filled colours. A background
+reply applies even if the terminal does not return a foreground colour.
+
+The web composer accepts terminal file-path pastes and browser image drops.
+It shows removable attachment chips and carries their paths through dispatch,
+including when summoning an agent. Browser uploads use generated filenames in
+`~/.axel/attachments`. A request accepts at most eight files of 10 MiB each.
+PNG, JPEG, GIF and WebP uploads are supported. The Axel version and cached
+update hint appear on the right of the rounded composer footer when there is
+room. The message field sits above a divider; the agent and runtime mode sit
+below it. Shift+Tab, or clicking the mode, uses the terminal mode cycle.
+
+The pages follow the terminal view:
+- **Conversation.** Each agent's turn has a bold name badge in its palette
+  colour, with rounded corners and an arrow, and the time on the right. Your
+  messages are `> ` lines. A run of tool calls is one dim `↗` line that opens on
+  a click. The conversation uses the pane's full width.
+- **Activity.** Each agent's last hour is a braille chart as wide as the pane:
+  dots where a braille character's would be, two across and four down per cell,
+  the series resampled to the dots that fit, the top dot of each column lit in
+  part for the exact value, and a gradient up the column. The agent's name,
+  name is on the left, tokens and cost sit above the context meter in the
+  middle, and the chart fills the right. Smaller sans-serif type uses uppercase
+  labels and tabular numbers. Shared identity and metric column widths align
+  every chart. Quiet time buckets stay blank in web and terminal activity
+  strips. Names truncate at narrow widths. Plan limits share a row when they fit. Context and plan limits
+  are gauges two dots high, green to yellow to red along their length.
+- **Thread controls.** Ctrl+D in the web composer or conversation opens the
+  thread controls as a web pane too (`--view controls`), in the same floating
+  layer as the terminal pane. Each session uses the activity strip design with
+  its own last-hour chart. Terminal views use uppercase names, figures and
+  context followed by a braille chart, dropping columns at narrow widths.
+  It shows the sessions, a chart of the thread's last
+  hour with its totals, and the terminal pane's menu, walked with the same keys.
+  The page only walks the steps: `POST /api/control` with an outcome returns the
+  question `axel_tui::manage::confirm_question` asks, and with `confirmed`
+  carries it out through `manage::act`. It accepts only agents and hosts the menu
+  offered.
+- **Scrolling.** The page takes the wheel itself. Ladybird eases each 40-pixel
+  step over about 200 ms, a dozen full-pane frames each. The page moves a line
+  per step at once instead, at most one frame per batch of steps.
+
+Nothing on the page animates. Ladybird sends the whole pane again for any
+change, as a frame of several megabytes. A CSS animation kept the conversation
+at 60 frames a second while idle, and scrolling waited behind it. A working
+agent's mark is still, and an update replaces only the timeline entries that
+changed.
+
+The pages draw `axel_tui::load_thread_data` and `load_usage_data`, and send
+through `axel_tui::thread::dispatch`, as the terminal view does. Closing the
+composer closes the view, as the terminal composer does.
+
+Only the page the pane's own Ladybird opened may talk to its server
+(`web/guard.rs`). Ladybird's address carries a token that opens one page load
+within 30 s, minted for each start: on macOS any local process can read every
+process's arguments, so a token read from `ps` afterwards opens nothing.
+Spending it sets the `axel_web` cookie, a second secret no command line
+carries, `HttpOnly` and `SameSite=Strict`. Both are 32 bytes from
+`/dev/urandom`, compared in constant time. Every request must name this server
+(`Host`, against DNS rebinding), and every write must be JSON with this
+server's `Origin`.
+
+How a pane is drawn is one trait, `display::PaneDisplay`, implemented by
+`TerminalPanes` and `WebPanes`. It gives the command Rex runs to show a `Pane`
+(conversation, composer, activity, controls), runs one here, and sizes the
+composer. `Display::chosen()` picks the implementation: the owner's choice,
+where it can draw. Docking, splitting, the controls and the web fallback all go
+through it.
+
+`axel panes web|terminal` chooses (`$AXEL_PANES` overrides it; the default is
+`terminal`). Ladybird is found at `$AXEL_LADYBIRD`, else on PATH, else as
+`Ladybird.app` in `/Applications` or `~/Applications`. Without it, or when it
+can't draw, each pane shows its terminal counterpart and says why.
+
+## Coming back after Rex restarts (OSC 7577)
+
+Rex's Program Resume Protocol (OSC 7577, revision 0.5) lets a program tell
+Rex how to start it again. Rex gives each pane a token in `$OSC7577_TOKEN`;
+a report is `pid`, `time`, base64 `argv` and `cwd`, signed with
+`mac = sha256(body ":" token)` (`axel_rex::resume`). `axel` takes the token
+out of its environment first thing in `main`, so no harness or child ever
+sees it, and hands it back only when it execs another `axel` in the same
+pane.
+
+| Pane | Comes back as |
+|---|---|
+| A thread's web panes | `axel web pane T --view V` |
+| A thread's stream, composer, tokens pane | the same command: `axel thread stream T`, `axel thread compose T`, `axel ui --screen usage --thread T` |
+| An agent's session, managed host or harness in a pane | `axel session resume S`, with the session's work directory as `cwd` |
+| The floating launcher, its threads list, the corner tokens pane, questions | nothing: they are summoned, not kept |
+
+`axel session resume S` ends what is left of the agent's sessions on that
+thread and starts a new one in this pane (`Target::ThisPane`), continuing the
+newest conversation it had there (`--resume`, `codex resume`, or ACP
+`session/load`) with no prompt sent again. It is safe to run twice: when the
+agent already runs on the thread, it says so and changes nothing. A session
+with no harness conversation is not resumed. Leaving the composer sends
+`clear`; signals never do, as the spec asks.
+
 ## Signals (how status gets back without scraping)
 
 | Harness | Mechanism | Notes |

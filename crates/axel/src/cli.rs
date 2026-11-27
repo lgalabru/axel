@@ -161,6 +161,18 @@ pub enum Command {
         #[command(subcommand)]
         command: DeviceCommand,
     },
+    /// How thread views are drawn: `terminal` (text, the default) or `web`
+    /// (experimental: a web page drawn by Ladybird, where it is installed).
+    Panes {
+        #[arg(value_name = "terminal|web", value_parser = crate::cmd::display::parse_display)]
+        choice: Option<crate::cmd::display::Display>,
+    },
+    /// A thread's view as a web page (RFD 0007).
+    #[command(hide = true)]
+    Web {
+        #[command(subcommand)]
+        command: WebCommand,
+    },
     /// Exchange threads, transcripts and job branches with remote hosts.
     Sync {
         /// Host label; all hosts when omitted.
@@ -283,6 +295,22 @@ fn parse_route(text: &str) -> Result<axel_store::PairingRoute, String> {
         let names: Vec<&str> = axel_store::PairingRoute::ALL.iter().map(|r| r.as_str()).collect();
         format!("one of {}", names.join(", "))
     })
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WebCommand {
+    /// This pane shows one of a thread view's panes as a web page (what a web pane runs).
+    Pane {
+        thread: String,
+        #[arg(long, default_value = "messages", value_name = "messages|composer|activity|controls", value_parser = crate::cmd::display::parse_pane)]
+        view: crate::cmd::display::Pane,
+    },
+    /// Serve a thread view's page and print its address, for a desktop browser.
+    Serve {
+        thread: String,
+        #[arg(long, default_value = "messages", value_name = "messages|composer|activity|controls", value_parser = crate::cmd::display::parse_pane)]
+        view: crate::cmd::display::Pane,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -656,6 +684,9 @@ pub enum ThreadCommand {
 pub enum SessionCommand {
     /// Host a managed (ACP) session: runs in its own pane and prints the raw log.
     Host { session: String },
+    /// Bring an agent's session back in this pane, continuing its
+    /// conversation (what Rex runs after it restarts).
+    Resume { session: String },
     /// End a session (and close its pane).
     Stop { session: String },
     /// Move a running Claude session to a host, or back (`--to local`): it

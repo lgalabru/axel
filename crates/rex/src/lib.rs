@@ -21,6 +21,7 @@ pub mod control;
 pub mod osc;
 pub mod payload;
 pub mod prompt;
+pub mod resume;
 
 use std::path::Path;
 use std::process::Command;

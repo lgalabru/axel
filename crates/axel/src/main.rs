@@ -11,6 +11,8 @@ mod paths;
 use clap::Parser;
 
 fn main() {
+    // SAFETY: nothing has started a thread yet.
+    unsafe { axel_rex::resume::take_token() };
     let args = cli::Cli::parse();
     if let Err(err) = cmd::dispatch(args) {
         eprintln!("axel: {err:#}");

@@ -14,6 +14,7 @@ use crate::paths;
 pub fn run(cmd: SessionCommand) -> Result<()> {
     match cmd {
         SessionCommand::Host { session } => host(&session),
+        SessionCommand::Resume { session } => resume(&session),
         SessionCommand::Stop { session } => {
             let ctx = Ctx::open()?;
             let s = ctx.store.get_session(&session)?.with_context(|| t!("no session {id}", id = session))?;
@@ -142,6 +143,93 @@ fn session_meta(agent: &axel_store::Agent, cwd: &Path, roster: &str) -> Option<s
     meta.as_object().cloned()
 }
 
+/// The most sessions of one agent on one thread looked at when resuming:
+/// a thread resumed every day for years stays far below it.
+const RESUME_SESSIONS_MAX: usize = 1000;
+
+/// `axel session resume SESSION`: what Rex runs to bring an agent's session
+/// back after it restarts.  The agent comes back in this pane, continuing
+/// the newest conversation it had on the thread, with no prompt sent again.
+/// Safe to run twice: when the agent already runs there, it changes nothing.
+fn resume(session_id: &str) -> Result<()> {
+    let ctx = Ctx::open()?;
+    let reported = ctx.store.get_session(session_id)?.with_context(|| t!("no session {id}", id = session_id))?;
+    // Sessions whose pane is gone end first, so only live ones remain live.
+    super::reconcile::run(&ctx).ok();
+    let mine = sessions_of(&ctx, &reported)?;
+    if let Some(live) = mine.iter().find(|s| still_running(&ctx, s)) {
+        println!("{}", t!("already running as session {id}", id = live.id));
+        return Ok(());
+    }
+    let Some(latest) = mine.iter().find(|s| s.harness_session_id.is_some()) else {
+        bail!("{}", t!("session {id} has no conversation to continue", id = session_id));
+    };
+    for s in mine.iter().filter(|s| s.state != SessionState::Ended) {
+        ctx.store.end_session(&ctx.owner()?, &s.id, Some("its terminal restarted"))?;
+    }
+    let thread = ctx.store.get_thread(&reported.thread_id)?.context(t!("the thread vanished"))?;
+    let req = axel_tui::LaunchRequest {
+        title: thread.title.clone(),
+        projects: vec![],
+        agent_pubkey: reported.agent_pubkey.clone(),
+        workspace: axel_store::WorkspaceKind::InPlace,
+        branch: None,
+        thread_id: Some(thread.id.clone()),
+        attachments: vec![],
+    };
+    let opts = super::launch::LaunchOptions {
+        target: super::launch::Target::ThisPane,
+        runtime: Some(latest.runtime),
+        prompt: None,
+        attachments: vec![],
+        work_dir: Some(std::env::current_dir()?),
+        resume: latest.harness_session_id.clone(),
+    };
+    match super::launch::launch(&ctx, req, opts)? {
+        super::launch::Launched::Managed { host_spec: Some(spec), .. } | super::launch::Launched::Inline { spec, .. } => {
+            super::launch::exec_inline(spec)
+        }
+        // Without a spec, the session already runs elsewhere.
+        _ => Ok(()),
+    }
+}
+
+/// The agent's sessions on the reported session's thread, newest first.
+fn sessions_of(ctx: &Ctx, reported: &axel_store::Session) -> Result<Vec<axel_store::Session>> {
+    let filter = SessionFilter {
+        thread_id: Some(reported.thread_id.clone()),
+        agent_pubkey: Some(reported.agent_pubkey.clone()),
+        limit: Some(RESUME_SESSIONS_MAX),
+        ..Default::default()
+    };
+    let mut sessions = ctx.store.list_sessions(filter)?;
+    sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| b.id.cmp(&a.id)));
+    debug_assert!(sessions.iter().any(|s| s.id == reported.id), "the reported session is among its agent's");
+    Ok(sessions)
+}
+
+/// Whether `s` still runs somewhere: a managed host that answers, or a pane
+/// session in a pane that isn't this one (this pane is where it died).
+fn still_running(ctx: &Ctx, s: &axel_store::Session) -> bool {
+    if s.state == SessionState::Ended {
+        return false;
+    }
+    if s.environment_id != ctx.store.local_environment().map(|e| e.id).unwrap_or_default() {
+        // Another machine's session: it runs there.
+        return true;
+    }
+    match s.runtime {
+        SessionRuntime::Managed => s
+            .socket_path
+            .as_deref()
+            .is_some_and(|sock| axel_acp::socket::send(sock, &axel_acp::socket::Command::Status).is_ok()),
+        SessionRuntime::Pane => {
+            let here = ctx.rex.as_ref().map(|r| r.env().block.clone());
+            s.rex_block_id.is_some() && s.rex_block_id != here
+        }
+    }
+}
+
 fn host(session_id: &str) -> Result<()> {
     let ctx = Ctx::open()?;
     let session = ctx.store.get_session(session_id)?.with_context(|| t!("no session {id}", id = session_id))?;
@@ -153,6 +241,9 @@ fn host(session_id: &str) -> Result<()> {
     let signer = ctx.agent_signer(&agent.pubkey, Some(&session.thread_id))?;
 
     let cwd = std::env::var("AXEL_CWD").map(PathBuf::from).ok().filter(|p| p.is_dir()).unwrap_or(std::env::current_dir()?);
+    // If Rex restarts, this pane comes back as the session, its conversation
+    // continued (OSC 7577).
+    super::resume::come_back_as(&["session", "resume", &session.id], Some(&cwd));
     let initial_prompt = std::env::var("AXEL_PROMPT").ok().filter(|p| !p.trim().is_empty());
     let initial_attachments: Vec<PathBuf> = std::env::var("AXEL_ATTACHMENTS")
         .ok()
