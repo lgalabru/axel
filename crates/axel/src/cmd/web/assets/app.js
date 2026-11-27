@@ -518,6 +518,34 @@ function renderActivity() {
   document.querySelectorAll("#activity .plan .gauge").forEach((el, i) => brailleGauge(el, limits[i].fraction));
 }
 
+// ---------------------------------------------------------------- scrolling
+
+// Ladybird eases every wheel step over some 200 ms, a dozen full-pane frames
+// each; a trackpad sends a stream of steps, so the page lurched.  The page
+// takes the wheel itself: one line per step, applied at once, and at most
+// one frame for all the steps that came in since the last.
+const WHEEL_STEP_PX = 40;
+function scrollsItself(el) {
+  let owed = 0, queued = false;
+  el.addEventListener("wheel", (e) => {
+    if (e.ctrlKey) return;
+    // An open fold's output scrolls on its own, as long as it can.
+    const inner = e.target.closest && e.target.closest(".step pre");
+    if (inner && inner !== el && inner.scrollHeight > inner.clientHeight) return;
+    e.preventDefault();
+    const line = parseFloat(getComputedStyle(el).fontSize) * 1.55 || 20;
+    const steps = e.deltaMode === 1 ? e.deltaY : e.deltaY / WHEEL_STEP_PX;
+    owed += steps * line;
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      el.scrollTop += owed;
+      owed = 0;
+    });
+  }, { passive: false });
+}
+
 // ---------------------------------------------------------------- talk to the server
 
 async function post(action, body) {
@@ -543,6 +571,8 @@ function report(e) {
 }
 
 if (VIEW === "messages") setupMessages();
+if (VIEW === "messages") scrollsItself($("timeline"));
+if (VIEW === "activity") scrollsItself($("activity"));
 // The charts fit their boxes: drawn again when the pane changes size.
 if (VIEW === "activity") window.addEventListener("resize", () => thread && renderActivity());
 if (VIEW === "composer") setupComposer();
