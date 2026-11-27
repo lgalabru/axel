@@ -518,6 +518,192 @@ function renderActivity() {
   document.querySelectorAll("#activity .plan .gauge").forEach((el, i) => brailleGauge(el, limits[i].fraction));
 }
 
+// ---------------------------------------------------------------- controls
+
+// The thread controls (Ctrl+D), as the terminal pane walks them: the menu,
+// then an agent or a host to pick, a question to answer, or a title to type.
+// What each action does and asks is the server's (`manage.rs`); the page
+// only walks the steps and sends the outcome.
+let ctl = { step: "menu", cursor: 0 };
+let ctlNote = null;
+
+const sessionsLine = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function renderControls() {
+  const d = thread;
+  const meta = [`<span class="state-${esc(d.state)}">${esc(d.state)}</span>`, esc(d.age), ...d.projects.map(esc)].join(" · ");
+  const sessions = d.sessions.map((s) => {
+    const ctx = s.context && s.context.size ? s.context.used / s.context.size : null;
+    const where = s.host ? ` on ${esc(s.host)}` : "";
+    return `<div class="session ${s.live ? "" : "ended"} ${cc(s)}">
+      <span class="badge">${esc(s.agent)}</span>
+      <span class="runs">${esc(s.runs)}${where}<span class="st ${esc(s.state)}">${esc(s.state)}</span></span>
+      <span class="ctx">${ctx === null ? "" : `<span class="gauge"></span><span class="ctxp ${heat(ctx)}">${pct(ctx)}</span>`}</span>
+      <span class="nums">${sessionsLine(s.turns, "turn", "turns")} · ${s.tool_calls} calls · ${esc(s.duration)} · <b>${compact(s.tokens)}</b> ${money(s.cost_usd)}</span></div>`;
+  }).join("");
+  const totals = `<span><b>${compact(d.tokens)}</b> tokens</span><span>${money(d.cost_usd)}</span><span>${sessionsLine(d.turns, "turn", "turns")}</span><span>${d.tool_calls} calls</span><span>${sessionsLine(d.files_changed, "file", "files")}</span>`;
+  $("controls-body").innerHTML = `
+    <div class="ctl-title"><h2>${esc(d.title)}</h2><span class="meta">${meta}</span></div>
+    ${sessions ? `<div class="section-label">sessions</div>${sessions}` : '<div class="dim">no sessions yet</div>'}
+    <div class="hour c-none"><div class="chart"></div><div class="over">${totals}<span class="grow"></span><span class="dim">last hour</span></div></div>
+    ${stepHtml()}`;
+  gradients = 0;
+  brailleChart(document.querySelector("#controls .hour .chart"), d.spark);
+  document.querySelectorAll("#controls .session").forEach((el, i) => {
+    const s = d.sessions[i];
+    const gauge = el.querySelector(".gauge");
+    if (gauge) brailleGauge(gauge, s.context.used / s.context.size);
+  });
+  if (ctl.step === "rename") {
+    const input = document.querySelector("#controls .rename input");
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  renderFoot();
+}
+
+// The rows of the step the pane is on: `[key, label, about, danger]`.
+function stepRows() {
+  const d = thread;
+  switch (ctl.step) {
+    case "menu": return d.actions.map((a) => [a.key, a.label, a.about, a.danger]);
+    case "pick_agent": return d.agents.map((a, i) => [String(i + 1), a, "", false]);
+    case "pick_host": return d.hosts.map((h, i) => [String(i + 1), h, "", false]);
+    case "agent": return (d.agent_actions[ctl.agent] || []).map((o) => [o.key, o.label, "", o.outcome.op === "remove_agent"]);
+    default: return [];
+  }
+}
+
+function stepHtml() {
+  if (ctl.step === "rename") return `<div class="step-title">new title</div><div class="rename"><span class="prompt">&gt;</span><input type="text" value="${esc(ctl.title)}" spellcheck="false"></div>`;
+  if (ctl.step === "confirm") {
+    return `<div class="step-title">${esc(ctl.question)}</div><div class="confirm-buttons"><button type="button" class="${ctl.danger ? "danger" : "primary"}" data-yes>yes</button><button type="button" class="ghost" data-no>no</button></div>`;
+  }
+  const title = { pick_agent: "which agent?", pick_host: `run ${esc(ctl.agent || "")} where?`, agent: esc(ctl.agent || "") }[ctl.step];
+  const rows = stepRows().map(([key, label, about, danger], i) =>
+    `<div class="row ${i === ctl.cursor ? "on" : ""} ${danger ? "danger" : ""}" data-row="${i}"><span class="k">${esc(key)}</span><span class="label">${esc(label)}</span><span class="about">${esc(about)}</span></div>`).join("");
+  return `${title ? `<div class="step-title">${title}</div>` : ""}<div class="menu">${rows}</div>`;
+}
+
+function renderFoot() {
+  const foot = $("controls-foot");
+  foot.className = "controls-foot";
+  if (ctl.step === "confirm") {
+    foot.classList.add("ask");
+    if (ctl.danger) foot.classList.add("danger");
+    foot.innerHTML = "<kbd>y</kbd> yes · <kbd>n</kbd> no";
+  } else if (ctl.step === "rename") {
+    foot.innerHTML = "<kbd>⏎</kbd> rename · <kbd>esc</kbd> back";
+  } else if (ctlNote) {
+    foot.classList.add("note");
+    foot.textContent = ctlNote;
+  } else {
+    foot.innerHTML = ctl.step === "menu" ? "<kbd>↑↓</kbd> choose · <kbd>⏎</kbd> go · <kbd>esc</kbd> close" : "<kbd>↑↓</kbd> choose · <kbd>⏎</kbd> pick · <kbd>esc</kbd> back";
+  }
+}
+
+function goTo(step, extra) {
+  ctl = { step, cursor: 0, ...extra };
+  renderControls();
+}
+
+function startAction(action) {
+  const d = thread;
+  if (["reset", "move", "agents"].includes(action)) {
+    if (d.agents.length > 1) return goTo("pick_agent", { action });
+    if (d.agents.length === 1) return afterAgent(action, d.agents[0]);
+    return;
+  }
+  if (action === "rename") return goTo("rename", { title: d.title });
+  ask({ op: action });
+}
+
+function afterAgent(action, agent) {
+  const d = thread;
+  if (action === "agents") return goTo("agent", { agent });
+  if (action === "move" && d.hosts.length > 1) return goTo("pick_host", { agent });
+  if (action === "move") return ask({ op: "move", agent, host: d.hosts[0] });
+  ask({ op: "reset", agent });
+}
+
+async function control(outcome, confirmed) {
+  try {
+    const reply = await post("control", { outcome, confirmed });
+    if (reply.confirm) return goTo("confirm", { outcome, question: reply.confirm, danger: reply.danger });
+    if (reply.note) ctlNote = reply.note;
+    if (!reply.close) goTo("menu");
+  } catch (e) {
+    ctlNote = e.message;
+    goTo("menu");
+  }
+}
+const ask = (outcome) => control(outcome, false);
+
+function pickRow(i) {
+  const rows = stepRows();
+  if (i < 0 || i >= rows.length) return;
+  const d = thread;
+  if (ctl.step === "menu") return startAction(d.actions[i].action);
+  if (ctl.step === "pick_agent") return afterAgent(ctl.action, d.agents[i]);
+  if (ctl.step === "pick_host") return ask({ op: "move", agent: ctl.agent, host: d.hosts[i] });
+  if (ctl.step === "agent") return ask(d.agent_actions[ctl.agent][i].outcome);
+}
+
+function setupControls() {
+  document.addEventListener("keydown", (e) => {
+    if (!thread) return;
+    if (ctl.step === "rename") {
+      if (e.key === "Escape") goTo("menu");
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const title = document.querySelector("#controls .rename input").value.trim();
+        if (title && title !== thread.title) control({ op: "rename", title }, true);
+        else goTo("menu");
+      }
+      return;
+    }
+    if (ctl.step === "confirm") {
+      if (e.key === "y" || e.key === "Enter") control(ctl.outcome, true);
+      else if (e.key === "n" || e.key === "Escape") goTo("menu");
+      return;
+    }
+    const rows = stepRows();
+    if (e.key === "Escape" || (ctl.step === "menu" && e.key === "q")) {
+      e.preventDefault();
+      if (ctl.step === "menu") control({ op: "close" }, true);
+      else goTo("menu");
+    } else if (e.key === "ArrowDown" || e.key === "j") {
+      ctl.cursor = Math.min(rows.length - 1, ctl.cursor + 1);
+      renderControls();
+    } else if (e.key === "ArrowUp" || e.key === "k") {
+      ctl.cursor = Math.max(0, ctl.cursor - 1);
+      renderControls();
+    } else if (e.key === "Enter") {
+      pickRow(ctl.cursor);
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      const at = rows.findIndex(([key]) => key === e.key.toLowerCase());
+      if (at >= 0) pickRow(at);
+    }
+  });
+  $("controls-body").addEventListener("click", (e) => {
+    const row = e.target.closest("[data-row]");
+    if (row) return pickRow(Number(row.dataset.row));
+    if (e.target.closest("[data-yes]")) return control(ctl.outcome, true);
+    if (e.target.closest("[data-no]")) return goTo("menu");
+  });
+}
+
+// Ctrl+D opens the thread controls, from the composer or the conversation,
+// as it does in the terminal view.
+function opensControls() {
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && (e.key === "d" || e.key === "D")) {
+      e.preventDefault();
+      post("open_controls", {}).catch(report);
+    }
+  });
+}
+
 // ---------------------------------------------------------------- scrolling
 
 // Ladybird eases every wheel step over some 200 ms, a dozen full-pane frames
@@ -555,7 +741,7 @@ async function post(action, body) {
   return reply;
 }
 
-const RENDER = { messages: renderMessages, composer: renderComposer, activity: renderActivity };
+const RENDER = { messages: renderMessages, composer: renderComposer, activity: renderActivity, controls: renderControls };
 
 async function load() {
   const r = await fetch("/api/thread", { cache: "no-store" });
@@ -576,6 +762,9 @@ if (VIEW === "activity") scrollsItself($("activity"));
 // The charts fit their boxes: drawn again when the pane changes size.
 if (VIEW === "activity") window.addEventListener("resize", () => thread && renderActivity());
 if (VIEW === "composer") setupComposer();
+if (VIEW === "controls") setupControls();
+if (VIEW === "controls") scrollsItself($("controls-body"));
+if (VIEW === "composer" || VIEW === "messages") opensControls();
 load().catch(report).finally(() => {
   const events = new EventSource("/api/events");
   events.onmessage = () => load().catch(report);

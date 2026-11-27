@@ -1245,8 +1245,12 @@ const CONTROLS_BOUNDS: [f64; 4] = [0.22, 0.14, 0.56, 0.52];
 const CONTROLS_LABEL: &str = "thread";
 
 pub(super) fn open_controls(rex: &axel_rex::Rex, thread_id: &str) {
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
-    let cmd = vec![exe, "thread".into(), "manage".into(), thread_id.to_string()];
+    let cmd = if super::web::web_panes() {
+        super::web::pane_command(thread_id, super::web::WebView::Controls)
+    } else {
+        let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "axel".into());
+        vec![exe, "thread".into(), "manage".into(), thread_id.to_string()]
+    };
     if let Err(e) = rex.new_floating_terminal_with_focus(CONTROLS_LABEL, CONTROLS_BOUNDS, &cmd, None, &passthrough_env(), true) {
         eprintln!("axel: {}", t!("could not open the thread controls: {error}", error = e));
     }

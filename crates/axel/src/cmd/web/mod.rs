@@ -13,6 +13,7 @@
 //! panes terminal` makes that the choice everywhere.
 
 mod assets;
+mod controls;
 mod server;
 mod terminal;
 mod theme;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use axel_i18n::t;
+use axel_tui::manage::Outcome;
 use axel_tui::{SendCommand, SendReply};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -133,6 +135,8 @@ pub enum WebView {
     Composer,
     /// Who is working, what they did, and what it cost.
     Activity,
+    /// The thread controls (Ctrl+D): its numbers, and what to do to it.
+    Controls,
 }
 
 impl WebView {
@@ -141,17 +145,18 @@ impl WebView {
             WebView::Messages => "messages",
             WebView::Composer => "composer",
             WebView::Activity => "activity",
+            WebView::Controls => "controls",
         }
     }
 
     pub fn parse(text: &str) -> Option<WebView> {
-        [WebView::Messages, WebView::Composer, WebView::Activity].into_iter().find(|v| v.as_str() == text.trim())
+        [WebView::Messages, WebView::Composer, WebView::Activity, WebView::Controls].into_iter().find(|v| v.as_str() == text.trim())
     }
 }
 
 /// The `--view` argument, refused when it names no pane.
 pub fn parse_view(text: &str) -> Result<WebView> {
-    WebView::parse(text).with_context(|| t!("a view is messages, composer or activity"))
+    WebView::parse(text).with_context(|| t!("a view is messages, composer, activity or controls"))
 }
 
 /// What a thread's pane runs when it is a web pane.
@@ -227,7 +232,7 @@ pub fn panes(choice: Option<&str>) -> Result<()> {
 /// `axel web pane THREAD --view VIEW`: this pane shows one of the thread
 /// view's three panes as a web page.
 pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
-    let backend = ThreadBackend::open(thread_id)?;
+    let backend = ThreadBackend::open(thread_id, view)?;
     let Some(browser) = ladybird() else {
         return fall_back(thread_id, view, t!("Ladybird isn't installed"));
     };
@@ -303,13 +308,14 @@ fn fall_back(thread_id: &str, view: WebView, why: &str) -> Result<()> {
         WebView::Messages => super::ui::run_stream(thread_id),
         WebView::Composer => super::ui::run_compose(thread_id),
         WebView::Activity => super::ui::run_inline(Some(crate::cli::ScreenArg::Usage), Some(thread_id.to_string())),
+        WebView::Controls => super::manage::run(thread_id),
     }
 }
 
 /// `axel web serve THREAD --view VIEW`: the pane's server alone, with its address on
 /// stdout, until interrupted.  For a desktop browser, and for tests.
 pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
-    let backend = ThreadBackend::open(thread_id)?;
+    let backend = ThreadBackend::open(thread_id, view)?;
     let running = server::start(Arc::new(backend), view, "")?;
     println!("{}", running.url());
     // Flushing makes the address readable by whoever started us; if stdout
@@ -323,6 +329,7 @@ pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
 /// The thread a pane shows, and what the page may do to it.
 struct ThreadBackend {
     thread_id: String,
+    view: WebView,
     owner_pk: String,
     /// For loading, which polls.  Actions open a context of their own on
     /// the connection's thread (a `Ctx` holds Rex's runner, which stays on
@@ -331,12 +338,12 @@ struct ThreadBackend {
 }
 
 impl ThreadBackend {
-    fn open(thread_id: &str) -> Result<ThreadBackend> {
+    fn open(thread_id: &str, view: WebView) -> Result<ThreadBackend> {
         let ctx = Ctx::open()?;
         let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
         let owner_pk = ctx.owner()?.public().to_base58();
         let reader = axel_store::Store::open_default().context(t!("opening ~/.axel/axel.db"))?;
-        Ok(ThreadBackend { thread_id: thread.id, owner_pk, reader: Mutex::new(reader) })
+        Ok(ThreadBackend { thread_id: thread.id, view, owner_pk, reader: Mutex::new(reader) })
     }
 
     fn send(&self, ctx: &Ctx, body: &Value) -> Result<Value> {
@@ -364,6 +371,26 @@ impl ThreadBackend {
         }
     }
 
+    /// What the controls page picked: asked about first (`confirmed` false),
+    /// as the terminal pane asks, then carried out.  Closing, or an action
+    /// after which the pane has nothing left to show, closes its layer.
+    fn control(&self, ctx: &Ctx, body: &Value) -> Result<Value> {
+        let data = super::manage::load(&ctx.store, &self.thread_id, None)?;
+        let outcome = controls::parse_outcome(&body["outcome"], &data).context(t!("that isn't something the controls offer"))?;
+        let ask = !body["confirmed"].as_bool().unwrap_or(false) && !matches!(outcome, Outcome::Close | Outcome::Rename(_));
+        if ask {
+            return Ok(json!({ "confirm": axel_tui::manage::confirm_question(&outcome), "danger": matches!(outcome, Outcome::HardReset) }));
+        }
+        let note = super::manage::act(ctx, &self.thread_id, &outcome)?;
+        match note {
+            Some(note) if !matches!(outcome, Outcome::Archive) => Ok(json!({ "note": note })),
+            _ => {
+                super::ui::close_own_layer(ctx);
+                Ok(json!({ "close": true }))
+            }
+        }
+    }
+
     /// A session of this thread named by the page, which may not reach others.
     fn own_session(&self, ctx: &Ctx, body: &Value) -> Result<String> {
         let id = body["session_id"].as_str().context(t!("which session?"))?;
@@ -387,6 +414,9 @@ fn reply_json(reply: SendReply) -> Result<Value> {
 impl server::Backend for ThreadBackend {
     fn load(&self) -> Result<Value> {
         let store = self.reader.lock().map_err(|_| anyhow::anyhow!("the reader was poisoned"))?;
+        if self.view == WebView::Controls {
+            return Ok(controls::controls(&super::manage::load(&store, &self.thread_id, None)?));
+        }
         let data = axel_tui::load_thread_data(&store, &self.owner_pk, &self.thread_id)?;
         let usage = axel_tui::load_usage_data(&store, &self.thread_id)?;
         Ok(view::thread(&data, &usage))
@@ -410,6 +440,12 @@ impl server::Backend for ThreadBackend {
             Action::Cancel => {
                 let session_id = self.own_session(&ctx, body)?;
                 reply_json(super::ui::send_to_session(&ctx, &session_id, SendCommand::Cancel)?)
+            }
+            Action::Control => self.control(&ctx, body),
+            Action::OpenControls => {
+                let rex = ctx.rex.as_ref().context(t!("the thread controls need Rex"))?;
+                super::ui::open_controls(rex, &self.thread_id);
+                Ok(json!({ "ok": true }))
             }
         }
     }

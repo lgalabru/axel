@@ -74,6 +74,10 @@ pub enum Action {
     Send,
     Answer,
     Cancel,
+    /// Carry out what the thread controls page picked.
+    Control,
+    /// Open the thread controls (Ctrl+D in the composer).
+    OpenControls,
 }
 
 impl Action {
@@ -82,6 +86,8 @@ impl Action {
             "/api/send" => Some(Action::Send),
             "/api/answer" => Some(Action::Answer),
             "/api/cancel" => Some(Action::Cancel),
+            "/api/control" => Some(Action::Control),
+            "/api/open_controls" => Some(Action::OpenControls),
             _ => None,
         }
     }

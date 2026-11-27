@@ -211,7 +211,8 @@ impl ManageView {
         self.data.sessions.iter().filter(|s| s.live).count()
     }
 
-    fn agent_actions(&self, agent: &str) -> Vec<(&'static str, char, Outcome)> {
+    /// What can be done to `agent` on this thread: a label, its key, and the outcome.
+    pub fn agent_actions(&self, agent: &str) -> Vec<(&'static str, char, Outcome)> {
         let mut actions = Vec::new();
         let live: Vec<_> = self.data.sessions.iter().filter(|s| s.agent == agent && s.live).collect();
         let name = || agent.to_string();
@@ -613,7 +614,8 @@ fn footer_line(v: &ManageView) -> Line<'static> {
     }
 }
 
-fn confirm_question(o: &Outcome) -> String {
+/// The question asked before `o` is carried out.
+pub fn confirm_question(o: &Outcome) -> String {
     match o {
         Outcome::Reset { agent } => t!("reset: end the thread's sessions and start {agent} fresh with a recap?", agent = agent),
         Outcome::Move { agent, host } => t!("move {agent} to {host}?", agent = agent, host = host),

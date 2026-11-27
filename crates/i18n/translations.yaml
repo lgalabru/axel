@@ -1728,5 +1728,9 @@
   zh-Hans: "哪个会话？"
 "{why}; showing it as terminal text":
   zh-Hans: "{why}；以终端文本显示"
-"a view is messages, composer or activity":
-  zh-Hans: "视图可以是 messages、composer 或 activity"
+"a view is messages, composer, activity or controls":
+  zh-Hans: "视图可以是 messages、composer、activity 或 controls"
+"the thread controls need Rex":
+  zh-Hans: "话题控制需要 Rex"
+"that isn't something the controls offer":
+  zh-Hans: "控制面板里没有这个操作"

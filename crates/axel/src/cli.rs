@@ -169,13 +169,13 @@ pub enum WebCommand {
     /// This pane shows one of a thread view's panes as a web page (what a web pane runs).
     Pane {
         thread: String,
-        #[arg(long, default_value = "messages", value_name = "messages|composer|activity")]
+        #[arg(long, default_value = "messages", value_name = "messages|composer|activity|controls")]
         view: String,
     },
     /// Serve a thread view's page and print its address, for a desktop browser.
     Serve {
         thread: String,
-        #[arg(long, default_value = "messages", value_name = "messages|composer|activity")]
+        #[arg(long, default_value = "messages", value_name = "messages|composer|activity|controls")]
         view: String,
     },
 }

@@ -239,3 +239,55 @@ fn ladybirds_status_line_never_reaches_the_pane_and_the_page_fills_it() {
     assert!(left.stdout.is_empty(), "Ladybird ends with its pane: {}", String::from_utf8_lossy(&left.stdout));
     assert!(started.elapsed() < std::time::Duration::from_secs(15), "ended by the hangup, not by its own end");
 }
+
+/// One HTTP request to a served page, with its cookie; the reply's body.
+fn http(port: &str, method: &str, path: &str, cookie: &str, body: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: axel_web={cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut reply = Vec::new();
+    stream.read_to_end(&mut reply).unwrap();
+    let reply = String::from_utf8_lossy(&reply).into_owned();
+    reply.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or(reply)
+}
+
+#[test]
+fn the_web_thread_controls_ask_first_then_settle_the_thread() {
+    let home = Home::new();
+    let thread = home.thread();
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_axel"))
+        .env_clear()
+        .env("HOME", home.path())
+        .env("AXEL_HOME", home.path().join(".axel"))
+        .env("AXEL_KEYSTORE", "file")
+        .env("PATH", "/usr/bin:/bin")
+        .args(["web", "serve", &thread, "--view", "controls"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(serve.stdout.take().unwrap()), &mut line).unwrap();
+    let (base, secret) = line.trim().split_once("/?k=").unwrap();
+    let port = base.rsplit(':').next().unwrap().to_string();
+
+    let page: serde_json::Value = serde_json::from_str(&http(&port, "GET", "/api/thread", secret, "")).unwrap();
+    assert_eq!(page["view"], "controls");
+    assert_eq!(page["title"], "add retries");
+    assert!(page["actions"].as_array().unwrap().iter().any(|a| a["action"] == "settle"), "{page}");
+
+    let asked: serde_json::Value = serde_json::from_str(&http(&port, "POST", "/api/control", secret, r#"{"outcome":{"op":"settle"}}"#)).unwrap();
+    assert_eq!(asked["confirm"], "settle this thread?", "asked first, as the terminal pane asks");
+    let refused = http(&port, "POST", "/api/control", secret, r#"{"outcome":{"op":"reset","agent":"mallory"},"confirmed":true}"#);
+    assert!(refused.contains("isn't something the controls offer"), "{refused}");
+    let done: serde_json::Value = serde_json::from_str(&http(&port, "POST", "/api/control", secret, r#"{"outcome":{"op":"settle"},"confirmed":true}"#)).unwrap();
+    assert_eq!(done["note"], "settled");
+    let _ = serve.kill();
+    let _ = serve.wait();
+    let store = axel_store::Store::open(&home.path().join(".axel").join("axel.db")).unwrap();
+    assert_eq!(store.get_thread(&thread).unwrap().unwrap().state, axel_store::ThreadState::Done);
+}

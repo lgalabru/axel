@@ -22,7 +22,7 @@ pub fn run(thread: &str) -> Result<()> {
     let t = super::thread::resolve(&ctx, thread)?;
     let mut note: Option<String> = None;
     loop {
-        let data = load(&ctx, &t.id, note.take())?;
+        let data = load(&ctx.store, &t.id, note.take())?;
         let outcome = run_manage(data)?;
         note = Some(match act(&ctx, &t.id, &outcome) {
             Ok(None) => break,
@@ -38,7 +38,7 @@ pub fn run(thread: &str) -> Result<()> {
 }
 
 /// Carry out an outcome; the footer line to show, or `None` to close.
-fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> {
+pub(super) fn act(ctx: &Ctx, thread_id: &str, outcome: &Outcome) -> Result<Option<String>> {
     Ok(Some(match outcome {
         Outcome::Close => return Ok(None),
         Outcome::Reset { agent } => return reset(ctx, thread_id, agent),
@@ -200,18 +200,18 @@ pub fn recap(ctx: &Ctx, thread_id: &str) -> Result<String> {
 const SPARK_MINUTES: usize = 60;
 
 /// What the pane shows, from the store.
-fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> {
+pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<String>) -> Result<ManageData> {
     let now = chrono::Utc::now().timestamp();
-    let summary = ctx.store.thread_summary(thread_id)?.context(t!("no such thread"))?;
+    let summary = store.thread_summary(thread_id)?.context(t!("no such thread"))?;
     let t = &summary.thread;
-    let agents: HashMap<String, axel_store::Agent> = ctx.store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
-    let roster = ctx.store.thread_agents(thread_id)?;
-    let statuses: HashMap<String, axel_store::Status> = ctx.store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect();
-    let contexts: HashMap<String, (i64, i64)> = ctx.store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect();
-    let turns = ctx.store.turns(thread_id)?;
-    let mut sessions = ctx.store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })?;
+    let agents: HashMap<String, axel_store::Agent> = store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
+    let roster = store.thread_agents(thread_id)?;
+    let statuses: HashMap<String, axel_store::Status> = store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect();
+    let contexts: HashMap<String, (i64, i64)> = store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect();
+    let turns = store.turns(thread_id)?;
+    let mut sessions = store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })?;
     sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
-    let local_env = ctx.store.local_environment()?.id;
+    let local_env = store.local_environment()?.id;
     let mut rows = Vec::new();
     let mut agent_names: Vec<String> = Vec::new();
     let (mut tokens, mut cost, mut tool_calls, mut files) = (0i64, 0f64, 0i64, 0i64);
@@ -222,14 +222,14 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         if roster.contains(&s.agent_pubkey) && !agent_names.contains(&name) && !agent.is_some_and(|a| a.archived_at.is_some()) {
             agent_names.push(name.clone());
         }
-        let usage = ctx.store.usage(&s.id)?;
+        let usage = store.usage(&s.id)?;
         let (toks, usd) = usage.map(|u| (u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, u.cost_usd_est)).unwrap_or((0, 0.0));
         let mine: Vec<_> = turns.iter().filter(|x| x.session_id == s.id).collect();
         let calls: i64 = mine.iter().map(|x| x.summary.tool_calls).sum();
         files += mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| count(c.files.len())).sum::<i64>();
-        add_to_spark(ctx, &s.id, now, &mut spark)?;
+        add_to_spark(store, &s.id, now, &mut spark)?;
         let live = s.ended_at.is_none();
-        let host = (s.environment_id != local_env).then(|| ctx.store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
+        let host = (s.environment_id != local_env).then(|| store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
         let runs = match agent.and_then(|a| a.model.clone()) {
             Some(m) => format!("{}/{m}", s.harness.as_str()),
             None => s.harness.as_str().to_string(),
@@ -271,7 +271,7 @@ fn load(ctx: &Ctx, thread_id: &str, note: Option<String>) -> Result<ManageData> 
         tool_calls,
         files_changed: files,
         agents: agent_names,
-        hosts: ctx.store.hosts()?.into_iter().map(|h| h.label).collect(),
+        hosts: store.hosts()?.into_iter().map(|h| h.label).collect(),
         note,
     })
 }
@@ -282,10 +282,10 @@ fn count(n: usize) -> i64 {
 }
 
 /// Add the session's tokens of the last hour to `spark`, a bar a minute.
-fn add_to_spark(ctx: &Ctx, session_id: &str, now: i64, spark: &mut [i64]) -> Result<()> {
+fn add_to_spark(store: &axel_store::Store, session_id: &str, now: i64, spark: &mut [i64]) -> Result<()> {
     assert_eq!(spark.len(), SPARK_MINUTES);
     let since = now - 60 * i64::try_from(SPARK_MINUTES).expect("a small constant");
-    for sample in ctx.store.usage_samples(Some(session_id), since)? {
+    for sample in store.usage_samples(Some(session_id), since)? {
         let minute = usize::try_from((sample.at - since) / 60).unwrap_or(0).min(SPARK_MINUTES - 1);
         spark[minute] = spark[minute].saturating_add(sample.input_tokens.saturating_add(sample.output_tokens));
     }
@@ -373,7 +373,7 @@ mod tests {
         assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
         assert_eq!(act(&ctx, &thread.id, &outcome).unwrap(), Some("stopped chosen: 0 sessions".into()));
         act(&ctx, &thread.id, &Outcome::RemoveAgent { agent: "chosen".into() }).unwrap();
-        assert!(!load(&ctx, &thread.id, None).unwrap().agents.contains(&"chosen".into()));
+        assert!(!load(&ctx.store, &thread.id, None).unwrap().agents.contains(&"chosen".into()));
         assert!(ctx.store.agent_by_name("chosen").unwrap().is_some());
         assert!(ctx.store.get_session(&a.id).unwrap().is_some());
         assert!(ctx.store.thread_agents(&other.id).unwrap().contains(&chosen.public().to_base58()));
