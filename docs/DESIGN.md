@@ -443,10 +443,12 @@ moving Codex sessions, and agents on two different hosts messaging each other di
 
 One owner, many machines (RFD 0004, ADR 0012). Each machine keeps signing with its own
 key. `axel device link LABEL [--ssh TARGET] [--route ssh|confirm|wireguard] [--code CODE]`
-installs Axel there the way `axel host add` does, checks the far end is the machine
-meant, asks it to consent (`axel host rpc` `consent_link`: the device signs
+installs Axel there the way `axel host add` does and asks its key, checks the far end is
+the machine meant, asks it to consent (`axel host rpc` `consent_link`: the device signs
 `axel:device-link:v1:<owner>:<device>`), and signs a kind-120 link carrying that consent
-with this machine's key. A link without the device's consent is refused, so no key can
+with this machine's key. Only after the check and the consent does it copy our skills
+there and record it as a host (`host::reach`, then `host::adopt`), so a wrong code leaves
+nothing of ours behind but the public binary that answered. A link without the device's consent is refused, so no key can
 claim another machine. From then on:
 
 - **Its key speaks for the owner.** Authorization resolves every signer to its

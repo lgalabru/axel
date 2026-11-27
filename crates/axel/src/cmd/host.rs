@@ -521,29 +521,28 @@ fn session_command(ctx: &Ctx, session_id: &str, mut cmd: socket::Command, files:
 /// what it needs, and record it here.
 pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
     let ctx = Ctx::open()?;
+    let reached = reach(label, ssh_target)?;
+    adopt(&ctx, &reached, install)
+}
+
+/// A machine reached over SSH and running our version of Axel, which said
+/// its key.  Nothing of ours is on it yet beyond that binary, and nothing
+/// here records it: [`adopt`] does both, once the caller trusts it.
+pub struct Reached {
+    /// The machine as a host row would hold it, with the key it said it has.
+    pub host: Environment,
+    remote_label: String,
+    missing: Vec<String>,
+}
+
+/// Reach `label` (over `ssh_target`, or the label itself), make sure it runs
+/// this version of Axel, and ask its key.  The binary has to be there first:
+/// it is what answers.  It is the same public build anyone can download, so
+/// putting it on a machine we haven't verified yet gives nothing away.
+pub fn reach(label: &str, ssh_target: Option<&str>) -> Result<Reached> {
     let target = ssh_target.unwrap_or(label);
-    let here = String::from_utf8(Command::new("uname").arg("-sm").output()?.stdout)?.trim().to_string();
-    let there = String::from_utf8(ssh(target, "uname -sm", b"")?)?.trim().to_string();
-    if here != there {
-        bail!("{}", t!("{target} is {there}, this machine is {here}: copying this axel binary won't run there", target = target, there = there, here = here));
-    }
-    println!("{}", t!("{target}: {there}, reachable", target = target, there = there));
-
-    let exe = std::fs::read(std::env::current_exe()?)?;
-    ssh(
-        target,
-        "mkdir -p .local/bin && cat > .local/bin/axel.new && chmod +x .local/bin/axel.new && mv .local/bin/axel.new .local/bin/axel",
-        &exe,
-    )?;
-    println!("{}", t!("installed axel {version} in ~/.local/bin", version = env!("CARGO_PKG_VERSION")));
-
-    let skills = paths::global_skills_dir();
-    if skills.is_dir() {
-        copy_dir(target, &skills)?;
-        println!("{}", t!("copied your skills ({path})", path = skills.display()));
-    }
-
-    let probe = Environment {
+    place_binary(target)?;
+    let mut host = Environment {
         id: String::new(),
         label: label.into(),
         rex_host_id: None,
@@ -552,19 +551,38 @@ pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
         ssh_target: Some(target.into()),
         host_pubkey: None,
     };
-    let Response::Hello { environment_id, label: remote_label, host_pubkey, missing, .. } = call(&probe, &Request::Hello)? else {
+    let Response::Hello { environment_id, label: remote_label, host_pubkey, missing, .. } = call(&host, &Request::Hello)? else {
         bail!("{}", t!("unexpected reply to hello"));
     };
-    let mut missing = missing;
+    assert!(!host_pubkey.is_empty(), "a host always says its key");
+    host.id = environment_id;
+    host.host_pubkey = Some(host_pubkey);
+    Ok(Reached { host, remote_label, missing })
+}
+
+/// Give a reached machine what it needs to run our agents (our skills, and
+/// with `install` its missing tools) and record it as a host.  Only once the
+/// caller trusts it: the skills are ours, and a host row is trusted for sync.
+pub fn adopt(ctx: &Ctx, reached: &Reached, install: bool) -> Result<()> {
+    let host = &reached.host;
+    let label = host.label.as_str();
+    let target = host.ssh_target.as_deref().expect("a reached host has its ssh target");
+    let host_pubkey = host.host_pubkey.as_deref().expect("a reached host said its key");
+    let skills = paths::global_skills_dir();
+    if skills.is_dir() {
+        copy_dir(target, &skills)?;
+        println!("{}", t!("copied your skills ({path})", path = skills.display()));
+    }
+    let mut missing = reached.missing.clone();
     if !missing.is_empty() && install {
         install_deps(target, &missing)?;
-        if let Response::Hello { missing: m, .. } = call(&probe, &Request::Hello)? {
+        if let Response::Hello { missing: m, .. } = call(host, &Request::Hello)? {
             missing = m;
         }
     }
     let rex_host = rex_host_label(label);
-    ctx.store.put_host(&environment_id, label, target, &host_pubkey, rex_host.as_deref())?;
-    println!("{}", t!("{label}: host key {key} ({remote})", label = label, key = host_pubkey, remote = remote_label));
+    ctx.store.put_host(&host.id, label, target, host_pubkey, rex_host.as_deref())?;
+    println!("{}", t!("{label}: host key {key} ({remote})", label = label, key = host_pubkey, remote = reached.remote_label));
     if rex_host.is_some() {
         println!("{}", t!("Rex host {label}: remote jobs will run in its `{session}` session", label = label, session = REX_SESSION));
     }
@@ -573,6 +591,24 @@ pub fn add(label: &str, ssh_target: Option<&str>, install: bool) -> Result<()> {
     } else {
         println!("{}", t!("missing on {target}: {missing}. Rerun with --install, or install them yourself.", target = target, missing = missing.join(", ")));
     }
+    Ok(())
+}
+
+/// Put this axel binary in `~/.local/bin` on `target`.
+fn place_binary(target: &str) -> Result<()> {
+    let here = String::from_utf8(Command::new("uname").arg("-sm").output()?.stdout)?.trim().to_string();
+    let there = String::from_utf8(ssh(target, "uname -sm", b"")?)?.trim().to_string();
+    if here != there {
+        bail!("{}", t!("{target} is {there}, this machine is {here}: copying this axel binary won't run there", target = target, there = there, here = here));
+    }
+    println!("{}", t!("{target}: {there}, reachable", target = target, there = there));
+    let exe = std::fs::read(std::env::current_exe()?)?;
+    ssh(
+        target,
+        "mkdir -p .local/bin && cat > .local/bin/axel.new && chmod +x .local/bin/axel.new && mv .local/bin/axel.new .local/bin/axel",
+        &exe,
+    )?;
+    println!("{}", t!("installed axel {version} in ~/.local/bin", version = env!("CARGO_PKG_VERSION")));
     Ok(())
 }
 

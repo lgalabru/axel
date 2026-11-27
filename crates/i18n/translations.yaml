@@ -1698,8 +1698,6 @@
   zh-Hans: "这不是公钥"
 "the code doesn't match: {label} may not be the machine you meant. Nothing was linked.":
   zh-Hans: "验证码不匹配：{label} 可能不是你要的那台机器。未关联任何设备。"
-"the host didn't say its key":
-  zh-Hans: "主机没有提供它的密钥"
 "the host's key isn't a public key":
   zh-Hans: "主机的密钥不是公钥"
 "the rex_tailscale route needs Rex's caller identity, which `axel` can't read yet; use --route ssh or --route confirm":

@@ -139,15 +139,24 @@ fn linking_a_home_makes_its_threads_and_agents_the_owners_and_syncs_both_ways() 
     let w = World::new();
     w.ok_here(&["agent", "new", "reviewer"]);
     let (linux, linux_thread) = make_linux_a_home(&w);
+    let skills = w.home().join(".config").join("axel").join("skills");
+    std::fs::create_dir_all(skills.join("house-rules")).unwrap();
+    std::fs::write(skills.join("house-rules").join("SKILL.md"), "---\nname: house-rules\n---\nOurs.\n").unwrap();
+    let copied_skill = w.machine("linux").join(".config").join("axel").join("skills").join("house-rules").join("SKILL.md");
 
-    // A code that doesn't match links nothing.
+    // A code that doesn't match links nothing, and leaves nothing of ours
+    // there: not our skills, and no host row here to sync with.
     let refused = w.here(&["device", "link", "linux", "--route", "confirm", "--code", "0000-0000"]);
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("doesn't match"), "{}", String::from_utf8_lossy(&refused.stderr));
     assert!(w.store_here().device(&linux.public().to_base58()).unwrap().is_none());
+    assert!(w.store_here().host("linux").unwrap().is_none(), "a refused link records no host");
+    assert!(!copied_skill.exists(), "a refused link copies no skills");
 
     let linked = link_with_code(&w);
     assert!(linked.contains("linux is linked (confirm)"), "{linked}");
+    assert!(copied_skill.exists(), "a link copies our skills once the code matched");
+    assert!(w.store_here().host("linux").unwrap().is_some());
 
     // Here: linux's key speaks for the owner, its thread is ours, its agent listed.
     let here = w.store_here();

@@ -23,17 +23,22 @@ const PUBLISH_RECORDS_MAX: usize = 10_000;
 
 /// `axel device link LABEL [--ssh TARGET] [--route ROUTE] [--code CODE]`.
 pub fn link(label: &str, ssh_target: Option<&str>, route: PairingRoute, code: Option<&str>, install: bool) -> Result<()> {
-    super::host::add(label, ssh_target, install)?;
     let ctx = Ctx::open()?;
-    let host = ctx.store.host(label)?.with_context(|| t!("no host named {name}", name = label))?;
-    let device_key = host.host_pubkey.clone().context(t!("the host didn't say its key"))?;
+    // Reaching it only asks its key.  Our skills go to it, and it becomes a
+    // host here, only once the route has proved it is the machine we meant
+    // and it consented: a wrong code must leave nothing of ours behind.
+    let reached = super::host::reach(label, ssh_target)?;
+    let device_key = reached.host.host_pubkey.clone().expect("a reached host said its key");
     let owner = ctx.owner()?;
     let device: PublicKey = device_key.parse().context(t!("the host's key isn't a public key"))?;
     if device == owner.public() {
         bail!("{}", t!("{label} has this machine's own key: it is this machine", label = label));
     }
     check_route(route, &owner.public(), &device, code, label)?;
-    let consent = super::host::ask_consent(&host, &owner.public())?;
+    let consent = super::host::ask_consent(&reached.host, &owner.public())?;
+    super::host::adopt(&ctx, &reached, install)?;
+    let host = ctx.store.host(label)?.with_context(|| t!("no host named {name}", name = label))?;
+    assert_eq!(host.host_pubkey.as_deref(), Some(device_key.as_str()), "the host recorded is the one that consented");
     let record =
         DeviceRecord { op: DeviceOp::Link, device: device_key.clone(), label: label.into(), route: Some(route), consent: Some(consent) };
     ctx.store.post(&sign_record(&owner, &record)?).context(t!("recording the link"))?;
