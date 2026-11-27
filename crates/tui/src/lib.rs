@@ -14,6 +14,7 @@ pub mod attach;
 mod compose;
 mod stream;
 mod updates;
+pub use updates::start as start_update_check;
 pub mod dashboard;
 pub mod diff;
 mod glue;

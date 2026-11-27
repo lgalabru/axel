@@ -269,6 +269,90 @@ const HISTORY_MAX = 50;
 const history = [];
 let historyAt = -1;
 let busy = false;
+let attaching = false;
+let attachments = [];
+// Match the server's screenshot limits before reading files into memory.
+const ATTACHMENTS_MAX = 8;
+const IMAGE_BYTES_MAX = 10 * 1024 * 1024;
+
+function renderAttachments() {
+  $("composer").classList.toggle("has-attachments", attachments.length > 0);
+  $("attachments").innerHTML = attachments.map((a, i) => `<span class="attachment"><span title="${esc(a.path)}">▧ ${esc(a.name)}</span><button type="button" data-remove="${i}" aria-label="Remove ${esc(a.name)}">×</button></span>`).join("");
+}
+
+function addReceivedAttachments(reply) {
+  const combined = [...new Map([...attachments, ...reply.attachments].map((a) => [a.path, a])).values()];
+  if (combined.length > ATTACHMENTS_MAX) throw new Error(`at most ${ATTACHMENTS_MAX} attachments`);
+  attachments = combined;
+  renderAttachments();
+}
+
+async function receiveAttachments(files, text, paste = false) {
+  if (busy || attaching) { setStatus("wait for the current send or attachment", true); return; }
+  attaching = true;
+  try {
+    if (files.length + attachments.length > ATTACHMENTS_MAX) throw new Error(`at most ${ATTACHMENTS_MAX} attachments`);
+    if (files.length) {
+      for (const file of files) {
+        if (file.size > IMAGE_BYTES_MAX) throw new Error("images must be 10 MiB or smaller");
+        if (!/^image\//.test(file.type) && !/\.(png|jpe?g|gif|webp)$/i.test(file.name)) throw new Error("drop PNG, JPEG, GIF or WebP images");
+      }
+      // Upload sequentially: only one image's base64 is held at a time.
+      for (const file of files) {
+        const data = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(",")[1]);
+          reader.onerror = () => reject(new Error(`could not read ${file.name}`));
+          reader.onabort = () => reject(new Error("image read cancelled"));
+          reader.readAsDataURL(file);
+        });
+        const reply = await post("attach", { name: file.name, data });
+        reply.attachments[0].name = file.name;
+        addReceivedAttachments(reply);
+      }
+    } else {
+      addReceivedAttachments(await post("attach", { paths: text }));
+    }
+    setStatus(`${attachments.length} attached`);
+  } catch (e) {
+    // A path-shaped paste can be ordinary prose or a slash command.
+    if (paste && !files.length) input.setRangeText(text, input.selectionStart, input.selectionEnd, "end");
+    setStatus(e.message, true);
+  } finally {
+    attaching = false;
+    input.focus();
+  }
+}
+
+function looksLikePaths(text) {
+  return /^\s*(?:["']?(?:\/|~\/|file:\/\/))/.test(text || "");
+}
+
+function setupAttachments() {
+  const composer = $("composer");
+  composer.addEventListener("dragover", (e) => { e.preventDefault(); composer.classList.add("dragging"); });
+  composer.addEventListener("dragleave", () => composer.classList.remove("dragging"));
+  composer.addEventListener("drop", (e) => {
+    e.preventDefault();
+    composer.classList.remove("dragging");
+    receiveAttachments(Array.from(e.dataTransfer.files), e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("text/uri-list"));
+  });
+  input.addEventListener("paste", (e) => {
+    const data = e.clipboardData;
+    if (!data) return;
+    const files = Array.from(data.files);
+    const text = data.getData("text/plain");
+    if (!files.length && !looksLikePaths(text)) return;
+    e.preventDefault();
+    receiveAttachments(files, text, true);
+  });
+  $("attachments").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-remove]");
+    if (!button || busy || attaching) return;
+    attachments.splice(Number(button.dataset.remove), 1);
+    renderAttachments();
+  });
+}
 
 // Who gets what's typed, as the server will decide it (`dispatch`): the
 // agent named first, else the live managed session whose agent replied last.
@@ -276,7 +360,7 @@ function target(text) {
   const named = /^@([\w-]+)/.exec(text.trim());
   if (named) {
     const live = thread.live.find((s) => s.managed && s.agent.toLowerCase() === named[1].toLowerCase());
-    return { name: named[1], live: Boolean(live) };
+    return { name: named[1], live: Boolean(live), mode: live && live.mode };
   }
   const live = thread.live.filter((s) => s.managed).sort((a, b) => (b.last_reply_at || 0) - (a.last_reply_at || 0))[0];
   if (live) return { name: live.agent, live: true, mode: live.mode };
@@ -288,9 +372,15 @@ function renderComposer() {
   const t = target(input.value);
   const agent = t && thread.known_agents.find((a) => a.name.toLowerCase() === t.name.toLowerCase());
   $("target").innerHTML = t
-    ? `<span class="badge ${cc(agent)}">${esc(t.name)}</span>${t.live ? "" : "summons it"}`
+    ? `<span aria-hidden="true">→</span><span class="target-name fg ${cc(agent)}">${esc(t.name)}</span>${t.live ? "" : " (summon)"}`
     : "no agent on this thread yet";
-  $("mode").textContent = t && t.mode ? t.mode : "";
+  const mode = t && t.mode;
+  const labels = { supervised: "ask before acting", edits: "accept edits", plan: "plan", autopilot: "autopilot on" };
+  $("mode").textContent = mode ? `⏵⏵ ${labels[mode] || mode}` : "offline";
+  $("mode").disabled = !mode;
+  $("release").innerHTML = thread.update_hint
+    ? `run <code>axel update</code> to get ${esc(thread.update_hint)}`
+    : `v${esc(thread.version || "")} · ctrl+d dashboard`;
   const working = thread.agents.some((a) => a.state === "working");
   $("stop").hidden = !working;
   $("send").textContent = working ? "queue" : "send";
@@ -304,13 +394,16 @@ function setStatus(text, error) {
 
 async function send(steer) {
   const text = input.value.trim();
-  if (!text || busy) return;
+  if ((!text && !attachments.length) || busy) return;
+  if (attaching) { setStatus("wait for the attachment to finish", true); return; }
   busy = true;
   $("send").disabled = true;
   setStatus(steer ? "interrupting…" : "sending…");
   try {
-    const reply = await post("send", { text, steer });
-    history.push(text);
+    const reply = await post("send", { text, steer, attachments: attachments.map((a) => a.path) });
+    attachments = [];
+    renderAttachments();
+    if (text) history.push(text);
     if (history.length > HISTORY_MAX) history.shift();
     historyAt = -1;
     input.value = "";
@@ -323,6 +416,21 @@ async function send(steer) {
     $("send").disabled = false;
     input.focus();
   }
+}
+
+async function cycleMode() {
+  if (!thread || busy) return;
+  const recipient = target(input.value);
+  const session = recipient && thread.live.find((s) => s.managed && s.agent.toLowerCase() === recipient.name.toLowerCase());
+  if (!session) return;
+  busy = true;
+  try {
+    const reply = await post("cycle_mode", { session_id: session.id });
+    session.mode = reply.mode;
+    renderComposer();
+  } catch (e) {
+    setStatus(e.message, true);
+  } finally { busy = false; }
 }
 
 async function stop() {
@@ -368,7 +476,19 @@ function moveSuggestion(step) {
 }
 
 function setupComposer() {
-  input.addEventListener("input", () => {
+  setupAttachments();
+  input.addEventListener("input", (e) => {
+    // Ladybird terminal mode inserts bracketed pastes as composition text,
+    // without a ClipboardEvent. Remove only the inserted path, keeping drafts.
+    if (e.inputType === "insertCompositionText" && looksLikePaths(e.data)) {
+      const end = input.selectionStart;
+      const start = end - e.data.length;
+      if (start >= 0 && input.value.slice(start, end) === e.data) {
+        input.setRangeText("", start, end, "end");
+        receiveAttachments([], e.data, true);
+        return;
+      }
+    }
     suggest();
     if (thread) renderComposer();
   });
@@ -389,7 +509,10 @@ function setupComposer() {
         }
       }
     }
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Tab" && e.shiftKey) {
+      e.preventDefault();
+      cycleMode();
+    } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send(e.metaKey || e.ctrlKey);
     } else if (e.key === "Escape") {
@@ -408,6 +531,7 @@ function setupComposer() {
       complete(row.dataset.name);
     }
   });
+  $("mode").addEventListener("click", cycleMode);
   $("send").addEventListener("click", () => send(false));
   $("stop").addEventListener("click", stop);
   input.focus();
@@ -450,7 +574,7 @@ function grid(el) {
 }
 
 // A chart of `values` filling `el`: each column lit from the bottom to its
-// value, the top dot in part; quiet columns keep a faint baseline (⣀).
+// value, the top dot in part. Quiet columns stay empty.
 function brailleChart(el, values) {
   const g = grid(el);
   const series = resample(values || [], g.across);
@@ -461,10 +585,7 @@ function brailleChart(el, values) {
   series.forEach((v, c) => {
     const x = (c + 0.5) * g.pitchX;
     const level = max > 0 ? (v / max) * g.down : 0;
-    if (level < 0.05) {
-      dots += `<circle class="off" cx="${x.toFixed(1)}" cy="${(height - g.pitchY / 2).toFixed(1)}" r="${g.r.toFixed(2)}"/>`;
-      return;
-    }
+    if (level < 0.05) return;
     for (let r = 0; r < Math.ceil(level); r++) {
       const part = Math.min(1, level - r);
       const opacity = part < 1 ? ` fill-opacity="${Math.max(0.2, part).toFixed(2)}"` : "";
@@ -499,24 +620,34 @@ const pct = (fraction) => `${Math.round(fraction * 100)}%`;
 const heat = (fraction) => (fraction > 0.95 ? "full" : fraction > 0.8 ? "hot" : "");
 const STATE_MARK = { working: "⠿ working", blocked: "! needs you", error: "✗ error" };
 
+// Usage and the dashboard share a strip: identity, stacked metrics, chart.
+function usageStrip(name, color, tokens, cost, context, state) {
+  const fraction = context && context.size ? context.used / context.size : null;
+  const status = STATE_MARK[state] || state || "idle";
+  return `<div class="usage-strip ${cc(color)}">
+    <span class="strip-name" title="${esc(name)} · ${esc(status)}">${esc(name)}</span>
+    <div class="strip-metrics"><div><b>${compact(tokens)}</b> <span class="dim">${money(cost)}</span></div>
+    <div class="ctx">${fraction === null ? '<span class="dim">ctx —</span>' : `<span class="gauge"></span><span class="${heat(fraction)}">${pct(fraction)}</span>`}</div></div>
+    <div class="strip-chart" role="img" aria-label="${esc(name)} tokens over the last hour"></div></div>`;
+}
+
+function drawUsageStrips(root, values) {
+  document.querySelectorAll(`${root} .usage-strip`).forEach((el, i) => {
+    brailleChart(el.querySelector(".strip-chart"), values[i].spark || []);
+    const gauge = el.querySelector(".gauge");
+    const context = values[i].context;
+    if (gauge && context && context.size) brailleGauge(gauge, context.used / context.size);
+  });
+}
+
 function renderActivity() {
   const u = thread.usage;
   const states = new Map(thread.agents.map((a) => [a.name, a.state]));
   const byName = new Map(u.agents.map((a) => [a.name, a]));
   const names = [...new Set([...thread.agents.map((a) => a.name), ...u.agents.map((a) => a.name)])];
-  const charts = [];
-  const rows = names.map((name) => {
-    const spend = byName.get(name) || { total: { tokens: 0, cost_usd: 0 }, last_hour: { tokens: 0 }, spark: [] };
-    const known = thread.agents.find((a) => a.name === name) || spend;
-    const state = states.get(name) || "idle";
-    const ctx = spend.context && spend.context.size ? spend.context.used / spend.context.size : null;
-    charts.push({ values: spend.spark, ctx });
-    const hourly = spend.last_hour && spend.last_hour.tokens;
-    const hour = `<span class="${hourly ? "axis" : "quiet"}">${hourly ? `${compact(hourly)}/h` : "quiet"}</span>`;
-    const context = ctx === null ? "" : `<span class="ctx"><span class="gauge"></span><span class="${heat(ctx)}">${pct(ctx)}</span></span>`;
-    return `<div class="agent ${cc(known)}"><div class="chart"></div>
-      <div class="over top"><span class="name">${esc(name)}</span><span class="state ${esc(state)}">${STATE_MARK[state] || ""}</span>${context}<span class="grow"></span>${hour}<span class="tokens">${compact(spend.total.tokens)}</span><span class="cost">${money(spend.total.cost_usd)}</span></div></div>`;
-  });
+  const values = names.map((name) => byName.get(name) || { name, total: { tokens: 0, cost_usd: 0 }, spark: [] });
+  const rows = values.map((spend, i) => usageStrip(names[i], thread.agents.find((a) => a.name === names[i]) || spend,
+    spend.total.tokens, spend.total.cost_usd, spend.context, states.get(names[i])));
   const limits = u.limits.flatMap((p) => p.windows.filter((w) => w.used_pct !== null).map((w) => {
     const label = { five_hour: "5h", week: "wk", month: "mo" }[w.window] || esc(w.window);
     return { label, fraction: w.used_pct / 100 };
@@ -525,11 +656,7 @@ function renderActivity() {
     ${limits.length ? `<div class="plan">${limits.map((l) => `<div class="bar-row"><span class="what">${l.label}</span><span class="gauge"></span><span class="pct ${heat(l.fraction)}">${pct(l.fraction)}</span></div>`).join("")}</div>` : ""}`;
   // The charts are drawn once their boxes have a size: as many dots as fit.
   gradients = 0;
-  document.querySelectorAll("#activity .agent").forEach((el, i) => {
-    brailleChart(el.querySelector(".chart"), charts[i].values);
-    const gauge = el.querySelector(".ctx .gauge");
-    if (gauge) brailleGauge(gauge, charts[i].ctx);
-  });
+  drawUsageStrips("#activity", values);
   document.querySelectorAll("#activity .plan .gauge").forEach((el, i) => brailleGauge(el, limits[i].fraction));
 }
 
@@ -548,13 +675,10 @@ function renderControls() {
   const d = thread;
   const meta = [`<span class="state-${esc(d.state)}">${esc(d.state)}</span>`, esc(d.age), ...d.projects.map(esc)].join(" · ");
   const sessions = d.sessions.map((s) => {
-    const ctx = s.context && s.context.size ? s.context.used / s.context.size : null;
     const where = s.host ? ` on ${esc(s.host)}` : "";
-    return `<div class="session ${s.live ? "" : "ended"} ${cc(s)}">
-      <span class="badge">${esc(s.agent)}</span>
-      <span class="runs">${esc(s.runs)}${where}<span class="st ${esc(s.state)}">${esc(s.state)}</span></span>
-      <span class="ctx">${ctx === null ? "" : `<span class="gauge"></span><span class="ctxp ${heat(ctx)}">${pct(ctx)}</span>`}</span>
-      <span class="nums">${sessionsLine(s.turns, "turn", "turns")} · ${s.tool_calls} calls · ${esc(s.duration)} · <b>${compact(s.tokens)}</b> ${money(s.cost_usd)}</span></div>`;
+    return `<div class="session ${s.live ? "" : "ended"}">
+      ${usageStrip(s.agent, s, s.tokens, s.cost_usd, s.context, s.state)}
+      <div class="session-detail dim">${esc(s.runs)}${where} · ${esc(s.state)} · ${sessionsLine(s.turns, "turn", "turns")} · ${s.tool_calls} calls · ${esc(s.duration)}</div></div>`;
   }).join("");
   const totals = `<span><b>${compact(d.tokens)}</b> tokens</span><span>${money(d.cost_usd)}</span><span>${sessionsLine(d.turns, "turn", "turns")}</span><span>${d.tool_calls} calls</span><span>${sessionsLine(d.files_changed, "file", "files")}</span>`;
   $("controls-body").innerHTML = `
@@ -564,11 +688,7 @@ function renderControls() {
     ${ctlStepHtml()}`;
   gradients = 0;
   brailleChart(document.querySelector("#controls .hour .chart"), d.spark);
-  document.querySelectorAll("#controls .session").forEach((el, i) => {
-    const s = d.sessions[i];
-    const gauge = el.querySelector(".gauge");
-    if (gauge) brailleGauge(gauge, s.context.used / s.context.size);
-  });
+  drawUsageStrips("#controls", d.sessions);
   if (ctl.step === "rename") {
     const input = document.querySelector("#controls .rename input");
     input.focus();
@@ -749,11 +869,19 @@ function scrollsItself(el) {
 
 // ---------------------------------------------------------------- talk to the server
 
+// Includes the server's ten-second read deadline plus time to dispatch locally.
+const REQUEST_TIMEOUT_MS = 15000;
 async function post(action, body) {
-  const r = await fetch(`/api/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const reply = await r.json().catch(() => ({ error: `the pane answered ${r.status}` }));
-  if (!r.ok || reply.error) throw new Error(reply.error || `the pane answered ${r.status}`);
-  return reply;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const r = await fetch(`/api/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
+    const reply = await r.json().catch(() => ({ error: `the pane answered ${r.status}` }));
+    if (!r.ok || reply.error) throw new Error(reply.error || `the pane answered ${r.status}`);
+    return reply;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 const RENDER = { messages: renderMessages, composer: renderComposer, activity: renderActivity, controls: renderControls };

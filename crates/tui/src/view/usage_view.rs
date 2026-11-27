@@ -472,11 +472,11 @@ fn until(secs: i64) -> String {
 }
 
 fn agent_line(a: &AgentSpend, cols: &[Col], name_w: usize, spark_w: usize, spark_max: i64) -> Line<'static> {
-    let mut spans = vec![Span::styled(pad_end(&ellipsize(&a.name, name_w), name_w), Style::default().fg(theme::agent_color(a.color)))];
+    let mut spans = vec![Span::styled(pad_end(&ellipsize(&a.name.to_uppercase(), name_w), name_w), Style::default().fg(theme::agent_color(a.color)))];
     for &c in cols {
         if c == Col::Spark {
             spans.push(Span::raw(" "));
-            spans.extend(super::chart::braille(&hour(&a.spark), spark_w, spark_max, Style::default().fg(theme::agent_color(a.color))));
+            spans.extend(super::chart::activity(&hour(&a.spark), spark_w, spark_max, Style::default().fg(theme::agent_color(a.color))));
             continue;
         }
         spans.push(match c {
@@ -567,8 +567,8 @@ mod tests {
         let s = screen(24, 6, &data());
         assert_eq!(s[0], " Axel        ~$5.30 24h", "no box: a header line, 24-hour estimated cost at its right");
         assert_eq!(s[1], "          24h last hour");
-        assert_eq!(s[2], " terra   310k ⣀⣀⣀⣀⣠⣀⣀⣀⣸", "two more columns than the box left, so a wider chart");
-        assert_eq!(s[3], " opus     88k ⣀⣀⣀⣀⣀⣀⣀⣀⣀", "a quiet hour is a dotted line");
+        assert_eq!(s[2], " TERRA   310k     ⣠   ⣸", "two more columns than the box left, so a wider chart");
+        assert_eq!(s[3], " OPUS     88k", "a quiet hour stays blank");
         assert_eq!(screen(20, 6, &data())[0], " Axel    ~$5.30 24h", "too narrow for the cost: the header waits for room");
     }
 
@@ -577,15 +577,15 @@ mod tests {
         let s = screen(90, 8, &data());
         assert!(s[0].contains("~$5.30 24h"), "{s:?}");
         assert!(s[1].contains("24h") && s[1].contains("~$ 24h") && s[1].contains("ctx") && s[1].contains("last hour") && !s[1].contains(" all"), "labels: {s:?}");
-        assert!(s[2].contains("terra") && s[2].contains("310k") && s[2].contains("~$4.20") && s[2].contains("75%"), "{s:?}");
-        assert!(s[4].contains("all") && s[4].contains("398k"), "everyone together: {s:?}");
+        assert!(s[2].contains("TERRA") && s[2].contains("310k") && s[2].contains("~$4.20") && s[2].contains("75%"), "{s:?}");
+        assert!(s[4].contains("ALL") && s[4].contains("398k"), "everyone together: {s:?}");
     }
 
     #[test]
     fn the_chart_starts_under_its_label() {
         let s = screen(90, 6, &data());
         let at = s[1].find("last hour").expect("label");
-        assert_eq!(s[2][at..].chars().next(), Some('⣀'), "{s:?}");
+        assert_eq!(s[2][at..].chars().next(), Some(' '), "{s:?}");
         assert!(s[2].trim_end_matches(['│', ' ']).ends_with('⣸'), "the newest minute at the chart's right: {s:?}");
     }
 
@@ -621,10 +621,10 @@ mod tests {
         assert!(screen(80, 6, &d)[5].contains("5h ▰▰▰▰▱  84% ↻2h"), "{:?}", screen(80, 6, &d)[5]);
         // One row more: the "all" row comes back above the gap.
         let s = screen(60, 7, &d);
-        assert!(s[4].trim_start().starts_with("all") && s[5].is_empty() && s[6].contains("84%"), "{s:?}");
+        assert!(s[4].trim_start().starts_with("ALL") && s[5].is_empty() && s[6].contains("84%"), "{s:?}");
         // One row less: the strip alone, no gap.
         let s = screen(60, 5, &d);
-        assert!(s[4].contains("84%") && !s.iter().any(|l| l.trim_start().starts_with("all")), "{s:?}");
+        assert!(s[4].contains("84%") && !s.iter().any(|l| l.trim_start().starts_with("ALL")), "{s:?}");
         // Tall: the section with its heading, as before.
         assert!(screen(60, 12, &d).iter().any(|l| l.contains("plan limits")));
     }
@@ -639,8 +639,8 @@ mod tests {
         // 300px or so wide, as tall as the composer: no box, no summary line.
         let s = screen(36, 4, &with_limits(data()));
         assert_eq!(s[0], "         24h  ~$ 24h  ctx last hour", "every number has a label");
-        assert_eq!(s[1], "terra   310k  ~$4.20  75% ⣀⣀⣀⣀⣀⣄⣀⣀⣀⣸");
-        assert!(s[2].starts_with("opus"), "{s:?}");
+        assert_eq!(s[1], "TERRA   310k  ~$4.20  75%      ⣄   ⣸");
+        assert!(s[2].starts_with("OPUS"), "{s:?}");
         assert_eq!(s[3], "claude 5h 84%  wk 9% · codex 5h new", "the plan limits on one line: {s:?}");
         let s = screen(150, 3, &with_limits(data()));
         assert!(s[0].ends_with("claude 5h 84%  wk 9% · codex 5h new"), "on the label row when it fits: {s:?}");
@@ -698,7 +698,7 @@ mod tests {
         assert!(row(&s[at + 2]).starts_with("agy gemini      wk ▰▰▰▰▰ 100%"), "{s:?}");
         assert!(row(&s[at + 3]).starts_with("claude          5h ▰▰▰▰▱  84%"), "{s:?}");
         assert!(row(&s[at + 4]).starts_with("codex           5h  new"), "{s:?}");
-        assert!(s.iter().any(|l| row(l).starts_with("terra        310k")), "the agents' names keep their own width: {s:?}");
+        assert!(s.iter().any(|l| row(l).starts_with("TERRA        310k")), "the agents' names keep their own width: {s:?}");
         // Folded onto one line, each is named too.
         let s = screen(150, 3, &d);
         assert!(s[0].contains("agy claude/gpt 5h 1%  wk 1% · agy gemini wk 100% · claude 5h 84%"), "{s:?}");

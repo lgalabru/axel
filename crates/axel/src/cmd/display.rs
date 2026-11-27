@@ -151,9 +151,6 @@ impl PaneDisplay for TerminalPanes {
 /// where Ladybird can't draw.
 pub struct WebPanes;
 
-/// Rows a web composer starts with: its field and its controls.
-const WEB_COMPOSER_ROWS: u16 = 12;
-
 impl PaneDisplay for WebPanes {
     fn command(&self, thread_id: &str, pane: Pane) -> Vec<String> {
         command_of(&["web", "pane", thread_id, "--view", pane.as_str()])
@@ -164,7 +161,9 @@ impl PaneDisplay for WebPanes {
     }
 
     fn composer_rows(&self) -> u16 {
-        WEB_COMPOSER_ROWS
+        // As the terminal composer: the web one is drawn to fit the same rows,
+        // so the row of composer and activity is the same size in both.
+        TerminalPanes.composer_rows()
     }
 }
 
@@ -248,6 +247,6 @@ mod tests {
         assert_eq!(terminal.command("T", Pane::Controls)[1..], ["thread", "manage", "T"]);
         let web = Display::Web.panes();
         assert_eq!(web.command("T", Pane::Conversation)[1..], ["web", "pane", "T", "--view", "messages"]);
-        assert!(web.composer_rows() > terminal.composer_rows(), "a web composer draws a taller field");
+        assert_eq!(web.composer_rows(), terminal.composer_rows(), "both lay a thread out the same");
     }
 }

@@ -20,9 +20,10 @@ use super::guard::{self, Guard};
 /// The most bytes of request line and headers read: a browser's request is
 /// well under 4 KiB; past this it is not a browser.
 const HEADER_BYTES_MAX: usize = 16 * 1024;
-/// The most bytes of request body: a typed message, never a file (files
-/// stay with the terminal composer for now).
-pub const BODY_BYTES_MAX: usize = 256 * 1024;
+/// A base64 10 MiB image plus its JSON envelope.
+pub const BODY_BYTES_MAX: usize = 14 * 1024 * 1024;
+/// Ordinary actions retain the typed-message limit.
+const MESSAGE_BODY_BYTES_MAX: usize = 256 * 1024;
 /// The most connections served at once: one page makes two or three.
 const CONNECTIONS_MAX: usize = 32;
 /// The most event streams at once: one per open page, and a page or two
@@ -78,11 +79,15 @@ pub enum Action {
     Control,
     /// Open the thread controls (Ctrl+D in the composer).
     OpenControls,
+    Attach,
+    CycleMode,
 }
 
 impl Action {
     fn from_path(path: &str) -> Option<Action> {
         match path {
+            "/api/cycle_mode" => Some(Action::CycleMode),
+            "/api/attach" => Some(Action::Attach),
             "/api/send" => Some(Action::Send),
             "/api/answer" => Some(Action::Answer),
             "/api/cancel" => Some(Action::Cancel),
@@ -281,7 +286,7 @@ fn read_request(stream: &TcpStream) -> std::result::Result<Request, Refusal> {
             _ => {}
         }
     }
-    if content_length > BODY_BYTES_MAX {
+    if content_length > if request.path == "/api/attach" { BODY_BYTES_MAX } else { MESSAGE_BODY_BYTES_MAX } {
         return Err(Refusal::TooLarge);
     }
     request.body = vec![0; content_length];

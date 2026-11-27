@@ -6,10 +6,9 @@
 
 use super::terminal::{Colors, PaneSize, Rgb};
 
-/// How far each surface sits from the background toward the text, in
-/// percent: measured from the page's own dark palette (`app.css`), where
-/// `--surface` #24242a is 3% of the way from #1d1d21 to #ececf1.
-const STEPS: [(&str, u8); 5] = [("--surface", 4), ("--line-soft", 7), ("--raised", 9), ("--hover", 12), ("--line", 14)];
+/// Chart dots and borders remain visible over the terminal background.
+/// The percentages retain the existing contrast without filling panels.
+const STEPS: [(&str, u8); 2] = [("--line-soft", 7), ("--line", 14)];
 /// Text shades, as steps from the text back toward the background, for a
 /// terminal that didn't say its bright black (palette 8, its dim text).
 const TEXT_STEPS: [(&str, u8); 2] = [("--text-2", 22), ("--faint", 62)];
@@ -45,8 +44,15 @@ pub fn css(colors: &Colors, font_px: Option<f64>) -> String {
             out.push_str(&format!("--p{index}:{};", hex(*rgb)));
         }
     }
+    // Terminals may answer the background query without the foreground query.
+    // Keep the page flush with the terminal even when only one reply arrives.
+    if let Some(bg) = colors.background {
+        out.push_str(&format!("--bg:{};", hex(bg)));
+    }
+    if let Some(fg) = colors.foreground {
+        out.push_str(&format!("--text:{};", hex(fg)));
+    }
     if let (Some(fg), Some(bg)) = (colors.foreground, colors.background) {
-        out.push_str(&format!("--bg:{};--text:{};", hex(bg), hex(fg)));
         for (name, percent) in STEPS {
             out.push_str(&format!("{name}:{};", hex(mix(bg, fg, percent))));
         }
@@ -96,6 +102,9 @@ mod tests {
         assert!(css(&colors, None).contains("--dim:#666666;"), "dim text is the terminal's bright black");
         let light = css(&Colors { foreground: Some((0x20, 0x20, 0x20)), background: Some((0xff, 0xff, 0xff)), ..Colors::default() }, None);
         assert!(light.contains("--bg:#ffffff;") && light.ends_with("color-scheme:light;"), "{light}");
+        let background_only = Colors { background: Some((12, 18, 24)), ..Colors::default() };
+        assert_eq!(css(&background_only, None), "--bg:#0c1218;");
+        assert_eq!(css(&Colors { foreground: Some((240, 240, 240)), ..Colors::default() }, None), "--text:#f0f0f0;");
         assert_eq!(mix((0, 0, 0), (200, 100, 50), 50), (100, 50, 25));
     }
 

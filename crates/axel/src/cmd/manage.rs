@@ -215,8 +215,13 @@ pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<Stri
     let mut spark = vec![0i64; SPARK_MINUTES];
     for s in &sessions {
         let agent = known.agents.get(&s.agent_pubkey);
-        let (row, files_changed) = session_row(store, &known, &turns, s)?;
-        add_to_spark(store, &s.id, now, &mut spark)?;
+        let (mut row, files_changed) = session_row(store, &known, &turns, s)?;
+        row.spark = vec![0; SPARK_MINUTES];
+        add_to_spark(store, &s.id, now, &mut row.spark)?;
+        assert_eq!(row.spark.len(), spark.len(), "session and total cover the same hour");
+        for (total, sample) in spark.iter_mut().zip(&row.spark) {
+            *total = total.saturating_add(*sample);
+        }
         (tokens, cost, tool_calls, files) = (tokens + row.tokens, cost + row.cost_usd, tool_calls + row.tool_calls, files + files_changed);
         // Every session counts toward the totals; only the roster's are listed.
         if roster.contains(&s.agent_pubkey) {
@@ -299,6 +304,7 @@ fn session_row(store: &axel_store::Store, known: &Known, turns: &[axel_store::Tu
         cost_usd,
         context: known.contexts.get(&s.id).copied(),
         duration_secs: s.ended_at.unwrap_or(known.now) - s.started_at,
+        spark: Vec::new(),
     };
     Ok((row, files))
 }
@@ -348,6 +354,37 @@ mod tests {
     use super::*;
     use axel_identity::{Keypair, Keystore, attest};
     use axel_store::{Harness, NewAgent, NewSession, RuntimeMode, SessionRuntime, Store};
+
+    #[test]
+    fn session_sparklines_stay_separate_and_sum_to_the_thread_chart() {
+        let store = Store::open_memory().unwrap();
+        let owner = Keypair::generate();
+        let agent = Keypair::generate();
+        store.insert_agent(&NewAgent {
+            pubkey: agent.public().to_base58(), name: "atlas".into(), harness: Harness::Claude,
+            model: None, effort: None, skills: vec![], prompt: None, color: None, runtime_mode: RuntimeMode::default(),
+            auth_tag: Some(attest(&owner, &agent.public(), "").unwrap().to_tag()),
+        }).unwrap();
+        let thread = store.create_thread(&owner, "usage", "usage", None).unwrap();
+        let environment = store.local_environment().unwrap();
+        for tokens in [17, 43] {
+            let session = store.start_session(&agent, &NewSession {
+                thread_id: thread.id.clone(), agent_pubkey: agent.public().to_base58(),
+                environment_id: environment.id.clone(), environment_label: environment.label.clone(),
+                project_repo_key: None, harness: Harness::Claude, runtime_mode: RuntimeMode::default(),
+                resumed_from: None, runtime: SessionRuntime::Managed,
+            }).unwrap();
+            store.add_usage(&agent, &session.id, &axel_store::UsageDelta { input_tokens: tokens, ..Default::default() }, None).unwrap();
+        }
+        let data = load(&store, &thread.id, None).unwrap();
+        let mut sums: Vec<i64> = data.sessions.iter().map(|s| {
+            assert_eq!(s.spark.len(), SPARK_MINUTES);
+            s.spark.iter().sum()
+        }).collect();
+        sums.sort();
+        assert_eq!(sums, [17, 43]);
+        assert_eq!(data.spark.iter().sum::<i64>(), 60);
+    }
 
     #[test]
     fn stopping_one_agent_preserves_other_agents_and_other_threads() {

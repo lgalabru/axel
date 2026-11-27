@@ -13,6 +13,7 @@
 //! panes terminal` makes that the choice everywhere.
 
 mod assets;
+mod attachments;
 mod controls;
 mod guard;
 mod server;
@@ -112,7 +113,16 @@ pub fn pane(thread_id: &str, view: Pane) -> Result<()> {
     // apart from the owner's Ladybird (cookies, history) and from each other.
     // Before each start the page takes the pane's colours and text size, as
     // its frames can't be transparent and its text should be the terminal's.
+    let mut dock_fitted = false;
     let fit = |size: &terminal::PaneSize, ratio: f64, colors: &terminal::Colors| {
+        if !dock_fitted && size.rows > 0 {
+            if let Some(dock) = &undock
+                && let Some(stream) = &dock.stream
+            {
+                super::ui::fit_web_dock(&axel_rex::Rex::new(dock.rex.clone()), stream, dock.usage.as_deref(), size.rows);
+            }
+            dock_fitted = true;
+        }
         running.set_theme(&theme::css(colors, theme::font_px(size, ratio)));
         running.url()
     };
@@ -190,6 +200,23 @@ struct ThreadBackend {
     /// the connection's thread (a `Ctx` holds Rex's runner, which stays on
     /// one thread), so they never wait behind a poll.
     reader: Mutex<axel_store::Store>,
+    updates: Option<Mutex<UpdateState>>,
+}
+
+struct UpdateState {
+    receiver: std::sync::mpsc::Receiver<Option<String>>,
+    hint: Option<String>,
+}
+
+impl UpdateState {
+    fn current(&mut self) -> Option<String> {
+        match self.receiver.try_recv() {
+            Ok(hint) => self.hint = hint,
+            // Optional background checks may not have answered, or may have stopped.
+            Err(std::sync::mpsc::TryRecvError::Empty | std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+        self.hint.clone()
+    }
 }
 
 impl ThreadBackend {
@@ -198,14 +225,17 @@ impl ThreadBackend {
         let thread = ctx.store.get_thread(thread_id)?.with_context(|| t!("no thread {id}", id = thread_id))?;
         let owner_pk = ctx.owner()?.public().to_base58();
         let reader = axel_store::Store::open_default().context(t!("opening ~/.axel/axel.db"))?;
-        Ok(ThreadBackend { thread_id: thread.id, view, owner_pk, reader: Mutex::new(reader) })
+        let updates = (view == Pane::Composer).then(|| Mutex::new(UpdateState { receiver: axel_tui::start_update_check(), hint: None }));
+        Ok(ThreadBackend { thread_id: thread.id, view, owner_pk, reader: Mutex::new(reader), updates })
     }
 
     fn send(&self, ctx: &Ctx, body: &Value) -> Result<Value> {
         let text = body["text"].as_str().map(str::trim).unwrap_or_default();
-        if text.is_empty() {
+        let files = attachments::from_message(body)?;
+        if text.is_empty() && files.is_empty() {
             bail!("{}", t!("nothing to send"));
         }
+        let text = if text.is_empty() { "Please look at the attached files." } else { text };
         if text.len() > MESSAGE_BYTES_MAX {
             bail!("{}", t!("that message is longer than {max} bytes", max = MESSAGE_BYTES_MAX));
         }
@@ -213,11 +243,11 @@ impl ThreadBackend {
         let data = axel_tui::load_thread_data(&ctx.store, &self.owner_pk, &self.thread_id)?;
         match axel_tui::thread::dispatch(text, &data) {
             axel_tui::thread::Dispatch::Prompt { session_id, text } => {
-                let reply = super::ui::send_to_session(ctx, &session_id, SendCommand::Prompt { text, attachments: vec![], steer })?;
+                let reply = super::ui::send_to_session(ctx, &session_id, SendCommand::Prompt { text, attachments: files, steer })?;
                 reply_json(reply)
             }
             axel_tui::thread::Dispatch::Summon { agent, text } => {
-                super::ui::summon(ctx, &self.thread_id, &agent, &text, &[])?;
+                super::ui::summon(ctx, &self.thread_id, &agent, &text, &files)?;
                 Ok(json!({ "note": t!("summoning @{agent}…", agent = agent) }))
             }
             axel_tui::thread::Dispatch::NoTarget => {
@@ -244,6 +274,22 @@ impl ThreadBackend {
                 Ok(json!({ "close": true }))
             }
         }
+    }
+
+    fn cycle_mode(&self, ctx: &Ctx, body: &Value) -> Result<Value> {
+        use axel_store::RuntimeMode;
+        let session_id = self.own_session(ctx, body)?;
+        let data = axel_tui::load_thread_data(&ctx.store, &self.owner_pk, &self.thread_id)?;
+        let session = data.live_sessions.iter().find(|s| s.id == session_id && s.managed)
+            .context("no managed session to switch modes on")?;
+        let mode = match session.mode {
+            RuntimeMode::Supervised => RuntimeMode::Edits,
+            RuntimeMode::Edits => RuntimeMode::Plan,
+            RuntimeMode::Plan => RuntimeMode::Autopilot,
+            RuntimeMode::Autopilot => RuntimeMode::Supervised,
+        };
+        reply_json(super::ui::send_to_session(ctx, &session_id, SendCommand::SetMode { mode })?)?;
+        Ok(json!({ "mode": mode.as_str() }))
     }
 
     /// A session of this thread named by the page, which may not reach others.
@@ -274,7 +320,13 @@ impl server::Backend for ThreadBackend {
         }
         let data = axel_tui::load_thread_data(&store, &self.owner_pk, &self.thread_id)?;
         let usage = axel_tui::load_usage_data(&store, &self.thread_id)?;
-        Ok(view::thread(&data, &usage))
+        let mut value = view::thread(&data, &usage);
+        value["version"] = json!(env!("CARGO_PKG_VERSION"));
+        value["update_hint"] = match &self.updates {
+            Some(updates) => json!(updates.lock().map_err(|_| anyhow::anyhow!("update state lock poisoned"))?.current()),
+            None => Value::Null,
+        };
+        Ok(value)
     }
 
     fn marker(&self) -> Option<(i64, i64)> {
@@ -286,6 +338,8 @@ impl server::Backend for ThreadBackend {
         let ctx = Ctx::open()?;
         match action {
             Action::Send => self.send(&ctx, body),
+            Action::Attach => attachments::attach(body),
+            Action::CycleMode => self.cycle_mode(&ctx, body),
             Action::Answer => {
                 let session_id = self.own_session(&ctx, body)?;
                 let item_id = body["item_id"].as_str().context(t!("which question?"))?.to_string();

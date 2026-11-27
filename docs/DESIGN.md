@@ -225,7 +225,10 @@ $ axel                               # in any Rex terminal
 Experimental, and off until `axel panes web` turns it on: a thread view's
 three panes can then be web pages instead of terminal text, wherever Ladybird
 is installed. The layout and Rex labels are the terminal view's: the
-conversation above, the composer below, the activity pane beside it. Each pane
+conversation above, the five-row composer below, the activity pane beside it.
+The bottom row splits 73% composer and 27% activity, with at least 24 columns
+for activity and 50 for composing. Narrower windows omit activity. The web
+composer fits once after its terminal has dimensions, including on restore. Each pane
 runs `axel web pane THREAD --view messages|composer|activity`, which serves
 the thread on `127.0.0.1` from that process and runs `Ladybird
 --headless=terminal --temporary-profile --device-pixel-ratio R URL` in the same
@@ -254,7 +257,19 @@ JetBrains Mono, Rex's default terminal font, which the binary carries
 (`/fonts/*.woff2`, OFL) since Ladybird can't reach the copy built into Ghostty.
 It is sized so a character is one terminal cell wide. The properties are
 appended to `/app.css` as a `:root` rule, since the page's CSP allows no inline
-style, and replaced when Ladybird restarts at another scale.
+style, and replaced when Ladybird restarts at another scale. The page and
+composer share that background. Code, questions and controls have no extra
+panel fills. Only agent badges and action buttons carry filled colours. A background
+reply applies even if the terminal does not return a foreground colour.
+
+The web composer accepts terminal file-path pastes and browser image drops.
+It shows removable attachment chips and carries their paths through dispatch,
+including when summoning an agent. Browser uploads use generated filenames in
+`~/.axel/attachments`. A request accepts at most eight files of 10 MiB each.
+PNG, JPEG, GIF and WebP uploads are supported. The Axel version and cached
+update hint appear on the right of the rounded composer footer when there is
+room. The message field sits above a divider; the agent and runtime mode sit
+below it. Shift+Tab, or clicking the mode, uses the terminal mode cycle.
 
 The pages follow the terminal view:
 - **Conversation.** Each agent's turn has a bold name badge in its palette
@@ -265,11 +280,18 @@ The pages follow the terminal view:
   dots where a braille character's would be, two across and four down per cell,
   the series resampled to the dots that fit, the top dot of each column lit in
   part for the exact value, and a gradient up the column. The agent's name,
-  state, context, tokens and cost are written over it. Context and plan limits
+  name is on the left, tokens and cost sit above the context meter in the
+  middle, and the chart fills the right. Smaller sans-serif type uses uppercase
+  labels and tabular numbers. Shared identity and metric column widths align
+  every chart. Quiet time buckets stay blank in web and terminal activity
+  strips. Names truncate at narrow widths. Plan limits share a row when they fit. Context and plan limits
   are gauges two dots high, green to yellow to red along their length.
 - **Thread controls.** Ctrl+D in the web composer or conversation opens the
   thread controls as a web pane too (`--view controls`), in the same floating
-  layer as the terminal pane. It shows the sessions, a chart of the thread's last
+  layer as the terminal pane. Each session uses the activity strip design with
+  its own last-hour chart. Terminal views use uppercase names, figures and
+  context followed by a braille chart, dropping columns at narrow widths.
+  It shows the sessions, a chart of the thread's last
   hour with its totals, and the terminal pane's menu, walked with the same keys.
   The page only walks the steps: `POST /api/control` with an outcome returns the
   question `axel_tui::manage::confirm_question` asks, and with `confirmed`

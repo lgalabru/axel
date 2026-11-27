@@ -19,21 +19,21 @@
 
 <section id="composer" class="view composer">
   <div class="field">
-    <div class="meta">
-      <span id="target" class="target"></span>
-      <span id="mode" class="mode"></span>
-      <span id="status" class="status"></span>
-    </div>
+    <div id="attachments" class="attachments" aria-label="Attachments"></div>
     <div id="suggest" class="suggest" hidden></div>
     <div class="line">
       <span class="prompt">&gt;</span>
-      <textarea id="input" placeholder="write to the thread · @name to ask an agent" spellcheck="false"></textarea>
+      <textarea id="input" placeholder="message the thread · @name for someone else" aria-label="Message the thread" spellcheck="false"></textarea>
     </div>
-    <div class="controls">
-      <span class="keys">⏎ send · ⇧⏎ new line · ^⏎ interrupt · esc stop</span>
+    <footer class="composer-footer meta">
+      <span id="target" class="target"></span><span class="meta-separator">·</span>
+      <button type="button" id="mode" class="mode" title="Shift+Tab to cycle modes"></button>
+      <span class="mode-help">(shift+tab to cycle)</span>
+      <span id="status" class="status" role="status"></span>
       <button type="button" id="stop" class="ghost" hidden>stop</button>
-      <button type="button" id="send" class="primary">send</button>
-    </div>
+      <button type="button" id="send" class="ghost" title="Enter to send">send</button>
+      <span id="release" class="release"></span>
+    </footer>
   </div>
 </section>
 

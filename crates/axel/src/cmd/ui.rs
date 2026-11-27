@@ -41,11 +41,10 @@ pub const PROMPT_LABEL: &str = "why not today?";
 /// The usage HUD older versions opened beside the launcher; still closed by the toggle.
 const USAGE_LABEL: &str = "usage";
 pub const THREADS_LABEL: &str = "threads";
-/// The tokens pane beside a composer: this many columns (each agent's day,
-/// cost and context, and the last hour's chart)…
-const DOCK_USAGE_COLS: u16 = 48;
-/// …and never more than this share of the row…
-const DOCK_USAGE_MAX_SHARE: f64 = 0.35;
+/// The reference layout gives usage 27% of the bottom dock.
+const DOCK_USAGE_SHARE: f64 = 0.27;
+/// A narrow dock still needs room for the compact usage labels and figures.
+const DOCK_USAGE_COLS_MIN: u16 = 24;
 /// …and only when the composer keeps at least this many.
 const DOCK_COMPOSE_MIN_COLS: u16 = 50;
 /// The usage pane's label. Not one of the launcher's: `axel` leaves it open.
@@ -1005,12 +1004,12 @@ fn usage_beside(command: &[String], columns: Option<u16>) -> Option<axel_rex::Be
 }
 
 /// The share of a composer row `columns` wide that the composer keeps
-/// beside a tokens pane [`DOCK_USAGE_COLS`] wide (at most
-/// [`DOCK_USAGE_MAX_SHARE`] of it); `None` when the composer would be left
+/// beside a tokens pane taking [`DOCK_USAGE_SHARE`] of the row, at least
+/// [`DOCK_USAGE_COLS_MIN`] columns; `None` when the composer would be left
 /// under [`DOCK_COMPOSE_MIN_COLS`].
 fn usage_keep(columns: u16) -> Option<f64> {
     let total = f64::from(columns);
-    let usage = f64::from(DOCK_USAGE_COLS).min(total * DOCK_USAGE_MAX_SHARE);
+    let usage = (total * DOCK_USAGE_SHARE).max(f64::from(DOCK_USAGE_COLS_MIN));
     (total - usage >= f64::from(DOCK_COMPOSE_MIN_COLS)).then(|| (total - usage) / total)
 }
 
@@ -1363,6 +1362,16 @@ fn settle_thread_row(rex: &axel_rex::Rex, stream: &str, compose: &str, usage: Op
     }
 }
 
+/// Fit the web dock once its terminal has real dimensions, including after
+/// restoring a session whose initial split had no size to measure.
+pub(super) fn fit_web_dock(rex: &axel_rex::Rex, stream: &str, usage: Option<&str>, rows: u16) {
+    assert!(rows > 0, "the web composer has a measured terminal");
+    fit_compose_pane(rex, stream, PANE_MIN_ROWS, rows);
+    if let Some(usage) = usage {
+        fit_usage_pane(rex, usage, stream);
+    }
+}
+
 /// The tokens pane beside this composer at its width: Rex's app lays a new
 /// row out on its own, so the border is put where it belongs once we're up
 /// (and again on each fit).
@@ -1708,13 +1717,14 @@ mod dock_tests {
     }
 
     #[test]
-    fn the_tokens_pane_beside_the_composer_is_48_columns() {
-        let keep = usage_keep(200).unwrap();
-        assert!((keep - 152.0 / 200.0).abs() < 1e-9, "{keep}");
-        // Never more than 35% of the row.
-        assert!((usage_keep(120).unwrap() - 0.65).abs() < 1e-9, "a 120-column row: 42 of it, not 48");
-        assert!((usage_keep(80).unwrap() - 0.65).abs() < 1e-9);
-        assert_eq!(usage_keep(70), None, "a narrow composer keeps its width");
+    fn the_tokens_pane_keeps_the_reference_proportions_and_minimum_width() {
+        for columns in [120, 180, 200, 400] {
+            assert!((usage_keep(columns).unwrap() - 0.73).abs() < 1e-9);
+        }
+        assert!((usage_keep(80).unwrap() - 0.7).abs() < 1e-9);
+        assert_eq!(usage_keep(74), Some(50.0 / 74.0), "both panes fit at the boundary");
+        assert_eq!(usage_keep(73), None, "a narrow composer keeps its width");
+        assert_eq!(usage_keep(0), None);
     }
 
     #[test]

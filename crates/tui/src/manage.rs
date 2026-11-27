@@ -118,6 +118,8 @@ pub struct SessionRow {
     /// `(used, size)` of its context window, when it reports it.
     pub context: Option<(i64, i64)>,
     pub duration_secs: i64,
+    /// Last hour, oldest first, at most 60 one-minute token buckets.
+    pub spark: Vec<i64>,
 }
 
 /// What a row of the menu does.
@@ -517,7 +519,7 @@ enum SessionColumn {
 
 impl SessionColumn {
     /// Left to right; each shows only while it still fits.
-    const ALL: [SessionColumn; 7] = [Self::State, Self::Turns, Self::Tools, Self::Tokens, Self::Cost, Self::Context, Self::Age];
+    const ALL: [SessionColumn; 7] = [Self::Tokens, Self::Cost, Self::Context, Self::State, Self::Turns, Self::Tools, Self::Age];
 
     fn label(self) -> &'static str {
         match self {
@@ -571,10 +573,14 @@ impl SessionColumn {
 fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
     let name_width = d.sessions.iter().map(|s| text_width(&s.agent)).max().unwrap_or(5).clamp(5, 12);
     let runs_width = d.sessions.iter().map(|s| text_width(&s.runs)).max().unwrap_or(0).min(18);
+    // Six cells keep a chart legible; narrower panes prioritize the figures.
+    const CHART_COLS_MIN: usize = 6;
+    let chart_reserved = if width >= 70 { CHART_COLS_MIN + 1 } else { 0 };
+    let table_width = width.saturating_sub(chart_reserved);
     let mut used = name_width + 1 + runs_width;
     let mut shown: Vec<SessionColumn> = Vec::new();
     for column in SessionColumn::ALL {
-        if used + 1 + column.width_cols() <= width {
+        if used + 1 + column.width_cols() <= table_width {
             shown.push(column);
             used += 1 + column.width_cols();
         }
@@ -584,16 +590,26 @@ fn render_sessions(rows: &mut Rows, d: &ManageData, width: usize) {
         let (label, w) = (column.label(), column.width_cols());
         header.push(Span::styled(format!(" {}", pad_start(label, w)), theme::dim()));
     }
+    let chart_width = width.saturating_sub(used + 1).min(30);
+    let chart_width = if chart_reserved > 0 { chart_width } else { 0 };
+    let peak = d.sessions.iter().map(|s| crate::view::chart::peak(&s.spark, chart_width)).max().unwrap_or(0);
+    if chart_width > 0 {
+        header.push(Span::styled(" 1h", theme::dim()));
+    }
     rows.push(Line::from(header));
     for s in &d.sessions {
         let mut spans = vec![
-            Span::styled(pad_end(&ellipsize(&s.agent, name_width), name_width), Style::default().fg(theme::agent_color(s.color))),
+            Span::styled(pad_end(&ellipsize(&s.agent.to_uppercase(), name_width), name_width), Style::default().fg(theme::agent_color(s.color))),
             Span::styled(format!(" {}", pad_end(&ellipsize(&s.runs, runs_width), runs_width)), theme::dim()),
         ];
         for column in &shown {
             let (text, style) = column.cell(s);
             let w = column.width_cols();
             spans.push(Span::styled(format!(" {}", pad_start(&ellipsize(&text, w), w)), style));
+        }
+        if chart_width > 0 {
+            spans.push(Span::raw(" "));
+            spans.extend(crate::view::chart::activity(&s.spark, chart_width, peak, Style::default().fg(theme::agent_color(s.color))));
         }
         rows.push(Line::from(spans));
     }
@@ -609,7 +625,7 @@ fn render_totals(rows: &mut Rows, d: &ManageData, width: usize) {
         Span::styled(t!("{n} tokens", n = format_tokens(d.tokens)), theme::bold()),
         Span::styled(format!(" ${:.2} · {numbers}{files}  ", d.cost_usd), theme::dim()),
     ];
-    spans.extend(crate::view::chart::braille(&d.spark, spark_width, peak, theme::accent()));
+    spans.extend(crate::view::chart::activity(&d.spark, spark_width, peak, theme::accent()));
     rows.push(Line::from(spans));
 }
 
@@ -820,7 +836,7 @@ mod tests {
         let text: Vec<String> = (0..17).map(|y| (0..90).map(|x| term.backend().buffer()[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect();
         assert!(text[0].starts_with("Ship it") && text[0].ends_with("open · 2d · 2 sessions"), "{:?}", text[0]);
         assert!(text[3].contains("state") && text[3].contains("tokens") && text[3].contains("ctx") && text[3].contains("for"), "{:?}", text[3]);
-        assert!(text[4].starts_with("opus") && text[4].contains("claude/opus") && text[4].contains("idle") && text[4].contains("34M") && text[4].contains("62%") && text[4].contains("5h 12m"), "{:?}", text[4]);
+        assert!(text[4].starts_with("OPUS") && text[4].contains("claude/opus") && text[4].contains("idle") && text[4].contains("34M") && text[4].contains("62%") && text[4].contains("5h 12m"), "{:?}", text[4]);
         assert!(text[6].starts_with("37M tokens") && text[6].contains("16 turns") && text[6].contains("9 files changed"), "{:?}", text[6]);
         assert!(text[8].starts_with("› r Reset") && text[9].starts_with("  m Move"), "{:?}", &text[8..10]);
         assert!(text[15].starts_with("  h Hard reset"), "last, apart: {:?}", text[15]);
@@ -831,6 +847,6 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(44, 17)).unwrap();
         term.draw(|f| render(f, &v)).unwrap();
         let row: String = (0..44).map(|x| term.backend().buffer()[(x, 3)].symbol().to_string()).collect();
-        assert!(row.contains("state") && row.contains("turns") && !row.contains("ctx"), "{row:?}");
+        assert!(row.contains("tokens") && row.contains("cost") && row.contains("ctx") && !row.contains("turns"), "{row:?}");
     }
 }

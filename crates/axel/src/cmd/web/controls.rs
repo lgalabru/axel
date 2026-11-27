@@ -41,6 +41,7 @@ pub fn controls(data: &ManageData) -> Value {
             "turns": s.turns,
             "tool_calls": s.tool_calls,
             "tokens": s.tokens,
+            "spark": s.spark,
             "cost_usd": s.cost_usd,
             "context": s.context.map(|(used, size)| json!({ "used": used, "size": size })),
             "duration": axel_tui::manage::duration_label(s.duration_secs),

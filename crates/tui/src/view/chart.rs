@@ -58,6 +58,16 @@ pub fn braille(series: &[i64], width: usize, max: i64, style: Style) -> Vec<Span
         .collect()
 }
 
+/// Activity strips reserve their full chart width, leaving quiet cells blank.
+pub(crate) fn activity(series: &[i64], width: usize, max: i64, style: Style) -> Vec<Span<'static>> {
+    let mut spans = braille(series, width, max, style);
+    for span in &mut spans {
+        if span.content == "⣀" { span.content = " ".into(); }
+    }
+    debug_assert_eq!(spans.len(), width);
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +89,13 @@ mod tests {
     fn a_short_series_sits_at_the_right() {
         assert_eq!(text(&[5, 10], 3), "⣀⣀⣼");
         assert_eq!(text(&[], 2), "⣀⣀");
+    }
+
+    #[test]
+    fn empty_activity_preserves_width_without_gray_dots() {
+        let spans = activity(&[], 12, 0, Style::default());
+        assert_eq!(spans.iter().map(|s| s.content.as_ref()).collect::<String>(), " ".repeat(12));
+        assert_eq!(activity(&[0; 60], 12, 0, Style::default()).len(), 12);
     }
 
     #[test]
