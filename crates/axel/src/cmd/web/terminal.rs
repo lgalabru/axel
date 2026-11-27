@@ -106,27 +106,27 @@ impl PaneSize {
 }
 
 /// Run `browser` with `flags`, `--device-pixel-ratio` from the pane's size
-/// and `url`, until it exits or the pane hangs up.  `ratio_for` turns a
-/// pane size into the ratio to draw at.  `on_start` hears the pane, the
-/// ratio and the terminal's colours before each start, so the page can be
-/// fitted to them.  Without a terminal there is no status line to hide or
-/// size to follow: Ladybird runs as it is, at the ratio of a pane of
-/// unknown size.
+/// and an address, until it exits or the pane hangs up.  `ratio_for` turns
+/// a pane size into the ratio to draw at.  Before each start, `on_start`
+/// hears the pane, the ratio and the terminal's colours, fits the page to
+/// them, and gives the address to open: a new one each time, as each opens
+/// one page load (`guard.rs`).  Without a terminal there is no status line
+/// to hide or size to follow: Ladybird runs as it is, at the ratio of a
+/// pane of unknown size.
 pub fn run(
     browser: &Path,
     flags: &[&str],
-    url: &str,
     ratio_for: impl Fn(&PaneSize) -> f64,
-    mut on_start: impl FnMut(&PaneSize, f64, &Colors),
+    mut on_start: impl FnMut(&PaneSize, f64, &Colors) -> Result<String>,
 ) -> Result<ExitStatus> {
     let stdin = std::io::stdin().as_raw_fd();
     // SAFETY: isatty only reads the descriptor's type.
     if unsafe { libc::isatty(stdin) } != 1 {
         let unknown = PaneSize { rows: 0, cols: 0, width_px: 0, height_px: 0 };
         let ratio = ratio_for(&unknown);
-        on_start(&unknown, ratio, &Colors::default());
+        let url = on_start(&unknown, ratio, &Colors::default())?;
         let mut command = Command::new(browser);
-        command.args(flags).args(["--device-pixel-ratio", &ratio.to_string(), url]);
+        command.args(flags).args(["--device-pixel-ratio", &ratio.to_string(), &url]);
         return command.status().with_context(|| format!("starting {}", browser.display()));
     }
     let _raw = RawMode::enter(stdin).context("putting the pane's terminal in raw mode")?;
@@ -143,11 +143,11 @@ pub fn run(
     let mut restarts = 0_u32;
     let status = loop {
         let ratio = ratio_for(&size);
-        on_start(&size, ratio, &colors);
+        let url = on_start(&size, ratio, &colors)?;
         // A fresh pty each time: the last one may still be the controlling
         // terminal of a helper of the Ladybird before.
         let (master, slave) = open_pty(&size.for_ladybird())?;
-        let mut child = spawn(browser, flags, url, ratio, &slave)?;
+        let mut child = spawn(browser, flags, &url, ratio, &slave)?;
         drop(slave);
         RUNNING_GROUP.store(libc::pid_t::try_from(child.id()).expect("a pid fits pid_t"), Ordering::Relaxed);
         *typing_to.lock().map_err(|_| anyhow::anyhow!("the input thread panicked"))? = Some(File::from(master.try_clone()?));

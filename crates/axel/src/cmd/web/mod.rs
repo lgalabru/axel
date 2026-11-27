@@ -14,6 +14,7 @@
 
 mod assets;
 mod controls;
+mod guard;
 mod server;
 mod terminal;
 mod theme;
@@ -256,8 +257,9 @@ pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
     // its frames can't be transparent and its text should be the terminal's.
     let fit = |size: &terminal::PaneSize, ratio: f64, colors: &terminal::Colors| {
         running.set_theme(&theme::css(colors, theme::font_px(size, ratio)));
+        running.url()
     };
-    let outcome = terminal::run(&browser, &["--headless=terminal", "--temporary-profile"], &running.url(), device_pixel_ratio, fit);
+    let outcome = terminal::run(&browser, &["--headless=terminal", "--temporary-profile"], device_pixel_ratio, fit);
     // Only a Ladybird that gave up at once, before loading the page, means
     // it can't draw here; a pane that went later just went.
     let early = started.elapsed() < Duration::from_secs(FALLBACK_WINDOW_SECS) && running.served() == 0;
@@ -317,7 +319,7 @@ fn fall_back(thread_id: &str, view: WebView, why: &str) -> Result<()> {
 pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
     let backend = ThreadBackend::open(thread_id, view)?;
     let running = server::start(Arc::new(backend), view, "")?;
-    println!("{}", running.url());
+    println!("{}", running.url()?);
     // Flushing makes the address readable by whoever started us; if stdout
     // is gone there is no one to read it either.
     let _ = std::io::Write::flush(&mut std::io::stdout());

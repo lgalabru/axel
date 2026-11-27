@@ -245,7 +245,7 @@ fn http(port: &str, method: &str, path: &str, cookie: &str, body: &str) -> Strin
     use std::io::{Read, Write};
     let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: axel_web={cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: axel_web={cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes()).unwrap();
@@ -253,6 +253,17 @@ fn http(port: &str, method: &str, path: &str, cookie: &str, body: &str) -> Strin
     stream.read_to_end(&mut reply).unwrap();
     let reply = String::from_utf8_lossy(&reply).into_owned();
     reply.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or(reply)
+}
+
+/// The cookie a served page's address earns, the way Ladybird earns it.
+fn cookie_for(port: &str, token: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    stream.write_all(format!("GET /?k={token} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes()).unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).unwrap();
+    let set = reply.lines().find_map(|l| l.strip_prefix("Set-Cookie: axel_web=")).unwrap_or_else(|| panic!("no cookie: {reply}"));
+    set.split(';').next().unwrap().to_string()
 }
 
 #[test]
@@ -272,8 +283,10 @@ fn the_web_thread_controls_ask_first_then_settle_the_thread() {
         .unwrap();
     let mut line = String::new();
     std::io::BufRead::read_line(&mut std::io::BufReader::new(serve.stdout.take().unwrap()), &mut line).unwrap();
-    let (base, secret) = line.trim().split_once("/?k=").unwrap();
+    let (base, token) = line.trim().split_once("/?k=").unwrap();
     let port = base.rsplit(':').next().unwrap().to_string();
+    let cookie = cookie_for(&port, token);
+    let secret = cookie.as_str();
 
     let page: serde_json::Value = serde_json::from_str(&http(&port, "GET", "/api/thread", secret, "")).unwrap();
     assert_eq!(page["view"], "controls");

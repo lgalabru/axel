@@ -1,12 +1,10 @@
 //! The web pane's server: HTTP/1.1 on `127.0.0.1`, one thread, one owner.
 //!
-//! Only the page the pane opened may talk to it.  The first request carries
-//! a secret made at start (`/?k=…`); the reply sets it as a cookie and drops
-//! it from the address.  Every other request needs that cookie, the right
-//! `Host` (so a page elsewhere can't reach us through DNS rebinding), and,
-//! when it changes something, a JSON body from our own origin.  There is no
-//! framework: a few routes, every read and queue bounded, one connection
-//! per request except the event stream.
+//! Only the page the pane opened may talk to it: see `guard.rs` for how
+//! (a one-time token in the address, a cookie no command line carries, the
+//! `Host`, and the `Origin` of every write).  There is no framework: a few
+//! routes, every read and queue bounded, one connection per request except
+//! the event stream.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -16,6 +14,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+
+use super::guard::{self, Guard};
 
 /// The most bytes of request line and headers read: a browser's request is
 /// well under 4 KiB; past this it is not a browser.
@@ -96,15 +96,16 @@ impl Action {
 /// A running server.
 pub struct Running {
     pub port: u16,
-    secret: String,
+    guard: Arc<Guard>,
     shared: Arc<Shared>,
     rendered: Arc<Rendered>,
 }
 
 impl Running {
-    /// The address the pane opens: it carries the secret, once.
-    pub fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/?k={}", self.port, self.secret)
+    /// An address for one Ladybird start: its token opens one page load,
+    /// within `guard::TOKEN_SECS`.
+    pub fn url(&self) -> Result<String> {
+        Ok(format!("http://127.0.0.1:{}/?k={}", self.port, self.guard.mint()?))
     }
 
     /// Requests served so far.
@@ -140,7 +141,7 @@ pub fn start(backend: Arc<dyn Backend>, view: super::WebView, theme: &str) -> Re
     let listener = TcpListener::bind("127.0.0.1:0").context("listening on 127.0.0.1")?;
     let port = listener.local_addr()?.port();
     assert!(port > 0, "the OS gave a real port");
-    let secret = axel_identity::Keypair::generate().public().to_base58();
+    let guard = Arc::new(Guard::new()?);
     let first = backend.load().unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
     let shared = Arc::new(Shared {
         snapshot: Mutex::new(Snapshot { version: 1, json: Arc::new(first.to_string()) }),
@@ -154,9 +155,9 @@ pub fn start(backend: Arc<dyn Backend>, view: super::WebView, theme: &str) -> Re
     let page = super::assets::PAGE.replace("{{view}}", view.as_str());
     assert!(page.contains(&format!("data-view=\"{}\"", view.as_str())), "the page names its view");
     let rendered = Arc::new(Rendered { page, css: std::sync::RwLock::new(stylesheet(theme)) });
-    let accept = (shared.clone(), backend, secret.clone(), rendered.clone());
+    let accept = (shared.clone(), backend, guard.clone(), rendered.clone());
     std::thread::spawn(move || serve(listener, port, &accept.0, &accept.1, &accept.2, &accept.3));
-    Ok(Running { port, secret, shared, rendered })
+    Ok(Running { port, guard, shared, rendered })
 }
 
 /// Look at the thread every [`POLL_MS`] and wake the event streams when
@@ -195,7 +196,7 @@ struct Rendered {
     css: std::sync::RwLock<String>,
 }
 
-fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<dyn Backend>, secret: &str, page: &Arc<Rendered>) {
+fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<dyn Backend>, guard: &Arc<Guard>, page: &Arc<Rendered>) {
     for stream in listener.incoming() {
         // A connection that failed before it was accepted is the client's loss.
         let Ok(mut stream) = stream else { continue };
@@ -205,20 +206,28 @@ fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<d
             continue;
         }
         shared.connections.fetch_add(1, Ordering::AcqRel);
-        let (shared, backend, secret, page) = (shared.clone(), backend.clone(), secret.to_string(), page.clone());
+        let (shared, backend, guard, page) = (shared.clone(), backend.clone(), guard.clone(), page.clone());
         std::thread::spawn(move || {
             // A connection that breaks mid-request has no one left to tell.
-            let _ = handle(&mut stream, port, &shared, backend.as_ref(), &secret, &page);
+            let _ = handle(&mut stream, port, &shared, backend.as_ref(), &guard, &page);
             shared.served.fetch_add(1, Ordering::Relaxed);
             shared.connections.fetch_sub(1, Ordering::AcqRel);
         });
     }
 }
 
+/// The methods a pane's page uses; any other is refused as it is read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Method {
+    #[default]
+    Get,
+    Post,
+}
+
 /// One parsed request.
 #[derive(Debug, Default)]
 struct Request {
-    method: String,
+    method: Method,
     path: String,
     query: String,
     host: Option<String>,
@@ -287,70 +296,61 @@ fn parse_request_line(line: &str, request: &mut Request) -> std::result::Result<
         return Err(Refusal::BadRequest);
     }
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    request.method = method.to_string();
+    request.method = match method {
+        "GET" => Method::Get,
+        "POST" => Method::Post,
+        _ => return Err(Refusal::BadRequest),
+    };
     request.path = path.to_string();
     request.query = query.to_string();
     Ok(())
-}
-
-/// The cookie that proves a request comes from the pane's page.
-const COOKIE: &str = "axel_web";
-
-fn has_cookie(request: &Request, secret: &str) -> bool {
-    let Some(header) = &request.cookie else { return false };
-    header.split(';').filter_map(|pair| pair.trim().split_once('=')).any(|(name, value)| name == COOKIE && same(value, secret))
-}
-
-/// Compares in time independent of where the first difference is.
-fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0_u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').filter_map(|pair| pair.split_once('=')).find_map(|(k, v)| (k == key).then_some(v))
 }
 
-fn handle(stream: &mut TcpStream, port: u16, shared: &Shared, backend: &dyn Backend, secret: &str, page: &Rendered) -> std::io::Result<()> {
+fn handle(stream: &mut TcpStream, port: u16, shared: &Shared, backend: &dyn Backend, guard: &Guard, page: &Rendered) -> std::io::Result<()> {
     let request = match read_request(stream) {
         Ok(r) => r,
         Err(Refusal::TooLarge) => return respond(stream, 413, "text/plain", b"too large"),
         Err(Refusal::BadRequest) => return respond(stream, 400, "text/plain", b"bad request"),
     };
-    let own_host = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
-    if !request.host.as_ref().is_some_and(|h| own_host.contains(h)) {
+    if !guard::own_host(port, request.host.as_deref()) {
         return respond(stream, 403, "text/plain", b"wrong host");
     }
-    // The pane's first request: trade the secret in the address for a cookie.
-    if request.method == "GET" && request.path == "/" && query_value(&request.query, "k").is_some_and(|k| same(k, secret)) {
+    // A Ladybird start's first request: spend the address's token for the cookie.
+    if request.method == Method::Get && request.path == "/" && query_value(&request.query, "k").is_some_and(|k| guard.redeem(k)) {
         let headers = format!(
-            "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: {COOKIE}={secret}; HttpOnly; SameSite=Strict; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 303 See Other\r\nLocation: /\r\nSet-Cookie: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            guard.set_cookie()
         );
         return stream.write_all(headers.as_bytes());
     }
-    if !has_cookie(&request, secret) {
+    if !guard.admits(request.cookie.as_deref()) {
         return respond(stream, 403, "text/plain", b"this page belongs to an Axel pane");
     }
     route(stream, &request, port, shared, backend, page)
 }
 
 fn route(stream: &mut TcpStream, request: &Request, port: u16, shared: &Shared, backend: &dyn Backend, page: &Rendered) -> std::io::Result<()> {
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => respond(stream, 200, "text/html; charset=utf-8", page.page.as_bytes()),
-        ("GET", "/app.css") => {
+    match (request.method, request.path.as_str()) {
+        (Method::Get, "/") => respond(stream, 200, "text/html; charset=utf-8", page.page.as_bytes()),
+        (Method::Get, "/app.css") => {
             let css = page.css.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
             respond(stream, 200, "text/css; charset=utf-8", css.as_bytes())
         }
-        ("GET", path) if path.starts_with("/fonts/") => match super::assets::FONTS.iter().find(|(p, _)| *p == path) {
+        (Method::Get, path) if path.starts_with("/fonts/") => match super::assets::FONTS.iter().find(|(p, _)| *p == path) {
             Some((_, bytes)) => respond(stream, 200, "font/woff2", bytes),
             None => respond(stream, 404, "text/plain", b"no such font"),
         },
-        ("GET", "/app.js") => respond(stream, 200, "text/javascript; charset=utf-8", super::assets::JS.as_bytes()),
-        ("GET", "/api/thread") => {
+        (Method::Get, "/app.js") => respond(stream, 200, "text/javascript; charset=utf-8", super::assets::JS.as_bytes()),
+        (Method::Get, "/api/thread") => {
             let json = shared.snapshot.lock().map(|s| s.json.clone()).unwrap_or_default();
             respond(stream, 200, "application/json", json.as_bytes())
         }
-        ("GET", "/api/events") => events(stream, shared),
-        ("POST", path) => match Action::from_path(path) {
+        (Method::Get, "/api/events") => events(stream, shared),
+        (Method::Post, path) => match Action::from_path(path) {
             Some(action) => act(stream, request, port, backend, action),
             None => respond(stream, 404, "text/plain", b"not found"),
         },
@@ -362,8 +362,7 @@ fn act(stream: &mut TcpStream, request: &Request, port: u16, backend: &dyn Backe
     // A form or an image elsewhere can't send JSON from our origin: this is
     // what keeps other pages from acting through the browser's cookie.
     let json_body = request.content_type.as_deref().is_some_and(|c| c.starts_with("application/json"));
-    let own_origin = request.origin.as_deref().is_none_or(|o| o == format!("http://127.0.0.1:{port}") || o == format!("http://localhost:{port}"));
-    if !json_body || !own_origin {
+    if !json_body || !guard::own_origin(port, request.origin.as_deref()) {
         return respond(stream, 403, "text/plain", b"not from this page");
     }
     let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
@@ -392,12 +391,12 @@ fn stream_events(stream: &mut TcpStream, shared: &Shared) -> std::io::Result<()>
     let mut seen = 0_u64;
     loop {
         let version = {
-            let Ok(guard) = shared.snapshot.lock() else { return Ok(()) };
-            let (guard, _) = shared
+            let Ok(snapshot) = shared.snapshot.lock() else { return Ok(()) };
+            let (snapshot, _) = shared
                 .changed
-                .wait_timeout_while(guard, Duration::from_secs(PING_SECS), |s| s.version == seen)
+                .wait_timeout_while(snapshot, Duration::from_secs(PING_SECS), |s| s.version == seen)
                 .map_err(|_| std::io::Error::other("poisoned"))?;
-            guard.version
+            snapshot.version
         };
         if version == seen {
             stream.write_all(b": ping\n\n")?;
@@ -432,6 +431,7 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::guard::COOKIE;
 
     struct Fake {
         view: Mutex<Value>,
@@ -468,6 +468,16 @@ mod tests {
         (status, reply)
     }
 
+    /// The page's cookie, earned the way Ladybird earns it: by spending the
+    /// token of an address.
+    fn cookie_of(server: &Running) -> String {
+        let url = server.url().unwrap();
+        let (status, reply) = get(server.port, &url[url.find("/?k=").unwrap()..], None);
+        assert_eq!(status, 303, "{reply}");
+        let set = reply.lines().find_map(|l| l.strip_prefix("Set-Cookie: ")).unwrap();
+        set.split(';').next().unwrap().strip_prefix(&format!("{COOKIE}=")).unwrap().to_string()
+    }
+
     fn get(port: u16, path: &str, cookie: Option<&str>) -> (u16, String) {
         let cookie = cookie.map(|c| format!("Cookie: {COOKIE}={c}\r\n")).unwrap_or_default();
         send(port, &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{cookie}\r\n"))
@@ -481,13 +491,18 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_becomes_a_cookie_and_nothing_works_without_it() {
+    fn an_addresss_token_earns_the_cookie_once_and_nothing_works_without_it() {
         let backend = fake();
         let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
-        let (port, secret) = (server.port, server.secret.clone());
-        let (status, reply) = get(port, &format!("/?k={secret}"), None);
+        let port = server.port;
+        let url = server.url().unwrap();
+        let token = url.rsplit("?k=").next().unwrap().to_string();
+        let (status, reply) = get(port, &format!("/?k={token}"), None);
         assert_eq!(status, 303);
-        assert!(reply.contains(&format!("Set-Cookie: {COOKIE}={secret}; HttpOnly; SameSite=Strict")), "{reply}");
+        assert!(reply.contains("HttpOnly; SameSite=Strict") && !reply.contains(&token), "the cookie isn't the token: {reply}");
+        assert_eq!(get(port, &format!("/?k={token}"), None).0, 403, "a token read from ps after the load opens nothing");
+        assert_eq!(get(port, "/api/thread", Some(&token)).0, 403, "nor is it a cookie");
+        let secret = cookie_of(&server);
         assert_eq!(get(port, "/", None).0, 403);
         assert_eq!(get(port, "/?k=wrong", None).0, 403);
         assert_eq!(get(port, "/api/thread", Some("wrong")).0, 403);
@@ -502,23 +517,24 @@ mod tests {
     #[test]
     fn the_stylesheet_ends_with_the_panes_colours() {
         let server = start(fake(), super::super::WebView::Messages, "--bg:#fafaf0;").unwrap();
-        let (status, css) = get(server.port, "/app.css", Some(&server.secret));
+        let (status, css) = get(server.port, "/app.css", Some(&cookie_of(&server)));
         assert_eq!(status, 200);
         assert!(css.trim_end().ends_with(":root { --bg:#fafaf0; }"), "the theme comes after the page's own palette");
         let plain = start(fake(), super::super::WebView::Messages, "").unwrap();
-        assert!(!get(plain.port, "/app.css", Some(&plain.secret)).1.contains(":root { --bg:#fafaf0"));
+        assert!(!get(plain.port, "/app.css", Some(&cookie_of(&plain))).1.contains(":root { --bg:#fafaf0"));
     }
 
     #[test]
     fn the_theme_follows_a_restart_and_the_fonts_are_served() {
         let server = start(fake(), super::super::WebView::Messages, "").unwrap();
         server.set_theme("--font-size:21.00px;");
-        let (_, css) = get(server.port, "/app.css", Some(&server.secret));
+        let secret = cookie_of(&server);
+        let (_, css) = get(server.port, "/app.css", Some(&secret));
         assert!(css.trim_end().ends_with(":root { --font-size:21.00px; }"), "the next load has the new theme");
-        let (status, font) = get(server.port, "/fonts/JetBrainsMono-Regular.woff2", Some(&server.secret));
+        let (status, font) = get(server.port, "/fonts/JetBrainsMono-Regular.woff2", Some(&secret));
         assert_eq!(status, 200);
         assert!(font.contains("font/woff2"), "served as a font");
-        assert_eq!(get(server.port, "/fonts/nope.woff2", Some(&server.secret)).0, 404);
+        assert_eq!(get(server.port, "/fonts/nope.woff2", Some(&secret)).0, 404);
         assert_eq!(get(server.port, "/fonts/JetBrainsMono-Regular.woff2", None).0, 403, "behind the cookie like the rest");
     }
 
@@ -548,7 +564,7 @@ mod tests {
     #[test]
     fn a_page_on_another_host_or_origin_is_refused() {
         let server = start(fake(), super::super::WebView::Messages, "").unwrap();
-        let (port, secret) = (server.port, server.secret.clone());
+        let (port, secret) = (server.port, cookie_of(&server));
         // DNS rebinding: our port, someone else's name.
         let (status, _) = send(port, &format!("GET /api/thread HTTP/1.1\r\nHost: evil.example:{port}\r\nCookie: {COOKIE}={secret}\r\n\r\n"));
         assert_eq!(status, 403);
@@ -558,20 +574,23 @@ mod tests {
             "POST /api/send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 4\r\n\r\ntext"
         );
         assert_eq!(send(port, &form).0, 403, "a form post");
+        assert_eq!(post(port, "/api/send", &secret, "", r#"{"text":"hi"}"#).0, 403, "a write that doesn't say where it comes from");
+        assert_eq!(send(port, &format!("PUT /api/send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")).0, 400, "a method the page never uses");
     }
 
     #[test]
     fn actions_reach_the_backend_and_its_errors_reach_the_page() {
         let backend = fake();
         let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
-        let (port, secret) = (server.port, server.secret.clone());
-        let (status, _) = post(port, "/api/send", &secret, &format!("Origin: http://127.0.0.1:{port}\r\n"), r#"{"text":"hi","steer":false}"#);
+        let (port, secret) = (server.port, cookie_of(&server));
+        let origin = format!("Origin: http://127.0.0.1:{port}\r\n");
+        let (status, _) = post(port, "/api/send", &secret, &origin, r#"{"text":"hi","steer":false}"#);
         assert_eq!(status, 200);
-        let (status, reply) = post(port, "/api/send", &secret, "", r#"{"text":"fail"}"#);
+        let (status, reply) = post(port, "/api/send", &secret, &origin, r#"{"text":"fail"}"#);
         assert_eq!(status, 409);
         assert!(reply.contains("no agent here"), "{reply}");
-        assert_eq!(post(port, "/api/answer", &secret, "", "not json").0, 400);
-        assert_eq!(post(port, "/api/nope", &secret, "", "{}").0, 404);
+        assert_eq!(post(port, "/api/answer", &secret, &origin, "not json").0, 400);
+        assert_eq!(post(port, "/api/nope", &secret, &origin, "{}").0, 404);
         let acted = backend.acted.lock().unwrap();
         assert_eq!(acted.len(), 2);
         assert_eq!(acted[0].0, Action::Send);
@@ -580,7 +599,7 @@ mod tests {
     #[test]
     fn a_request_past_the_limits_is_refused() {
         let server = start(fake(), super::super::WebView::Messages, "").unwrap();
-        let (port, secret) = (server.port, server.secret.clone());
+        let (port, secret) = (server.port, cookie_of(&server));
         let big = format!(
             "POST /api/send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             BODY_BYTES_MAX + 1
@@ -595,7 +614,7 @@ mod tests {
     fn the_event_stream_wakes_when_the_thread_changes() {
         let backend = fake();
         let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
-        let (port, secret) = (server.port, server.secret.clone());
+        let (port, secret) = (server.port, cookie_of(&server));
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\n\r\n").as_bytes()).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
