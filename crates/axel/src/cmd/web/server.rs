@@ -107,7 +107,9 @@ impl Running {
 }
 
 /// Bind a free port on `127.0.0.1` and serve `backend` from background threads.
-pub fn start(backend: Arc<dyn Backend>, view: super::WebView) -> Result<Running> {
+/// `theme` is CSS custom properties (`theme::css`), set on the page's root
+/// after its own: in the stylesheet, as the page's CSP allows no inline style.
+pub fn start(backend: Arc<dyn Backend>, view: super::WebView, theme: &str) -> Result<Running> {
     let listener = TcpListener::bind("127.0.0.1:0").context("listening on 127.0.0.1")?;
     let port = listener.local_addr()?.port();
     assert!(port > 0, "the OS gave a real port");
@@ -122,8 +124,11 @@ pub fn start(backend: Arc<dyn Backend>, view: super::WebView) -> Result<Running>
     });
     let poller = (shared.clone(), backend.clone());
     std::thread::spawn(move || poll(&poller.0, poller.1.as_ref()));
-    let page: Arc<str> = super::assets::PAGE.replace("{{view}}", view.as_str()).into();
+    assert!(!theme.contains(['{', '}', '<']), "a theme is CSS properties only");
+    let page = super::assets::PAGE.replace("{{view}}", view.as_str());
     assert!(page.contains(&format!("data-view=\"{}\"", view.as_str())), "the page names its view");
+    let css = if theme.is_empty() { super::assets::CSS.to_string() } else { format!("{}\n:root {{ {theme} }}\n", super::assets::CSS) };
+    let page = Arc::new(Rendered { page, css });
     let accept = (shared.clone(), backend, secret.clone());
     std::thread::spawn(move || serve(listener, port, &accept.0, &accept.1, &accept.2, &page));
     Ok(Running { port, secret, shared })
@@ -159,7 +164,13 @@ fn poll(shared: &Shared, backend: &dyn Backend) {
     }
 }
 
-fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<dyn Backend>, secret: &str, page: &Arc<str>) {
+/// The page and its stylesheet, as this pane serves them.
+struct Rendered {
+    page: String,
+    css: String,
+}
+
+fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<dyn Backend>, secret: &str, page: &Arc<Rendered>) {
     for stream in listener.incoming() {
         // A connection that failed before it was accepted is the client's loss.
         let Ok(mut stream) = stream else { continue };
@@ -274,7 +285,7 @@ fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query.split('&').filter_map(|pair| pair.split_once('=')).find_map(|(k, v)| (k == key).then_some(v))
 }
 
-fn handle(stream: &mut TcpStream, port: u16, shared: &Shared, backend: &dyn Backend, secret: &str, page: &str) -> std::io::Result<()> {
+fn handle(stream: &mut TcpStream, port: u16, shared: &Shared, backend: &dyn Backend, secret: &str, page: &Rendered) -> std::io::Result<()> {
     let request = match read_request(stream) {
         Ok(r) => r,
         Err(Refusal::TooLarge) => return respond(stream, 413, "text/plain", b"too large"),
@@ -297,10 +308,10 @@ fn handle(stream: &mut TcpStream, port: u16, shared: &Shared, backend: &dyn Back
     route(stream, &request, port, shared, backend, page)
 }
 
-fn route(stream: &mut TcpStream, request: &Request, port: u16, shared: &Shared, backend: &dyn Backend, page: &str) -> std::io::Result<()> {
+fn route(stream: &mut TcpStream, request: &Request, port: u16, shared: &Shared, backend: &dyn Backend, page: &Rendered) -> std::io::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => respond(stream, 200, "text/html; charset=utf-8", page.as_bytes()),
-        ("GET", "/app.css") => respond(stream, 200, "text/css; charset=utf-8", super::assets::CSS.as_bytes()),
+        ("GET", "/") => respond(stream, 200, "text/html; charset=utf-8", page.page.as_bytes()),
+        ("GET", "/app.css") => respond(stream, 200, "text/css; charset=utf-8", page.css.as_bytes()),
         ("GET", "/app.js") => respond(stream, 200, "text/javascript; charset=utf-8", super::assets::JS.as_bytes()),
         ("GET", "/api/thread") => {
             let json = shared.snapshot.lock().map(|s| s.json.clone()).unwrap_or_default();
@@ -438,7 +449,7 @@ mod tests {
     #[test]
     fn the_secret_becomes_a_cookie_and_nothing_works_without_it() {
         let backend = fake();
-        let server = start(backend.clone(), super::super::WebView::Messages).unwrap();
+        let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
         let (port, secret) = (server.port, server.secret.clone());
         let (status, reply) = get(port, &format!("/?k={secret}"), None);
         assert_eq!(status, 303);
@@ -455,8 +466,18 @@ mod tests {
     }
 
     #[test]
+    fn the_stylesheet_ends_with_the_panes_colours() {
+        let server = start(fake(), super::super::WebView::Messages, "--bg:#fafaf0;").unwrap();
+        let (status, css) = get(server.port, "/app.css", Some(&server.secret));
+        assert_eq!(status, 200);
+        assert!(css.trim_end().ends_with(":root { --bg:#fafaf0; }"), "the theme comes after the page's own palette");
+        let plain = start(fake(), super::super::WebView::Messages, "").unwrap();
+        assert!(!get(plain.port, "/app.css", Some(&plain.secret)).1.contains(":root { --bg:#fafaf0"));
+    }
+
+    #[test]
     fn a_page_on_another_host_or_origin_is_refused() {
-        let server = start(fake(), super::super::WebView::Messages).unwrap();
+        let server = start(fake(), super::super::WebView::Messages, "").unwrap();
         let (port, secret) = (server.port, server.secret.clone());
         // DNS rebinding: our port, someone else's name.
         let (status, _) = send(port, &format!("GET /api/thread HTTP/1.1\r\nHost: evil.example:{port}\r\nCookie: {COOKIE}={secret}\r\n\r\n"));
@@ -472,7 +493,7 @@ mod tests {
     #[test]
     fn actions_reach_the_backend_and_its_errors_reach_the_page() {
         let backend = fake();
-        let server = start(backend.clone(), super::super::WebView::Messages).unwrap();
+        let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
         let (port, secret) = (server.port, server.secret.clone());
         let (status, _) = post(port, "/api/send", &secret, &format!("Origin: http://127.0.0.1:{port}\r\n"), r#"{"text":"hi","steer":false}"#);
         assert_eq!(status, 200);
@@ -488,7 +509,7 @@ mod tests {
 
     #[test]
     fn a_request_past_the_limits_is_refused() {
-        let server = start(fake(), super::super::WebView::Messages).unwrap();
+        let server = start(fake(), super::super::WebView::Messages, "").unwrap();
         let (port, secret) = (server.port, server.secret.clone());
         let big = format!(
             "POST /api/send HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -503,7 +524,7 @@ mod tests {
     #[test]
     fn the_event_stream_wakes_when_the_thread_changes() {
         let backend = fake();
-        let server = start(backend.clone(), super::super::WebView::Messages).unwrap();
+        let server = start(backend.clone(), super::super::WebView::Messages, "").unwrap();
         let (port, secret) = (server.port, server.secret.clone());
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={secret}\r\n\r\n").as_bytes()).unwrap();

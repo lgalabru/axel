@@ -15,6 +15,7 @@
 mod assets;
 mod server;
 mod terminal;
+mod theme;
 mod view;
 
 use std::path::PathBuf;
@@ -242,7 +243,10 @@ pub fn pane(thread_id: &str, view: WebView) -> Result<()> {
             u.run();
         }
     });
-    let running = server::start(Arc::new(backend), view)?;
+    // Asked before Ladybird owns the terminal: the page paints the pane's
+    // own colours, as its frames can't be transparent.
+    let theme = theme::css(axel_tui::theme::terminal_colors());
+    let running = server::start(Arc::new(backend), view, &theme)?;
     let started = Instant::now();
     // Terminal mode draws in this pane.  A temporary profile keeps each pane
     // apart from the owner's Ladybird (cookies, history) and from each other.
@@ -304,7 +308,7 @@ fn fall_back(thread_id: &str, view: WebView, why: &str) -> Result<()> {
 /// stdout, until interrupted.  For a desktop browser, and for tests.
 pub fn serve(thread_id: &str, view: WebView) -> Result<()> {
     let backend = ThreadBackend::open(thread_id)?;
-    let running = server::start(Arc::new(backend), view)?;
+    let running = server::start(Arc::new(backend), view, "")?;
     println!("{}", running.url());
     // Flushing makes the address readable by whoever started us; if stdout
     // is gone there is no one to read it either.
