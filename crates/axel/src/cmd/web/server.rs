@@ -517,6 +517,14 @@ mod tests {
     }
 
     #[test]
+    fn nothing_on_the_page_animates() {
+        // Ladybird sends the whole pane for any change: an animation keeps it
+        // drawing 60 full frames a second, and scrolling lags behind them.
+        assert!(!super::super::assets::CSS.contains("@keyframes"), "no CSS animation");
+        assert!(!super::super::assets::JS.contains("setInterval"), "no ticking script");
+    }
+
+    #[test]
     fn a_page_on_another_host_or_origin_is_refused() {
         let server = start(fake(), super::super::WebView::Messages, "").unwrap();
         let (port, secret) = (server.port, server.secret.clone());

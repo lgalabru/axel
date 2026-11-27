@@ -10,12 +10,11 @@
 
 <section id="messages" class="view messages">
   <header class="bar">
-    <span class="mark" aria-hidden="true"></span>
     <h1 id="title">Loading…</h1>
     <span id="live" class="live"></span>
   </header>
   <main id="timeline" class="timeline" aria-live="polite"></main>
-  <button id="jump" class="jump" hidden>Jump to latest ↓</button>
+  <button id="jump" class="jump" hidden>↓ latest</button>
 </section>
 
 <section id="composer" class="view composer">
@@ -26,11 +25,14 @@
       <span id="status" class="status"></span>
     </div>
     <div id="suggest" class="suggest" hidden></div>
-    <textarea id="input" placeholder="Write to the thread · @name to ask an agent" spellcheck="true"></textarea>
+    <div class="line">
+      <span class="prompt">&gt;</span>
+      <textarea id="input" placeholder="write to the thread · @name to ask an agent" spellcheck="false"></textarea>
+    </div>
     <div class="controls">
-      <span class="keys"><kbd>Enter</kbd> send <kbd>Shift Enter</kbd> new line <kbd>Ctrl Enter</kbd> interrupt <kbd>Esc</kbd> stop</span>
-      <button type="button" id="stop" class="ghost" hidden>Stop</button>
-      <button type="button" id="send" class="primary">Send</button>
+      <span class="keys">⏎ send · ⇧⏎ new line · ^⏎ interrupt · esc stop</span>
+      <button type="button" id="stop" class="ghost" hidden>stop</button>
+      <button type="button" id="send" class="primary">send</button>
     </div>
   </div>
 </section>

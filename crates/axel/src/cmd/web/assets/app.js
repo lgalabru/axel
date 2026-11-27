@@ -44,92 +44,101 @@ function inline(s) {
     .replace(/\bhttps?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noreferrer">${u}</a>`);
 }
 
-// Colours are classes, not inline styles, which the page's security policy refuses.
+// Colours are classes, not inline styles, which the page's security policy
+// refuses: `c-<colour>` sets `--agent` to the terminal palette entry the
+// terminal view uses for it.
 const COLORS = ["purple", "yellow", "red", "green", "blue", "gray", "orange"];
-const fg = (a) => (a && COLORS.includes(a.color) ? `fg-${a.color}` : "");
-const bg = (a) => (a && COLORS.includes(a.color) ? `bg-${a.color}` : "");
-const initial = (name) => esc((name || "?").trim().charAt(0).toUpperCase());
-const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const cc = (a) => `c-${a && COLORS.includes(a.color) ? a.color : "none"}`;
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 
 function compact(n) {
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `${Math.round(n / 1e6)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}k`;
   return String(n);
 }
-const money = (usd) => `$${(usd || 0).toFixed(2)}`;
+const money = (usd) => `~$${(usd || 0).toFixed(2)}`;
 
-function ago(ms) {
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.round(s / 60)}m`;
-  return `${Math.round(s / 3600)}h`;
-}
-
-const STATE_LABEL = { working: "working", blocked: "needs you", error: "error", done: "done", idle: "idle" };
-
-// Small line icons, by tool kind.
-const ICONS = {
-  read: '<path d="M3 2.5h6l3 3v8H3z"/><path d="M9 2.5v3h3"/>',
-  edit: '<path d="M10.5 2.5l3 3-7.5 7.5H3v-3z"/>',
-  delete: '<path d="M3 4.5h10M6 4.5V3h4v1.5M4.5 4.5l.7 9h5.6l.7-9"/>',
-  move: '<path d="M2.5 8h11M10.5 5l3 3-3 3"/>',
-  search: '<circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/>',
-  execute: '<path d="M3 4l4 4-4 4M8.5 12h4.5"/>',
-  think: '<circle cx="8" cy="8" r="5.5"/><path d="M8 5.5v3l2 1"/>',
-  fetch: '<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c2 2 2 9 0 11M8 2.5c-2 2-2 9 0 11"/>',
-  other: '<circle cx="8" cy="8" r="2"/><circle cx="8" cy="8" r="5.5"/>',
-};
-const icon = (kind) => `<svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${ICONS[kind] || ICONS.other}</svg>`;
-const CHEVRON = '<svg class="chev" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.5 2.5L8 6l-3.5 3.5"/></svg>';
+// Nothing moves.  Ladybird sends the whole pane again for any change, as a
+// frame of several megabytes, so even a spinner ticking four times a second
+// keeps it busy enough to make scrolling lag.  A working agent gets a still
+// mark; the page redraws only when the thread changes.
+const spinner = () => '<span class="spinner">⠿</span>';
 
 // ---------------------------------------------------------------- messages
 
-// Folds the reader opened stay open across updates; items already seen
-// don't animate in again.
+// Folds the reader opened stay open across updates.
 const openFolds = new Set();
-const seen = new Set();
+// What the timeline shows, one entry per child of `.column`: only the
+// entries that changed are replaced, so an update while the reader scrolls
+// costs a few nodes, not the whole thread.
+let shown = [];
 
 function renderMessages() {
   $("title").textContent = thread.title;
   document.title = `${thread.title} · Axel`;
-  $("live").innerHTML = thread.agents
-    .map((a) => `<span class="chip"><span class="dot ${esc(a.state)}"></span><span class="${fg(a)}">${esc(a.name)}</span></span>`)
-    .join("");
+  $("live").innerHTML = thread.agents.map(liveHtml).join("");
   const timeline = $("timeline");
   const atBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
-  timeline.innerHTML = `<div class="column">${timelineHtml()}</div>`;
-  for (const it of thread.items) seen.add(it.id);
+  let column = timeline.firstElementChild;
+  if (!column) {
+    column = document.createElement("div");
+    column.className = "column";
+    timeline.appendChild(column);
+  }
+  patch(column, timelineBlocks());
   if (atBottom) timeline.scrollTop = timeline.scrollHeight;
   $("jump").hidden = atBottom;
 }
 
-function timelineHtml() {
+function liveHtml(a) {
+  const state = a.state === "working" ? spinner() : a.state === "blocked" ? '<span class="state fg c-yellow">!</span>' : "";
+  return `<span class="${cc(a)}"><span class="fg">${esc(a.name)}</span> ${state}</span>`;
+}
+
+// Replace the children of `column` from the first block that differs.
+function patch(column, blocks) {
+  let same = 0;
+  while (same < blocks.length && same < shown.length && blocks[same].key === shown[same].key && blocks[same].html === shown[same].html) same++;
+  while (column.children.length > same) column.lastElementChild.remove();
+  const holder = document.createElement("div");
+  for (const block of blocks.slice(same)) {
+    holder.innerHTML = block.html;
+    column.append(...holder.childNodes);
+  }
+  shown = blocks;
+}
+
+function timelineBlocks() {
   const items = thread.items;
   if (items.length === 0) {
     const name = (thread.known_agents[0] || {}).name || "atlas";
-    return `<div class="empty"><div class="title">Nothing here yet</div>Write <b>@${esc(name)}</b> and what you want done, below.</div>`;
+    return [{ key: "empty", html: `<div class="empty">nothing here yet · write <b>@${esc(name)}</b> and what you want done, below</div>` }];
   }
   const out = [];
-  if (thread.skipped) out.push(`<div class="skipped">${thread.skipped} earlier items not shown</div>`);
-  let steps = [];
+  if (thread.skipped) out.push({ key: "skipped", html: `<div class="skipped">${thread.skipped} earlier items not shown</div>` });
+  let run = [];
   const flush = () => {
-    if (steps.length) out.push(stepsHtml(steps));
-    steps = [];
+    if (run.length) out.push({ key: `s-${run[0].id}`, html: stepsHtml(run) });
+    run = [];
   };
   for (const it of items) {
     if (it.kind === "tool_call") {
-      steps.push(it);
+      run.push(it);
       continue;
     }
     flush();
-    out.push(itemHtml(it));
+    const html = itemHtml(it);
+    if (html) out.push({ key: it.id, html });
   }
   flush();
   const working = thread.agents.filter((a) => a.state === "working");
   if (working.length) {
-    out.push(`<div class="working"><span class="dots"><span></span><span></span><span></span></span>${working.map((a) => `<b class="${fg(a)}">${esc(a.name)}</b>`).join(", ")} ${working.length === 1 ? "is" : "are"} working</div>`);
+    const names = working.map((a) => `<span class="fg ${cc(a)}">${esc(a.name)}</span>`).join(", ");
+    out.push({ key: "working", html: `<div class="working">${spinner()} ${names} ${working.length === 1 ? "is" : "are"} working</div>` });
   }
-  return out.join("");
+  // Every block is one element: `patch` counts them as the column's children.
+  return out;
 }
 
 function itemHtml(it) {
@@ -152,64 +161,70 @@ function itemHtml(it) {
 }
 
 function turnHtml(it) {
-  const you = it.kind === "user_message" && !it.agent;
-  const cls = [you ? "you" : "agent", it.kind === "error" ? "error" : "", seen.has(it.id) ? "old" : ""].join(" ");
-  const name = you ? esc(it.author || "You") : esc(it.agent ? it.agent.name : "Agent");
-  const avatar = you ? `<span class="avatar you">${initial(it.author || "Y")}</span>` : `<span class="avatar ${bg(it.agent)}">${initial(it.agent && it.agent.name)}</span>`;
-  const to = it.relay_to ? ` <span class="time">to</span> ${esc(it.relay_to)}` : "";
-  const tag = it.steering ? `<span class="tag">read at its next step</span>` : it.status === "pending" && you ? `<span class="tag">queued</span>` : "";
-  // The avatar sits in a plain block: Ladybird centres a grid or flex row's
-  // short items whatever the alignment asks.
-  return `<div class="turn ${cls}"><div class="gutter">${avatar}</div><div class="body">
-    <div class="who"><span class="name ${you ? "" : fg(it.agent)}">${name}${to}</span><span class="time">${clock(it.at_ms)}</span>${tag}</div>
-    <div class="text">${markdown(it.body.text)}</div></div></div>`;
+  const tag = it.steering ? '<span class="tag">read at its next step</span>' : it.status === "pending" ? '<span class="tag">queued</span>' : "";
+  if (it.kind === "user_message" && !it.agent) {
+    return `<div class="you"><span class="prompt">&gt;</span><div class="text">${markdown(it.body.text)}</div>${tag}<span class="time">${clock(it.at_ms)}</span></div>`;
+  }
+  const name = esc(it.agent ? it.agent.name : "agent");
+  const to = it.relay_to ? `<span class="dim">to ${esc(it.relay_to)}</span>` : "";
+  return `<div class="msg ${it.kind === "error" ? "error" : ""}"><div class="head"><span class="badge ${cc(it.agent)}">${name}</span>${to}${tag}<span class="time">${clock(it.at_ms)}</span></div>
+    <div class="text">${markdown(it.body.text)}</div></div>`;
+}
+
+function fold(id, summary, body) {
+  return `<details data-fold="${esc(id)}"${openFolds.has(id) ? " open" : ""}><summary>${summary}</summary>${body}</details>`;
 }
 
 function thoughtHtml(it) {
-  const id = `t-${it.id}`;
-  const first = it.body.text.split("\n")[0].slice(0, 90);
-  return `<details class="thought" data-fold="${esc(id)}"${openFolds.has(id) ? " open" : ""}><summary>${CHEVRON}${icon("think")}<span>${esc(first)}${it.body.text.length > first.length ? "…" : ""}</span></summary><div class="said">${markdown(it.body.text)}</div></details>`;
+  const first = it.body.text.split("\n")[0].slice(0, 120);
+  return fold(`t-${it.id}`, `· thinking <span class="what">${esc(first)}</span>`, `<div class="said">${markdown(it.body.text)}</div>`).replace("<details", '<details class="thought"');
+}
+
+// "Edit a.rs, run cargo test +3", as the terminal view sums up a run.
+function runSummary(run) {
+  const parts = [...new Set(run.map((t) => t.body.summary || t.body.title).filter(Boolean))];
+  const lower = (s, i) => (i === 0 ? s : s.charAt(0).toLowerCase() + s.slice(1));
+  const head = parts.slice(0, 3).map(lower).join(", ");
+  return parts.length > 3 ? `${head} +${parts.length - 3}` : head;
 }
 
 function stepsHtml(run) {
-  const id = `s-${run[0].id}`;
   const failed = run.filter((t) => t.status === "failed").length;
   const running = run.some((t) => t.status === "running" || t.status === "pending");
-  const last = run[run.length - 1].body;
-  const label = run.length === 1 ? esc(last.summary || last.title) : `${run.length} steps · ${esc(last.summary || last.title)}`;
-  const state = running ? '<span class="spin"></span>' : failed ? `<span class="state failed">${failed} failed</span>` : "";
-  return `<details class="steps" data-fold="${esc(id)}"${openFolds.has(id) ? " open" : ""}><summary>${CHEVRON}${icon(last.kind)}<span>${label}</span>${state}</summary>${run.map(stepHtml).join("")}</details>`;
+  const tail = [run.length > 1 ? `${run.length} calls` : "", failed ? `<span class="fg c-red">${failed} failed</span>` : ""].filter(Boolean).join(" · ");
+  const summary = `${running ? spinner() : "↗"} <span class="what">${esc(runSummary(run))}</span>${tail ? ` · ${tail}` : ""}`;
+  return fold(`s-${run[0].id}`, summary, `<div class="steps">${run.map(stepHtml).join("")}</div>`);
 }
 
 function stepHtml(t) {
   const b = t.body;
-  const state = t.status === "failed" ? '<span class="state failed">failed</span>' : t.status === "running" || t.status === "pending" ? '<span class="spin"></span>' : '<span class="state ok">✓</span>';
+  const mark = t.status === "failed" ? '<span class="mark failed">✗</span>' : t.status === "running" || t.status === "pending" ? '<span class="mark running">·</span>' : '<span class="mark ok">✓</span>';
   const output = b.output && b.output.length ? `<pre>${esc(b.output.join("\n"))}</pre>` : "";
-  return `<div class="step">${icon(b.kind)}<div class="what">${esc(b.summary || b.title)}${output}</div>${state}</div>`;
+  return `<div class="step">${mark}<div class="what">${esc(b.summary || b.title)}${output}</div></div>`;
 }
 
 function askHtml(it) {
   const b = it.body;
-  const who = it.agent ? esc(it.agent.name) : "An agent";
+  const who = it.agent ? esc(it.agent.name) : "an agent";
   const open = !b.chosen && (it.status === "pending" || it.status === null);
-  if (!open) return `<div class="ask done"><div class="q">${esc(b.prompt)}</div>${b.chosen ? `✓ ${esc(b.chosen)}` : "Answered"}</div>`;
+  if (!open) return `<div class="ask done">${esc(b.prompt)} · ${b.chosen ? `✓ ${esc(b.chosen)}` : "answered"}</div>`;
   const kind = it.kind === "permission" ? "asks to go ahead" : "asks you";
   const options = b.options
     .map((o) => `<button type="button" data-answer="${esc(o.id)}" data-item="${esc(it.id)}" data-session="${esc(it.session_id)}">${esc(o.label)}</button>`)
     .join("");
-  return `<div class="ask"><div class="q"><small>${who} ${kind}</small>${esc(b.prompt)}</div><div class="options">${options}</div></div>`;
+  return `<div class="ask"><div class="q"><small>! ${who} ${kind}</small>${esc(b.prompt)}</div><div class="options">${options}</div></div>`;
 }
 
 function changesHtml(b) {
   const files = b.files === 1 ? "1 file" : `${b.files} files`;
-  return `<div class="changes">${files} changed <span class="add">+${b.added}</span><span class="del">−${b.removed}</span></div>`;
+  return `<div class="changes">↗ ${files} <span class="add">+${b.added}</span> <span class="del">−${b.removed}</span></div>`;
 }
 
 function setupMessages() {
   const timeline = $("timeline");
   timeline.addEventListener("toggle", (e) => {
-    const fold = e.target.dataset && e.target.dataset.fold;
-    if (fold) e.target.open ? openFolds.add(fold) : openFolds.delete(fold);
+    const id = e.target.dataset && e.target.dataset.fold;
+    if (id) e.target.open ? openFolds.add(id) : openFolds.delete(id);
   }, true);
   timeline.addEventListener("click", async (e) => {
     const button = e.target.closest("[data-answer]");
@@ -224,7 +239,7 @@ function setupMessages() {
   });
   timeline.addEventListener("scroll", () => {
     if (timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80) $("jump").hidden = true;
-  });
+  }, { passive: true });
   $("jump").addEventListener("click", () => {
     timeline.scrollTop = timeline.scrollHeight;
     $("jump").hidden = true;
@@ -258,12 +273,12 @@ function renderComposer() {
   const t = target(input.value);
   const agent = t && thread.known_agents.find((a) => a.name.toLowerCase() === t.name.toLowerCase());
   $("target").innerHTML = t
-    ? `<span class="avatar ${bg(agent)}">${initial(t.name)}</span>to <b class="${fg(agent)}">${esc(t.name)}</b>${t.live ? "" : " · summons it"}`
-    : `<span class="dim">No agent on this thread yet</span>`;
+    ? `<span class="badge ${cc(agent)}">${esc(t.name)}</span>${t.live ? "" : "summons it"}`
+    : "no agent on this thread yet";
   $("mode").textContent = t && t.mode ? t.mode : "";
   const working = thread.agents.some((a) => a.state === "working");
   $("stop").hidden = !working;
-  $("send").textContent = working ? "Queue" : "Send";
+  $("send").textContent = working ? "queue" : "send";
 }
 
 function setStatus(text, error) {
@@ -277,14 +292,14 @@ async function send(steer) {
   if (!text || busy) return;
   busy = true;
   $("send").disabled = true;
-  setStatus(steer ? "Interrupting…" : "Sending…");
+  setStatus(steer ? "interrupting…" : "sending…");
   try {
     const reply = await post("send", { text, steer });
     history.push(text);
     if (history.length > HISTORY_MAX) history.shift();
     historyAt = -1;
     input.value = "";
-    setStatus(reply.note || "Sent.");
+    setStatus(reply.note || "sent");
     renderComposer();
   } catch (e) {
     setStatus(e.message, true);
@@ -300,7 +315,7 @@ async function stop() {
   if (!working) return;
   try {
     await post("cancel", { session_id: working.id });
-    setStatus("Stopping…");
+    setStatus("stopping…");
   } catch (e) {
     setStatus(e.message, true);
   }
@@ -316,7 +331,7 @@ function suggest() {
   const q = mentionQuery();
   const names = q === null || !thread ? [] : thread.known_agents.filter((a) => a.name.toLowerCase().startsWith(q)).slice(0, 8);
   box.hidden = names.length === 0;
-  box.innerHTML = names.map((a, i) => `<div class="${i === 0 ? "on" : ""}" data-name="${esc(a.name)}"><span class="avatar ${bg(a)}">${initial(a.name)}</span>${esc(a.name)}</div>`).join("");
+  box.innerHTML = names.map((a, i) => `<div class="${i === 0 ? "on" : ""} ${cc(a)}" data-name="${esc(a.name)}"><span class="fg">@${esc(a.name)}</span></div>`).join("");
 }
 
 function complete(name) {
@@ -385,48 +400,64 @@ function setupComposer() {
 
 // ---------------------------------------------------------------- activity
 
-function spark(values) {
-  const width = 72, height = 18;
-  if (!values || values.length < 2 || !values.some((v) => v > 0)) return "";
-  const max = Math.max(...values);
-  const points = values.map((v, i) => `${((i / (values.length - 1)) * width).toFixed(1)},${(height - 1 - (v / max) * (height - 2)).toFixed(1)}`).join(" ");
-  return `<svg class="spark" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><polyline points="${points}" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+// A dot matrix, as the terminal view's braille sparks are, drawn crisp:
+// `values` in `COLUMNS` columns of `ROWS` dots, lit from the bottom.
+const SPARK_COLUMNS = 20;
+const SPARK_ROWS = 4;
+const DOT = 5;
+function sparkDots(values) {
+  const per = Math.max(1, Math.ceil((values || []).length / SPARK_COLUMNS));
+  const columns = [];
+  for (let c = 0; c < SPARK_COLUMNS; c++) columns.push((values || []).slice(c * per, (c + 1) * per).reduce((x, y) => x + y, 0));
+  const max = Math.max(...columns);
+  let dots = "";
+  columns.forEach((v, c) => {
+    const lit = max > 0 && v > 0 ? Math.max(1, Math.round((v / max) * SPARK_ROWS)) : 0;
+    for (let r = 0; r < SPARK_ROWS; r++) {
+      dots += `<circle cx="${c * DOT + 2.5}" cy="${(SPARK_ROWS - 1 - r) * DOT + 2.5}" r="1.6"${r < lit ? ' class="on"' : ""}/>`;
+    }
+  });
+  return `<svg class="dots spark" viewBox="0 0 ${SPARK_COLUMNS * DOT} ${SPARK_ROWS * DOT}">${dots}</svg>`;
 }
 
-function meter(fraction, hot) {
-  const pct = Math.max(0, Math.min(100, Math.round(fraction * 100)));
-  // A width in a style attribute is refused by the page's policy; a SVG
-  // rect's width is an attribute, so the bar is drawn as one.
-  return `<svg class="meter${hot ? " hot" : ""}" viewBox="0 0 100 4" preserveAspectRatio="none" height="4"><rect width="100" height="4" rx="2" fill="#2c2c33"/><rect width="${pct}" height="4" rx="2" fill="${hot ? "#e6b450" : "#61afef"}"/></svg>`;
+// A meter of ten dots: `fraction` lit, yellow past 80%, red past 95%.
+function meterDots(fraction) {
+  const lit = Math.round(Math.max(0, Math.min(1, fraction)) * 10);
+  const hot = fraction > 0.95 ? "full" : fraction > 0.8 ? "hot" : "on";
+  let dots = "";
+  for (let i = 0; i < 10; i++) dots += `<circle cx="${i * DOT + 2.5}" cy="2.5" r="1.8"${i < lit ? ` class="${hot}"` : ""}/>`;
+  return `<svg class="dots meter" viewBox="0 0 ${10 * DOT} ${DOT}">${dots}</svg>`;
 }
+
+const pct = (fraction) => `${Math.round(fraction * 100)}%`;
+const heat = (fraction) => (fraction > 0.95 ? "full" : fraction > 0.8 ? "hot" : "");
 
 function renderActivity() {
   const u = thread.usage;
   const states = new Map(thread.agents.map((a) => [a.name, a.state]));
-  const modes = new Map(thread.live.map((s) => [s.agent, s.mode]));
   const byName = new Map(u.agents.map((a) => [a.name, a]));
   const names = [...new Set([...thread.agents.map((a) => a.name), ...u.agents.map((a) => a.name)])];
-  const agents = names.map((name) => {
+  const rows = names.map((name) => {
     const spend = byName.get(name) || { total: { tokens: 0, cost_usd: 0 }, spark: [] };
     const known = thread.agents.find((a) => a.name === name) || spend;
     const state = states.get(name) || "idle";
+    const mark = state === "working" ? spinner() : state === "blocked" ? "!" : state === "error" ? "✗" : "";
     const ctx = spend.context;
-    const context = ctx && ctx.size ? `${meter(ctx.used / ctx.size, ctx.used / ctx.size > 0.8)}<span>${Math.round((ctx.used / ctx.size) * 100)}% context</span>` : "";
-    return `<div class="agent"><span class="avatar ${bg(known)}">${initial(name)}</span>
-      <div class="name"><span class="${fg(known)}">${esc(name)}</span><span class="state ${esc(state)}">${STATE_LABEL[state] || esc(state)}</span></div>
-      <div class="spend">${compact(spend.total.tokens)} · ${money(spend.total.cost_usd)}</div>
-      <div class="sub">${modes.get(name) ? `<span>${esc(modes.get(name))}</span>` : ""}${context}</div>
-      <span class="${fg(known)}">${spark(spend.spark)}</span></div>`;
+    const context = ctx && ctx.size ? `<span class="context">${meterDots(ctx.used / ctx.size)}<span class="${heat(ctx.used / ctx.size)}">${pct(ctx.used / ctx.size)}</span></span>` : "<span></span>";
+    return `<div class="agent ${cc(known)}">
+      <span class="name"><span class="fg">${esc(name)}</span> <span class="state ${esc(state)}">${mark}</span></span>
+      ${context}<span class="n tokens">${compact(spend.total.tokens)}</span><span class="n cost">${money(spend.total.cost_usd)}</span>
+      ${sparkDots(spend.spark)}</div>`;
   });
-  const recent = thread.items.filter((it) => it.kind === "tool_call").slice(-5).reverse()
-    .map((it) => `<div><span class="t">${ago(it.at_ms)}</span><span class="s">${esc(it.body.summary || it.body.title)}</span></div>`).join("");
-  const limits = u.limits.flatMap((p) => p.windows.filter((w) => w.used_pct !== null).map((w) =>
-    `<div class="limit"><span class="what">${esc(p.harness)} ${w.window === "five_hour" ? "5h" : esc(w.window)}</span>${meter(w.used_pct / 100, w.used_pct > 80)}<span>${Math.round(w.used_pct)}%</span></div>`)).join("");
+  const limits = u.limits.flatMap((p) => p.windows.filter((w) => w.used_pct !== null).map((w) => {
+    const f = w.used_pct / 100;
+    const label = { five_hour: "5h", week: "wk", month: "mo" }[w.window] || esc(w.window);
+    return `<span class="limit">${label} ${meterDots(f)}<span class="${heat(f)}">${Math.round(w.used_pct)}%</span></span>`;
+  })).join("");
   $("activity-body").innerHTML = `
-    <div class="section"><span>Agents</span><span>${compact(thread.tokens)} tokens · ${money(thread.cost_usd)}</span></div>
-    ${agents.join("") || `<div class="agent"><span></span><div class="sub">No agent yet</div></div>`}
-    ${recent ? `<div class="section">Recent steps</div><div class="recent">${recent}</div>` : ""}
-    ${limits ? `<div class="section">Plan</div>${limits}` : ""}`;
+    <div class="head-row"><span></span><span>ctx</span><span>tok</span><span>~$</span><span>1h</span></div>
+    ${rows.join("") || '<div class="dim">no agent yet</div>'}
+    ${limits ? `<div class="plan">${limits}</div>` : ""}`;
 }
 
 // ---------------------------------------------------------------- talk to the server
@@ -459,5 +490,3 @@ load().catch(report).finally(() => {
   const events = new EventSource("/api/events");
   events.onmessage = () => load().catch(report);
 });
-// Relative times in the activity pane move on even when nothing else does.
-if (VIEW === "activity") setInterval(() => thread && renderActivity(), 15000);
