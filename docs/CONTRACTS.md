@@ -468,10 +468,15 @@ pub fn load_thread_data(store: &Store, owner_pk: &str, thread_id: &str) -> anyho
 pub fn load_usage_data(store: &Store, thread_id: &str) -> anyhow::Result<model::UsageData>;                     // what the tokens/activity pane draws
 // axel-store
 impl Store { pub fn change_marker(&self) -> Result<(i64, i64), Error>; }   // (last event seq, items revision): moves when a view might change
-// axel (bin): `axel web pane|serve THREAD [--view messages|composer|activity]`, `axel panes [terminal|web]` (default terminal; $AXEL_PANES overrides $AXEL_HOME/settings.json);
-// Ladybird: $AXEL_LADYBIRD, else `ladybird` on PATH, else Ladybird.app in /Applications or ~/Applications; run as `--headless=terminal --temporary-profile URL`
-// HTTP on 127.0.0.1: GET /?k=SECRET → cookie axel_web; GET / · /app.css · /app.js · /api/thread · /api/events (SSE: `data: VERSION`);
-// POST /api/send {text, steer} · /api/answer {session_id, item_id, option_id} · /api/cancel {session_id} → 200 JSON, or 409 {error}
+// axel-tui manage: ManageData.state: ThreadState; SessionRow.state: SessionStatus { Working, Idle, Blocked, Done, Error, Paused, Ended };
+// Action::as_str, ManageView::agent_actions, confirm_question(&Outcome) are public for the web controls.
+// axel (bin): `axel web pane|serve THREAD [--view messages|composer|activity|controls]`, `axel panes [terminal|web]` (default terminal; $AXEL_PANES overrides $AXEL_HOME/settings.json);
+// cmd::display: enum Pane { Conversation, Composer, Activity, Controls }, enum Display { Terminal, Web },
+// trait PaneDisplay { fn command(&self, thread, Pane) -> Vec<String>; fn run(&self, thread, Pane) -> Result<()>; fn composer_rows(&self) -> u16 }
+// Ladybird: $AXEL_LADYBIRD, else `ladybird` on PATH, else Ladybird.app in /Applications or ~/Applications; run as `--headless=terminal --temporary-profile --device-pixel-ratio R URL`
+// HTTP on 127.0.0.1: GET /?k=TOKEN (one page load, 30 s) → 303 + cookie axel_web (a second secret); GET / · /app.css · /app.js · /fonts/*.woff2 · /api/thread · /api/events (SSE: `data: VERSION`);
+// POST (JSON, Origin of this server) /api/send {text, steer} · /api/answer {session_id, item_id, option_id} · /api/cancel {session_id}
+//   · /api/control {outcome, confirmed} → {confirm} | {note} | {close} · /api/open_controls {} → 200 JSON, or 409 {error}
 ```
 
 ## axel-tui additions (thread view)

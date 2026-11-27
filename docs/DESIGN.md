@@ -286,9 +286,25 @@ agent's mark is still, and an update replaces only the timeline entries that
 changed.
 
 The pages draw `axel_tui::load_thread_data` and `load_usage_data`, and send
-through `axel_tui::thread::dispatch`, as the terminal view does. A secret
-cookie, a `Host` check and same-origin JSON writes keep other pages out.
-Closing the composer closes the view, as the terminal composer does.
+through `axel_tui::thread::dispatch`, as the terminal view does. Closing the
+composer closes the view, as the terminal composer does.
+
+Only the page the pane's own Ladybird opened may talk to its server
+(`web/guard.rs`). Ladybird's address carries a token that opens one page load
+within 30 s, minted for each start: on macOS any local process can read every
+process's arguments, so a token read from `ps` afterwards opens nothing.
+Spending it sets the `axel_web` cookie, a second secret no command line
+carries, `HttpOnly` and `SameSite=Strict`. Both are 32 bytes from
+`/dev/urandom`, compared in constant time. Every request must name this server
+(`Host`, against DNS rebinding), and every write must be JSON with this
+server's `Origin`.
+
+How a pane is drawn is one trait, `display::PaneDisplay`, implemented by
+`TerminalPanes` and `WebPanes`. It gives the command Rex runs to show a `Pane`
+(conversation, composer, activity, controls), runs one here, and sizes the
+composer. `Display::chosen()` picks the implementation: the owner's choice,
+where it can draw. Docking, splitting, the controls and the web fallback all go
+through it.
 
 `axel panes web|terminal` chooses (`$AXEL_PANES` overrides it; the default is
 `terminal`). Ladybird is found at `$AXEL_LADYBIRD`, else on PATH, else as
