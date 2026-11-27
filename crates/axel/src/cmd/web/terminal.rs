@@ -195,11 +195,14 @@ fn pump(
     hung_up: &AtomicBool,
     wants_new_ratio: impl Fn(&PaneSize) -> bool,
 ) -> Result<Ended> {
+    assert!(size.rows > 0 && size.cols > 0, "a pane has cells");
     let stdin = std::io::stdin().as_raw_fd();
     let mut filter = StatusLineFilter::new(size.rows.saturating_add(1));
     let mut chunk = vec![0_u8; CHUNK_BYTES];
     let mut shown = Vec::with_capacity(CHUNK_BYTES);
     let mut stdout = std::io::stdout().lock();
+    // Until Ladybird exits, the pane hangs up, or the ratio must change:
+    // a Ladybird's life, one tick at a time.
     loop {
         if hung_up.load(Ordering::Relaxed) {
             return Ok(Ended::HungUp);
@@ -292,6 +295,7 @@ fn forward_input(stdin: RawFd, to: Arc<Mutex<Option<File>>>, hung_up: Arc<Atomic
         // keeps this File from closing it.
         let mut from = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(stdin) });
         let mut chunk = vec![0_u8; CHUNK_BYTES];
+        // Until the pane hangs up or `run` is done, a tick at a time.
         while !stop.load(Ordering::Relaxed) {
             match readable(stdin, TICK_MS) {
                 Ok(false) => continue,
@@ -366,6 +370,7 @@ impl StatusLineFilter {
             self.held.push(byte);
             self.settle(out);
         }
+        debug_assert!(self.held.len() < SEQUENCE_BYTES_MAX, "a held sequence is settled before it outgrows the limit");
     }
 
     /// Decide on the held sequence once it is whole, or can't be one we act on.

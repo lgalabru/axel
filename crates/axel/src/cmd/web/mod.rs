@@ -81,19 +81,6 @@ fn ratio_for_cell_height(cell_height: f64) -> f64 {
     ((cell_height / CSS_CELL_HEIGHT * 2.0).round() / 2.0).clamp(DEVICE_PIXEL_RATIO_MIN, DEVICE_PIXEL_RATIO_MAX)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_retina_pane_draws_at_twice_the_pixels() {
-        assert_eq!(ratio_for_cell_height(17.0), 1.0, "a 1x display, a 13-point font");
-        assert_eq!(ratio_for_cell_height(34.0), 2.0, "the same on Retina");
-        assert_eq!(ratio_for_cell_height(26.0), 1.5, "a 1.5x display");
-        assert_eq!(ratio_for_cell_height(3.0), DEVICE_PIXEL_RATIO_MIN, "a terminal reporting nonsense");
-        assert_eq!(ratio_for_cell_height(400.0), DEVICE_PIXEL_RATIO_MAX);
-    }
-}
 
 /// No display draws fewer device pixels than CSS pixels, and none we know
 /// more than three.
@@ -188,6 +175,7 @@ pub fn serve(thread_id: &str, view: Pane) -> Result<()> {
     // Flushing makes the address readable by whoever started us; if stdout
     // is gone there is no one to read it either.
     let _ = std::io::Write::flush(&mut std::io::stdout());
+    // Until interrupted: serving is all this command does.
     loop {
         std::thread::park();
     }
@@ -315,5 +303,19 @@ impl server::Backend for ThreadBackend {
                 Ok(json!({ "ok": true }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_retina_pane_draws_at_twice_the_pixels() {
+        assert_eq!(ratio_for_cell_height(17.0), 1.0, "a 1x display, a 13-point font");
+        assert_eq!(ratio_for_cell_height(34.0), 2.0, "the same on Retina");
+        assert_eq!(ratio_for_cell_height(26.0), 1.5, "a 1.5x display");
+        assert_eq!(ratio_for_cell_height(3.0), DEVICE_PIXEL_RATIO_MIN, "a terminal reporting nonsense");
+        assert_eq!(ratio_for_cell_height(400.0), DEVICE_PIXEL_RATIO_MAX);
     }
 }

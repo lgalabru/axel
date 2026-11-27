@@ -169,6 +169,7 @@ pub fn start(backend: Arc<dyn Backend>, view: super::Pane, theme: &str) -> Resul
 fn poll(shared: &Shared, backend: &dyn Backend) {
     let mut last_marker = backend.marker();
     let mut last_load = std::time::Instant::now();
+    // For the pane's life: the process ends with its pane, and this with it.
     loop {
         std::thread::sleep(Duration::from_millis(POLL_MS));
         let marker = backend.marker();
@@ -197,6 +198,7 @@ struct Rendered {
 }
 
 fn serve(listener: TcpListener, port: u16, shared: &Arc<Shared>, backend: &Arc<dyn Backend>, guard: &Arc<Guard>, page: &Arc<Rendered>) {
+    // For the pane's life; at most `CONNECTIONS_MAX` are served at once.
     for stream in listener.incoming() {
         // A connection that failed before it was accepted is the client's loss.
         let Ok(mut stream) = stream else { continue };
@@ -284,6 +286,7 @@ fn read_request(stream: &TcpStream) -> std::result::Result<Request, Refusal> {
     }
     request.body = vec![0; content_length];
     reader.read_exact(&mut request.body).map_err(|_| Refusal::BadRequest)?;
+    debug_assert!(header_bytes <= HEADER_BYTES_MAX && request.body.len() <= BODY_BYTES_MAX, "a request is read within its limits");
     Ok(request)
 }
 
@@ -389,6 +392,7 @@ fn events(stream: &mut TcpStream, shared: &Shared) -> std::io::Result<()> {
 fn stream_events(stream: &mut TcpStream, shared: &Shared) -> std::io::Result<()> {
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\nretry: 1000\n\n")?;
     let mut seen = 0_u64;
+    // Until the page goes: a write to it fails within `PING_SECS`.
     loop {
         let version = {
             let Ok(snapshot) = shared.snapshot.lock() else { return Ok(()) };

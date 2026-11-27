@@ -15,6 +15,7 @@ pub fn controls(data: &ManageData) -> Value {
         .into_iter()
         .map(|a| json!({ "action": a.as_str(), "key": a.key().to_string(), "label": a.label(), "about": view.describe(a), "danger": a.is_destructive() }))
         .collect();
+    assert!(!actions.is_empty(), "the menu always offers rename and hard reset");
     let agent_actions: serde_json::Map<String, Value> = data
         .agents
         .iter()

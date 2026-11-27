@@ -204,59 +204,34 @@ pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<Stri
     let now = chrono::Utc::now().timestamp();
     let summary = store.thread_summary(thread_id)?.context(t!("no such thread"))?;
     let t = &summary.thread;
-    let agents: HashMap<String, axel_store::Agent> = store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect();
+    let known = Known::load(store, now)?;
     let roster = store.thread_agents(thread_id)?;
-    let statuses: HashMap<String, axel_store::Status> = store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect();
-    let contexts: HashMap<String, (i64, i64)> = store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect();
     let turns = store.turns(thread_id)?;
     let mut sessions = store.list_sessions(SessionFilter { thread_id: Some(thread_id.to_string()), ..Default::default() })?;
     sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
-    let local_env = store.local_environment()?.id;
     let mut rows = Vec::new();
     let mut agent_names: Vec<String> = Vec::new();
     let (mut tokens, mut cost, mut tool_calls, mut files) = (0i64, 0f64, 0i64, 0i64);
     let mut spark = vec![0i64; SPARK_MINUTES];
     for s in &sessions {
-        let agent = agents.get(&s.agent_pubkey);
-        let name = agent.map(|a| a.name.clone()).unwrap_or_else(|| s.agent_pubkey.chars().take(8).collect());
-        if roster.contains(&s.agent_pubkey) && !agent_names.contains(&name) && !agent.is_some_and(|a| a.archived_at.is_some()) {
-            agent_names.push(name.clone());
-        }
-        let usage = store.usage(&s.id)?;
-        let (toks, usd) = usage.map(|u| (u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, u.cost_usd_est)).unwrap_or((0, 0.0));
-        let mine: Vec<_> = turns.iter().filter(|x| x.session_id == s.id).collect();
-        let calls: i64 = mine.iter().map(|x| x.summary.tool_calls).sum();
-        files += mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| count(c.files.len())).sum::<i64>();
+        let agent = known.agents.get(&s.agent_pubkey);
+        let (row, files_changed) = session_row(store, &known, &turns, s)?;
         add_to_spark(store, &s.id, now, &mut spark)?;
-        let live = s.ended_at.is_none();
-        let host = (s.environment_id != local_env).then(|| store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
-        let runs = match agent.and_then(|a| a.model.clone()) {
-            Some(m) => format!("{}/{m}", s.harness.as_str()),
-            None => s.harness.as_str().to_string(),
-        };
-        tokens += toks;
-        cost += usd;
-        tool_calls += calls;
-        if roster.contains(&s.agent_pubkey) { rows.push(SessionRow {
-            agent: name,
-            color: agent.and_then(|a| a.color),
-            runs,
-            state: session_status(s, statuses.get(&s.id)),
-            live,
-            host,
-            turns: count(mine.len()),
-            tool_calls: calls,
-            tokens: toks,
-            cost_usd: usd,
-            context: contexts.get(&s.id).copied(),
-            duration_secs: s.ended_at.unwrap_or(now) - s.started_at,
-        }); }
+        (tokens, cost, tool_calls, files) = (tokens + row.tokens, cost + row.cost_usd, tool_calls + row.tool_calls, files + files_changed);
+        // Every session counts toward the totals; only the roster's are listed.
+        if roster.contains(&s.agent_pubkey) {
+            if !agent_names.contains(&row.agent) && !agent.is_some_and(|a| a.archived_at.is_some()) {
+                agent_names.push(row.agent.clone());
+            }
+            rows.push(row);
+        }
     }
     for pk in &roster {
-        if let Some(agent) = agents.get(pk)
+        if let Some(agent) = known.agents.get(pk)
             && agent.archived_at.is_none() && !agent_names.contains(&agent.name)
         { agent_names.push(agent.name.clone()); }
     }
+    debug_assert!(rows.len() <= sessions.len());
     Ok(ManageData {
         thread_id: thread_id.to_string(),
         title: t.title.clone(),
@@ -274,6 +249,58 @@ pub(super) fn load(store: &axel_store::Store, thread_id: &str, note: Option<Stri
         hosts: store.hosts()?.into_iter().map(|h| h.label).collect(),
         note,
     })
+}
+
+/// What every session row looks up, read once for the pane.
+struct Known {
+    agents: HashMap<String, axel_store::Agent>,
+    statuses: HashMap<String, axel_store::Status>,
+    contexts: HashMap<String, (i64, i64)>,
+    local_env: String,
+    now: i64,
+}
+
+impl Known {
+    fn load(store: &axel_store::Store, now: i64) -> Result<Known> {
+        Ok(Known {
+            agents: store.list_agents()?.into_iter().map(|a| (a.pubkey.clone(), a)).collect(),
+            statuses: store.statuses()?.into_iter().map(|s| (s.session_id.clone(), s)).collect(),
+            contexts: store.session_contexts()?.into_iter().map(|c| (c.session_id, (c.used, c.size))).collect(),
+            local_env: store.local_environment()?.id,
+            now,
+        })
+    }
+}
+
+/// One session as the pane lists it, and the files its turns changed.
+fn session_row(store: &axel_store::Store, known: &Known, turns: &[axel_store::Turn], s: &axel_store::Session) -> Result<(SessionRow, i64)> {
+    let agent = known.agents.get(&s.agent_pubkey);
+    let name = agent.map(|a| a.name.clone()).unwrap_or_else(|| s.agent_pubkey.chars().take(8).collect());
+    let usage = store.usage(&s.id)?;
+    let (tokens, cost_usd) = usage.map(|u| (u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens, u.cost_usd_est)).unwrap_or((0, 0.0));
+    let mine: Vec<_> = turns.iter().filter(|x| x.session_id == s.id).collect();
+    let files = mine.iter().filter_map(|x| x.summary.changes.as_ref()).map(|c| count(c.files.len())).sum::<i64>();
+    let host = (s.environment_id != known.local_env)
+        .then(|| store.environment(&s.environment_id).ok().flatten().map_or_else(|| s.environment_label.clone(), |e| e.label));
+    let runs = match agent.and_then(|a| a.model.clone()) {
+        Some(m) => format!("{}/{m}", s.harness.as_str()),
+        None => s.harness.as_str().to_string(),
+    };
+    let row = SessionRow {
+        agent: name,
+        color: agent.and_then(|a| a.color),
+        runs,
+        state: session_status(s, known.statuses.get(&s.id)),
+        live: s.ended_at.is_none(),
+        host,
+        turns: count(mine.len()),
+        tool_calls: mine.iter().map(|x| x.summary.tool_calls).sum(),
+        tokens,
+        cost_usd,
+        context: known.contexts.get(&s.id).copied(),
+        duration_secs: s.ended_at.unwrap_or(known.now) - s.started_at,
+    };
+    Ok((row, files))
 }
 
 /// A count as the pane's integers hold it.
