@@ -261,8 +261,23 @@ The pages follow the terminal view:
   colour, with rounded corners and an arrow, and the time on the right. Your
   messages are `> ` lines. A run of tool calls is one dim `↗` line that opens on
   a click. The conversation uses the pane's full width.
-- **Activity.** One line per agent: its context as ten dots, its tokens and
-  cost, and its last hour as a dot matrix. Plan limits are dot meters.
+- **Activity.** Each agent's last hour is a braille chart as wide as the pane:
+  dots where a braille character's would be, two across and four down per cell,
+  the series resampled to the dots that fit, the top dot of each column lit in
+  part for the exact value, and a gradient up the column. The agent's name,
+  state, context, tokens and cost are written over it. Context and plan limits
+  are gauges two dots high, green to yellow to red along their length.
+- **Thread controls.** Ctrl+D in the web composer or conversation opens the
+  thread controls as a web pane too (`--view controls`), in the same floating
+  layer as the terminal pane. It shows the sessions, a chart of the thread's last
+  hour with its totals, and the terminal pane's menu, walked with the same keys.
+  The page only walks the steps: `POST /api/control` with an outcome returns the
+  question `axel_tui::manage::confirm_question` asks, and with `confirmed`
+  carries it out through `manage::act`. It accepts only agents and hosts the menu
+  offered.
+- **Scrolling.** The page takes the wheel itself. Ladybird eases each 40-pixel
+  step over about 200 ms, a dozen full-pane frames each. The page moves a line
+  per step at once instead, at most one frame per batch of steps.
 
 Nothing on the page animates. Ladybird sends the whole pane again for any
 change, as a frame of several megabytes. A CSS animation kept the conversation
