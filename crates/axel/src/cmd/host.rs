@@ -594,14 +594,25 @@ pub fn adopt(ctx: &Ctx, reached: &Reached, install: bool) -> Result<()> {
     Ok(())
 }
 
-/// Put this axel binary in `~/.local/bin` on `target`.
+/// The release installer.  It checks each download's sha256, and its build
+/// provenance when `gh` is logged in, before installing into `~/.local/bin`.
+const INSTALLER_URL: &str = "https://axel.md/install";
+
+/// Make `~/.local/bin/axel` on `target` an axel that can answer us: this
+/// very binary on a machine of the same platform, else a release build.
 fn place_binary(target: &str) -> Result<()> {
     let here = String::from_utf8(Command::new("uname").arg("-sm").output()?.stdout)?.trim().to_string();
     let there = String::from_utf8(ssh(target, "uname -sm", b"")?)?.trim().to_string();
-    if here != there {
-        bail!("{}", t!("{target} is {there}, this machine is {here}: copying this axel binary won't run there", target = target, there = there, here = here));
-    }
     println!("{}", t!("{target}: {there}, reachable", target = target, there = there));
+    if here == there {
+        copy_binary(target)
+    } else {
+        place_release(target, &here, &there)
+    }
+}
+
+/// Copy this binary to `~/.local/bin/axel` on `target`.
+fn copy_binary(target: &str) -> Result<()> {
     let exe = std::fs::read(std::env::current_exe()?)?;
     ssh(
         target,
@@ -610,6 +621,74 @@ fn place_binary(target: &str) -> Result<()> {
     )?;
     println!("{}", t!("installed axel {version} in ~/.local/bin", version = env!("CARGO_PKG_VERSION")));
     Ok(())
+}
+
+/// On a machine of another platform (Linux from a Mac, say) this binary
+/// can't run.  Use the axel already there if it is our version; otherwise
+/// install the release of our version.  When there is no such release (a
+/// source build) and the machine already has an axel, use that one and say
+/// the versions differ: the requests between versions only add fields.
+fn place_release(target: &str, here: &str, there: &str) -> Result<()> {
+    let ours = env!("CARGO_PKG_VERSION");
+    let before = remote_version(target)?;
+    if before.as_deref() == Some(ours) {
+        println!("{}", t!("{target} already has axel {version}", target = target, version = ours));
+        return Ok(());
+    }
+    let installer = install_release(target, ours);
+    let after = remote_version(target)?;
+    match (after, installer) {
+        (Some(version), _) if version == ours => {
+            println!("{}", t!("installed the axel {version} release in ~/.local/bin", version = ours));
+            Ok(())
+        }
+        (Some(version), installer) => {
+            let why = installer.err().map_or_else(|| t!("the installer put another version there").to_string(), |e| format!("{e:#}"));
+            eprintln!(
+                "{}",
+                t!("{target}: using its axel {theirs}; this machine runs {ours}, which couldn't be installed there ({why})",
+                    target = target, theirs = version, ours = ours, why = why)
+            );
+            Ok(())
+        }
+        (None, installer) => {
+            let why = installer.err().map_or_else(|| t!("the installer left no axel that runs").to_string(), |e| format!("{e:#}"));
+            bail!(
+                "{}",
+                t!("{target} is {there}, this machine is {here}: this binary won't run there, and installing axel {version} failed ({why}). Install axel there (curl -fsSL {url} | sh), then rerun.",
+                    target = target, there = there, here = here, version = ours, why = why, url = INSTALLER_URL)
+            )
+        }
+    }
+}
+
+/// Run the release installer on `target` for `version`.  The script is
+/// fetched whole before `sh` runs it, so a failed download fails here with
+/// curl's error instead of piping nothing into `sh`, which exits 0.  The
+/// caller still asks the installed binary its version afterwards.
+fn install_release(target: &str, version: &str) -> Result<()> {
+    assert!(
+        !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.'),
+        "a crate version is digits and dots: {version}"
+    );
+    println!("{}", t!("{target}: installing the axel {version} release", target = target, version = version));
+    ssh(
+        target,
+        &format!(
+            "installer=$(curl -fsSL {INSTALLER_URL}) && printf '%s\\n' \"$installer\" | AXEL_INSTALL_DIR=\"$HOME/.local/bin\" sh -s -- {version}"
+        ),
+        b"",
+    )?;
+    Ok(())
+}
+
+/// The version `~/.local/bin/axel` on `target` reports, if one is there and
+/// runs.  One of another platform doesn't run, and reads as none.
+fn remote_version(target: &str) -> Result<Option<String>> {
+    let out = ssh(target, "\"$HOME/.local/bin/axel\" --version 2>/dev/null || true", b"")?;
+    let text = String::from_utf8_lossy(&out);
+    let version = text.lines().next().and_then(|l| l.trim().strip_prefix("axel ")).map(str::trim);
+    Ok(version.filter(|v| !v.is_empty()).map(String::from))
 }
 
 fn install_deps(target: &str, missing: &[String]) -> Result<()> {

@@ -1325,12 +1325,24 @@
   zh-Hans: "主机 {host} 没有 ssh 目标"
 "bad reply from {host}: {reply}":
   zh-Hans: "{host} 的回复无效：{reply}"
-"{target} is {there}, this machine is {here}: copying this axel binary won't run there":
-  zh-Hans: "{target} 是 {there}，本机是 {here}：复制过去的 axel 可执行文件无法在那里运行"
 "{target}: {there}, reachable":
   zh-Hans: "{target}：{there}，可以连接"
 "installed axel {version} in ~/.local/bin":
   zh-Hans: "已将 axel {version} 安装到 ~/.local/bin"
+"{target} already has axel {version}":
+  zh-Hans: "{target} 上已有 axel {version}"
+"{target}: installing the axel {version} release":
+  zh-Hans: "{target}：正在安装 axel {version} 发布版"
+"installed the axel {version} release in ~/.local/bin":
+  zh-Hans: "已将 axel {version} 发布版安装到 ~/.local/bin"
+"the installer put another version there":
+  zh-Hans: "安装程序在那里装了另一个版本"
+"the installer left no axel that runs":
+  zh-Hans: "安装程序没有留下能运行的 axel"
+"{target}: using its axel {theirs}; this machine runs {ours}, which couldn't be installed there ({why})":
+  zh-Hans: "{target}：使用它上面的 axel {theirs}；本机运行的是 {ours}，无法安装到那里（{why}）"
+"{target} is {there}, this machine is {here}: this binary won't run there, and installing axel {version} failed ({why}). Install axel there (curl -fsSL {url} | sh), then rerun.":
+  zh-Hans: "{target} 是 {there}，本机是 {here}：这个可执行文件无法在那里运行，安装 axel {version} 也失败了（{why}）。请在那里安装 axel（curl -fsSL {url} | sh），然后重新运行。"
 "copied your skills ({path})":
   zh-Hans: "已复制你的技能（{path}）"
 "unexpected reply to hello":

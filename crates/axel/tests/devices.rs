@@ -277,6 +277,105 @@ fn a_host_of_another_owner_and_we_keep_our_agents_apart() {
     assert_eq!(here.principal(&me).unwrap(), me, "and its claim on our key went nowhere");
 }
 
+/// Make `label` another platform than this machine: its `uname -sm` says so,
+/// so this binary is never copied there.  The name matches no real platform,
+/// so the test means the same on a Mac and on Linux CI.
+fn make_another_platform(w: &World, label: &str) {
+    write_script(&w.machine(label).join("bin").join("uname"), "#!/bin/sh\necho 'FakeOS fake64'\n");
+}
+
+/// An `axel` at `~/.local/bin` on `label` that runs this build, as a release
+/// of the same version installed there would.  With `version`, it reports
+/// that version instead, as an older release would.
+fn axel_there(w: &World, label: &str, version: Option<&str>) -> PathBuf {
+    let path = w.machine(label).join(".local").join("bin").join("axel");
+    write_script(&path, &wrapper_script(version));
+    path
+}
+
+fn wrapper_script(version: Option<&str>) -> String {
+    let real = env!("CARGO_BIN_EXE_axel");
+    match version {
+        None => format!("#!/bin/sh\nexec '{real}' \"$@\"\n"),
+        Some(v) => format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'axel {v}'; exit 0; }}\nexec '{real}' \"$@\"\n"),
+    }
+}
+
+/// A stand-in `curl` on `label` that serves an installer.  The installer
+/// checks it was asked for this build's version and installs a wrapper that
+/// runs this build into `$AXEL_INSTALL_DIR`.
+fn installer_there(w: &World, label: &str) {
+    let installer = format!(
+        "[ \"$1\" = '{version}' ] || {{ echo \"asked for $1\" >&2; exit 1; }}\nmkdir -p \"$AXEL_INSTALL_DIR\"\ncat > \"$AXEL_INSTALL_DIR/axel\" <<'WRAPPER'\n{wrapper}WRAPPER\nchmod +x \"$AXEL_INSTALL_DIR/axel\"\n",
+        version = env!("CARGO_PKG_VERSION"),
+        wrapper = wrapper_script(None),
+    );
+    std::fs::create_dir_all(w.machine(label)).unwrap();
+    std::fs::write(w.machine(label).join("installer.sh"), installer).unwrap();
+    write_script(&w.machine(label).join("bin").join("curl"), "#!/bin/sh\ncat \"$HOME/installer.sh\"\n");
+}
+
+/// A stand-in `curl` on `label` that can't reach the network.
+fn offline_there(w: &World, label: &str) {
+    write_script(&w.machine(label).join("bin").join("curl"), "#!/bin/sh\necho 'curl: (6) Could not resolve host: axel.md' >&2\nexit 6\n");
+}
+
+fn write_script(path: &Path, body: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_machine_of_another_platform_keeps_the_axel_of_our_version_it_has() {
+    let w = World::new();
+    make_another_platform(&w, "linux");
+    let installed = axel_there(&w, "linux", None);
+    let before = std::fs::read_to_string(&installed).unwrap();
+    // Linking needs no network: the axel there already is our version.
+    offline_there(&w, "linux");
+    let linked = w.ok_here(&["device", "link", "linux"]);
+    assert!(linked.contains("linux is linked (ssh)"), "{linked}");
+    assert_eq!(std::fs::read_to_string(&installed).unwrap(), before, "our binary wasn't copied over it");
+}
+
+#[test]
+fn a_machine_of_another_platform_gets_the_release_of_our_version() {
+    let w = World::new();
+    make_another_platform(&w, "linux");
+    installer_there(&w, "linux");
+    let added = w.ok_here(&["host", "add", "linux"]);
+    assert!(added.contains("installed the axel") && added.contains("release"), "{added}");
+    let installed = std::fs::read_to_string(w.machine("linux").join(".local").join("bin").join("axel")).unwrap();
+    assert_eq!(installed, wrapper_script(None), "the installer's axel, not a copy of ours");
+    assert!(w.store_here().host("linux").unwrap().is_some());
+}
+
+#[test]
+fn a_machine_of_another_platform_with_no_axel_and_no_release_is_refused() {
+    let w = World::new();
+    make_another_platform(&w, "linux");
+    offline_there(&w, "linux");
+    let refused = w.here(&["host", "add", "linux"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("Could not resolve host") && stderr.contains("Install axel there"), "{stderr}");
+    assert!(w.store_here().host("linux").unwrap().is_none());
+}
+
+#[test]
+fn a_machine_of_another_platform_keeps_its_older_axel_when_ours_cant_be_installed() {
+    let w = World::new();
+    make_another_platform(&w, "linux");
+    offline_there(&w, "linux");
+    axel_there(&w, "linux", Some("0.0.1"));
+    let added = w.here(&["host", "add", "linux"]);
+    let stderr = String::from_utf8_lossy(&added.stderr);
+    assert!(added.status.success(), "{stderr}");
+    assert!(stderr.contains("using its axel 0.0.1"), "{stderr}");
+    assert!(w.store_here().host("linux").unwrap().is_some());
+}
+
 fn chrono_now() -> i64 {
     i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()).unwrap()
 }

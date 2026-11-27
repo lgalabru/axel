@@ -368,9 +368,14 @@ another agent onto the selected thread; `x` ends a session.
 
 A **host** is another machine with Axel that runs agents for this one (the Mac mini at
 home, say), so you can ask, close the laptop, and find the results when you're back.
-`axel host add mini [--install]` copies this binary over SSH, installs what's missing
-(Node, Claude Code, the ACP adapter), and records the host with its **host key** (its
-Axel owner key). Claude Code must be logged in once on the host, from a pane of its own
+`axel host add mini [--install]` puts Axel in `~/.local/bin` there over SSH, installs
+what's missing (Node, Claude Code, the ACP adapter), and records the host with its
+**host key** (its Axel owner key). On a host of the same platform (`uname -sm`) it copies
+this binary. On another platform, Linux from a Mac say, it keeps an `axel` of our version
+already there, or else runs the release installer (`https://axel.md/install`) for our
+version. When there is no such release, as for a source build, an `axel` already there is
+used with a warning that the versions differ; with none, `host add` stops and says how to
+install one. Claude Code must be logged in once on the host, from a pane of its own
 Rex (`rex -S mini run -- claude`): the keychain isn't reachable from SSH.
 
 **Asking.** `@atlas@mini …` in the composer, `axel send`, or the MCP `send` tool
