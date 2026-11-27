@@ -1708,8 +1708,6 @@
   zh-Hans: "已排队：当前轮次结束后发送"
 "sent into the running turn: read at its next step":
   zh-Hans: "已发送到当前轮次：会在下一步读取"
-"starting {program}":
-  zh-Hans: "启动 {program}"
 "Ladybird couldn't draw here ({status})":
   zh-Hans: "Ladybird 无法在这里绘制（{status}）"
 "Ladybird isn't installed":
