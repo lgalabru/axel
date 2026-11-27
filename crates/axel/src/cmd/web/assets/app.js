@@ -400,64 +400,122 @@ function setupComposer() {
 
 // ---------------------------------------------------------------- activity
 
-// A dot matrix, as the terminal view's braille sparks are, drawn crisp:
-// `values` in `COLUMNS` columns of `ROWS` dots, lit from the bottom.
-const SPARK_COLUMNS = 20;
-const SPARK_ROWS = 4;
-const DOT = 5;
-function sparkDots(values) {
-  const per = Math.max(1, Math.ceil((values || []).length / SPARK_COLUMNS));
-  const columns = [];
-  for (let c = 0; c < SPARK_COLUMNS; c++) columns.push((values || []).slice(c * per, (c + 1) * per).reduce((x, y) => x + y, 0));
-  const max = Math.max(...columns);
-  let dots = "";
-  columns.forEach((v, c) => {
-    const lit = max > 0 && v > 0 ? Math.max(1, Math.round((v / max) * SPARK_ROWS)) : 0;
-    for (let r = 0; r < SPARK_ROWS; r++) {
-      dots += `<circle cx="${c * DOT + 2.5}" cy="${(SPARK_ROWS - 1 - r) * DOT + 2.5}" r="1.6"${r < lit ? ' class="on"' : ""}/>`;
-    }
-  });
-  return `<svg class="dots spark" viewBox="0 0 ${SPARK_COLUMNS * DOT} ${SPARK_ROWS * DOT}">${dots}</svg>`;
+// Charts in braille geometry, as the terminal view draws them, but with what
+// a page has and a terminal doesn't: as many dots as the pane fits, a top
+// dot lit in part for the exact value, and a gradient.  A braille cell is
+// two dots across and four down; one cell is 0.6em by a line.
+const DOT_X_EM = 0.3;
+const DOT_Y_EM = 1.55 / 4;
+const DOT_R = 0.32;
+// The most dot columns and rows a chart draws: a very wide pane, bounded.
+const DOTS_ACROSS_MAX = 400;
+const DOTS_DOWN_MAX = 24;
+let gradients = 0;
+
+// `values` (oldest first) resampled at `n` points, linearly.
+function resample(values, n) {
+  if (!values.length) return new Array(n).fill(0);
+  if (values.length === 1) return new Array(n).fill(values[0]);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const at = (i / Math.max(1, n - 1)) * (values.length - 1);
+    const lo = Math.floor(at), hi = Math.min(values.length - 1, lo + 1);
+    out.push(values[lo] + (values[hi] - values[lo]) * (at - lo));
+  }
+  return out;
 }
 
-// A meter of ten dots: `fraction` lit, yellow past 80%, red past 95%.
-function meterDots(fraction) {
-  const lit = Math.round(Math.max(0, Math.min(1, fraction)) * 10);
-  const hot = fraction > 0.95 ? "full" : fraction > 0.8 ? "hot" : "on";
+// The dot grid that fits `el`, in dots and in pixels between dots.
+function grid(el) {
+  const em = parseFloat(getComputedStyle(el).fontSize) || 13;
+  const pitchX = DOT_X_EM * em, pitchY = DOT_Y_EM * em;
+  const across = Math.min(DOTS_ACROSS_MAX, Math.max(2, Math.floor(el.clientWidth / pitchX)));
+  const down = Math.min(DOTS_DOWN_MAX, Math.max(2, Math.floor(el.clientHeight / pitchY)));
+  return { across, down, pitchX, pitchY, r: DOT_R * em * DOT_X_EM * 1.6 };
+}
+
+// A chart of `values` filling `el`: each column lit from the bottom to its
+// value, the top dot in part; quiet columns keep a faint baseline (⣀).
+function brailleChart(el, values) {
+  const g = grid(el);
+  const series = resample(values || [], g.across);
+  const max = Math.max(...series, 0);
+  const id = `g${gradients++}`;
+  const width = g.across * g.pitchX, height = g.down * g.pitchY;
   let dots = "";
-  for (let i = 0; i < 10; i++) dots += `<circle cx="${i * DOT + 2.5}" cy="2.5" r="1.8"${i < lit ? ` class="${hot}"` : ""}/>`;
-  return `<svg class="dots meter" viewBox="0 0 ${10 * DOT} ${DOT}">${dots}</svg>`;
+  series.forEach((v, c) => {
+    const x = (c + 0.5) * g.pitchX;
+    const level = max > 0 ? (v / max) * g.down : 0;
+    if (level < 0.05) {
+      dots += `<circle class="off" cx="${x.toFixed(1)}" cy="${(height - g.pitchY / 2).toFixed(1)}" r="${g.r.toFixed(2)}"/>`;
+      return;
+    }
+    for (let r = 0; r < Math.ceil(level); r++) {
+      const part = Math.min(1, level - r);
+      const opacity = part < 1 ? ` fill-opacity="${Math.max(0.2, part).toFixed(2)}"` : "";
+      dots += `<circle cx="${x.toFixed(1)}" cy="${(height - (r + 0.5) * g.pitchY).toFixed(1)}" r="${g.r.toFixed(2)}" fill="url(#${id})"${opacity}/>`;
+    }
+  });
+  el.innerHTML = `<svg class="braille" viewBox="0 0 ${width.toFixed(1)} ${height.toFixed(1)}" preserveAspectRatio="xMinYMax meet">
+    <defs><linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="${height.toFixed(1)}" x2="0" y2="0"><stop offset="0" class="lo"/><stop offset="1" class="hi"/></linearGradient></defs>${dots}</svg>`;
+}
+
+// A gauge two dots high filling `el`, lit to `fraction`, its colour running
+// green to yellow to red along it so a full one reads as full at a glance.
+function brailleGauge(el, fraction) {
+  const g = grid(el);
+  const id = `g${gradients++}`;
+  const width = g.across * g.pitchX, height = 2 * g.pitchY;
+  const lit = Math.max(0, Math.min(1, fraction)) * g.across;
+  let dots = "";
+  for (let c = 0; c < g.across; c++) {
+    const on = c < lit;
+    const part = Math.min(1, lit - c);
+    for (let r = 0; r < 2; r++) {
+      const fill = on ? ` fill="url(#${id})"${part < 1 ? ` fill-opacity="${Math.max(0.25, part).toFixed(2)}"` : ""}` : ' class="off"';
+      dots += `<circle cx="${((c + 0.5) * g.pitchX).toFixed(1)}" cy="${((r + 0.5) * g.pitchY).toFixed(1)}" r="${g.r.toFixed(2)}"${fill}/>`;
+    }
+  }
+  el.innerHTML = `<svg class="braille" viewBox="0 0 ${width.toFixed(1)} ${height.toFixed(1)}" preserveAspectRatio="xMinYMid meet">
+    <defs><linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${width.toFixed(1)}" y2="0"><stop offset="0" class="ok"/><stop offset=".75" class="warn"/><stop offset="1" class="bad"/></linearGradient></defs>${dots}</svg>`;
 }
 
 const pct = (fraction) => `${Math.round(fraction * 100)}%`;
 const heat = (fraction) => (fraction > 0.95 ? "full" : fraction > 0.8 ? "hot" : "");
+const STATE_MARK = { working: "⠿ working", blocked: "! needs you", error: "✗ error" };
 
 function renderActivity() {
   const u = thread.usage;
   const states = new Map(thread.agents.map((a) => [a.name, a.state]));
   const byName = new Map(u.agents.map((a) => [a.name, a]));
   const names = [...new Set([...thread.agents.map((a) => a.name), ...u.agents.map((a) => a.name)])];
+  const charts = [];
   const rows = names.map((name) => {
-    const spend = byName.get(name) || { total: { tokens: 0, cost_usd: 0 }, spark: [] };
+    const spend = byName.get(name) || { total: { tokens: 0, cost_usd: 0 }, last_hour: { tokens: 0 }, spark: [] };
     const known = thread.agents.find((a) => a.name === name) || spend;
     const state = states.get(name) || "idle";
-    const mark = state === "working" ? spinner() : state === "blocked" ? "!" : state === "error" ? "✗" : "";
-    const ctx = spend.context;
-    const context = ctx && ctx.size ? `<span class="context">${meterDots(ctx.used / ctx.size)}<span class="${heat(ctx.used / ctx.size)}">${pct(ctx.used / ctx.size)}</span></span>` : "<span></span>";
-    return `<div class="agent ${cc(known)}">
-      <span class="name"><span class="fg">${esc(name)}</span> <span class="state ${esc(state)}">${mark}</span></span>
-      ${context}<span class="n tokens">${compact(spend.total.tokens)}</span><span class="n cost">${money(spend.total.cost_usd)}</span>
-      ${sparkDots(spend.spark)}</div>`;
+    const ctx = spend.context && spend.context.size ? spend.context.used / spend.context.size : null;
+    charts.push({ values: spend.spark, ctx });
+    const hourly = spend.last_hour && spend.last_hour.tokens;
+    const hour = `<span class="${hourly ? "axis" : "quiet"}">${hourly ? `${compact(hourly)}/h` : "quiet"}</span>`;
+    const context = ctx === null ? "" : `<span class="ctx"><span class="gauge"></span><span class="${heat(ctx)}">${pct(ctx)}</span></span>`;
+    return `<div class="agent ${cc(known)}"><div class="chart"></div>
+      <div class="over top"><span class="name">${esc(name)}</span><span class="state ${esc(state)}">${STATE_MARK[state] || ""}</span>${context}<span class="grow"></span>${hour}<span class="tokens">${compact(spend.total.tokens)}</span><span class="cost">${money(spend.total.cost_usd)}</span></div></div>`;
   });
   const limits = u.limits.flatMap((p) => p.windows.filter((w) => w.used_pct !== null).map((w) => {
-    const f = w.used_pct / 100;
     const label = { five_hour: "5h", week: "wk", month: "mo" }[w.window] || esc(w.window);
-    return `<span class="limit">${label} ${meterDots(f)}<span class="${heat(f)}">${Math.round(w.used_pct)}%</span></span>`;
-  })).join("");
-  $("activity-body").innerHTML = `
-    <div class="head-row"><span></span><span>ctx</span><span>tok</span><span>~$</span><span>1h</span></div>
-    ${rows.join("") || '<div class="dim">no agent yet</div>'}
-    ${limits ? `<div class="plan">${limits}</div>` : ""}`;
+    return { label, fraction: w.used_pct / 100 };
+  }));
+  $("activity-body").innerHTML = `${rows.join("") || '<div class="quiet">no agent yet</div>'}
+    ${limits.length ? `<div class="plan">${limits.map((l) => `<div class="bar-row"><span class="what">${l.label}</span><span class="gauge"></span><span class="pct ${heat(l.fraction)}">${pct(l.fraction)}</span></div>`).join("")}</div>` : ""}`;
+  // The charts are drawn once their boxes have a size: as many dots as fit.
+  gradients = 0;
+  document.querySelectorAll("#activity .agent").forEach((el, i) => {
+    brailleChart(el.querySelector(".chart"), charts[i].values);
+    const gauge = el.querySelector(".ctx .gauge");
+    if (gauge) brailleGauge(gauge, charts[i].ctx);
+  });
+  document.querySelectorAll("#activity .plan .gauge").forEach((el, i) => brailleGauge(el, limits[i].fraction));
 }
 
 // ---------------------------------------------------------------- talk to the server
@@ -485,6 +543,8 @@ function report(e) {
 }
 
 if (VIEW === "messages") setupMessages();
+// The charts fit their boxes: drawn again when the pane changes size.
+if (VIEW === "activity") window.addEventListener("resize", () => thread && renderActivity());
 if (VIEW === "composer") setupComposer();
 load().catch(report).finally(() => {
   const events = new EventSource("/api/events");
